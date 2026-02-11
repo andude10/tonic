@@ -1,0 +1,13 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+
+webview-frontend/node_modules
+webview-frontend/build
+webview-frontend/.svelte-kit
+webview-frontend/package
+webview-frontend/vite.config.js.timestamp-*
+
+tauri-backend/target/
+tauri-backend/gen/schemas
