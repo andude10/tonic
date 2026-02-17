@@ -1,10 +1,21 @@
-use crate::sheet::{CellValue, Function};
+use crate::sheet::{Formula, UserFunction};
 
-// parser parses two kind of languages:
-// 1. Actual formula language that user writes
-// 2. formula's IR, which is used when saving sheet to file
-// 3. function's IR, which is used when saving functions to functions.csv
+pub fn parse_formula_textual_representation(text: &str) -> Formula {
+    // This function is not implemented. The new file format uses serde + RON
+    // and does not require a manual IR parser.
+    // This stub remains for parsing the user-facing formula language in the future.
+    unimplemented!(
+        "Formula parsing from textual IR is obsolete. Text: {}",
+        text
+    )
+}
 
-pub fn parse_formula_textual_representation(text: &str) -> Formula {}
-
-pub fn parse_function_textual_representation(text: &str) -> Function {}
+pub fn parse_function_textual_representation(text: &str) -> UserFunction {
+    // This function is not implemented. The new file format uses serde + RON
+    // and does not require a manual IR parser.
+    // This stub remains for parsing the user-facing formula language in the future.
+    unimplemented!(
+        "UserFunction parsing from textual IR is obsolete. Text: {}",
+        text
+    )
+}

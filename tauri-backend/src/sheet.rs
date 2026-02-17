@@ -1,4 +1,4 @@
-use core::fmt;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
 // #[macro_export]
@@ -73,159 +73,28 @@ use std::collections::{BTreeMap, HashMap};
 
 pub type SheetId = u32;
 
-#[derive(Eq, PartialEq, Hash)]
+#[derive(Serialize, Deserialize, Eq, PartialEq, Hash, Clone, Debug)]
 pub enum OptSheetId {
     Id(SheetId),
     None,
 }
 
 pub type UserFuncId = u32;
-
-impl fmt::Display for NameRef {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.sheet_id {
-            OptSheetId::Id(id) => write!(f, "{}.{}", id, self.name),
-            OptSheetId::None => write!(f, "{}", self.name),
-        }
-    }
-}
-
-impl fmt::Display for CellId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{},{}", self.col, self.row)
-    }
-}
-
-// todo: use Display for display user-facing strings (like A5 instead of 0,5)?
-
-impl fmt::Display for Formula {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Formula::SingleValue(expr_value) => write!(f, "{}", expr_value),
-            Formula::Expression(exprs) => {
-                for expr in exprs {
-                    write!(f, "{}", expr)?;
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
-impl fmt::Display for ExprValue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ExprValue::Number(num) => write!(f, "num/{}", num),
-            ExprValue::Text(text) => write!(f, "text/{}", text),
-            ExprValue::Function(func_id) => {
-                write!(f, "{}", func_id)
-            }
-            ExprValue::CellRef(opt_sheet_id, cell_id) => match opt_sheet_id {
-                OptSheetId::Id(id) => write!(f, "{}.{}", id, cell_id),
-                OptSheetId::None => write!(f, "{}", cell_id),
-            },
-            ExprValue::RelativeCellRef(opt_sheet_id, cell_id) => match opt_sheet_id {
-                OptSheetId::Id(id) => write!(f, "{}.~{}", id, cell_id),
-                OptSheetId::None => write!(f, "~{}", cell_id),
-            },
-            ExprValue::CellRange(opt_sheet_id, cell_range) => match opt_sheet_id {
-                OptSheetId::Id(id) => write!(f, "{}.{}:{}", id, cell_range.start, cell_range.end),
-                OptSheetId::None => write!(f, "{}:{}", cell_range.start, cell_range.end),
-            },
-            ExprValue::RelativeCellRange(opt_sheet_id, cell_range) => match opt_sheet_id {
-                OptSheetId::Id(id) => write!(f, "{}.~{}:{}", id, cell_range.start, cell_range.end),
-                OptSheetId::None => write!(f, "~{}:{}", cell_range.start, cell_range.end),
-            },
-        }
-    }
-}
-
-impl fmt::Display for Expr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Expr::Literal(a) => write!(f, "{}", a),
-            Expr::Add(a, b) => write!(f, "{}+{}", a, b),
-            Expr::Subtract(a, b) => write!(f, "{}-{}", a, b),
-            Expr::Multiply(a, b) => write!(f, "{}*{}", a, b),
-            Expr::Divide(a, b) => write!(f, "{}/{}", a, b),
-            Expr::FunctionCall(func, exprs) => {
-                write!(f, "{}(", func)?;
-                for (i, expr) in exprs.iter().enumerate() {
-                    write!(f, "{}", expr)?;
-                    if i < exprs.len() - 1 {
-                        write!(f, ", ")?;
-                    }
-                }
-                write!(f, ")")
-            }
-        }
-    }
-}
-
-impl fmt::Display for Func {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Func::Sum => write!(f, "sum"),
-            Func::Avg => write!(f, "avg"),
-            Func::ExprFunction(user_func_id) => write!(f, "func/{}", user_func_id),
-        }
-    }
-}
-
-impl fmt::Display for ExprType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ExprType::Number => write!(f, "num"),
-            ExprType::Text => write!(f, "text"),
-            ExprType::Function => write!(f, "func"),
-            ExprType::CellRef => write!(f, "cell"),
-            ExprType::RelativeCellRef => write!(f, "rel_cell"),
-            ExprType::CellRange => write!(f, "range"),
-            ExprType::RelativeCellRange => write!(f, "rel_range"),
-        }
-    }
-}
-
-impl fmt::Display for UserFunction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "arg_names/")?;
-        for (i, name) in self.args_names.iter().enumerate() {
-            if i > 0 {
-                write!(f, ", ")?;
-            }
-            write!(f, "{}", name)?;
-        }
-        write!(f, "/arg_types/")?;
-        for (i, et) in self.args_types.iter().enumerate() {
-            if i > 0 {
-                write!(f, ", ")?;
-            }
-            write!(f, "{}", et)?;
-        }
-        write!(f, "/return_type/{}/exprs/", self.return_type)?;
-        for (i, e) in self.exprs.iter().enumerate() {
-            if i > 0 {
-                write!(f, ", ")?;
-            }
-            write!(f, "{}", e)?;
-        }
-        Ok(())
-    }
-}
-
 pub type ExprId = u32;
 
-#[derive(Eq, PartialEq, Hash, Ord, PartialOrd, Clone, Copy)]
+#[derive(Serialize, Deserialize, Eq, PartialEq, Hash, Ord, PartialOrd, Clone, Copy, Debug)]
 pub struct CellId {
     pub col: u32,
     pub row: u32,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
 pub struct CellRange {
     pub start: CellId,
     pub end: CellId,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
 pub enum ExprValue {
     Number(f64),
     Text(String),
@@ -236,6 +105,7 @@ pub enum ExprValue {
     RelativeCellRange(OptSheetId, CellRange),
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ExprType {
     Number,
     Text,
@@ -246,6 +116,7 @@ pub enum ExprType {
     RelativeCellRange,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
 pub enum Expr {
     Literal(ExprValue),
     Add(ExprId, ExprId),
@@ -258,18 +129,21 @@ pub enum Expr {
 // formula is either single value or expression
 // if single value: size is fixed (unless string or smth like that),
 // if expression: size is dynamic
+#[derive(Serialize, Deserialize, Debug)]
 pub enum Formula {
     SingleValue(ExprValue),
     Expression(Vec<Expr>),
 }
 
-enum Func {
+#[derive(Serialize, Deserialize, Debug)]
+pub enum Func {
     Sum,
     Avg,
     ExprFunction(UserFuncId),
     // todo JsFunction(UserFuncId),
 }
 
+#[derive(Serialize, Deserialize, Debug)]
 pub struct UserFunction {
     pub args_names: Vec<String>,
     pub args_types: Vec<ExprType>,
@@ -278,8 +152,8 @@ pub struct UserFunction {
     // todo pub js_callback
 }
 
-impl UserFunction {
-    pub fn new() -> Self {
+impl Default for UserFunction {
+    fn default() -> Self {
         Self {
             args_names: Vec::new(),
             args_types: Vec::new(),
@@ -289,7 +163,7 @@ impl UserFunction {
     }
 }
 
-#[derive(Eq, PartialEq, Hash)]
+#[derive(Serialize, Deserialize, Eq, PartialEq, Hash, Clone, Debug)]
 pub struct NameRef {
     pub sheet_id: OptSheetId,
     pub name: String,
@@ -305,6 +179,7 @@ pub struct NameRef {
 // todo: covert hashmaps with u32 as key to regular Vec
 //
 
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Spreadsheet {
     pub sheets: Vec<BTreeMap<CellId, Formula>>,
 
