@@ -7,12 +7,12 @@
     import Sheet from "$lib/Sheet.svelte";
     import DevBottomPanel from "$lib/DevBottomPanel.svelte";
     import { timeRenders } from "$lib/devBottomPanelApi.svelte";
+    import { attachConsole } from "@tauri-apps/plugin-log";
 
-    let focusedCell:
-        | { row: string | number; column: string | number }
-        | undefined = $state();
+    let focusedCell: { row: number; column: string } | undefined = $state();
     let cellEditorValue = $state("");
 
+    attachConsole();
     timeRenders();
 </script>
 

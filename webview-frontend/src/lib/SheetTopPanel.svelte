@@ -5,7 +5,7 @@
         focusedCell = $bindable(),
         cellEditorValue = $bindable(""),
     }: {
-        focusedCell?: { row: string | number; column: string | number };
+        focusedCell?: { row: number; column: string };
         cellEditorValue?: string;
     } = $props();
 </script>

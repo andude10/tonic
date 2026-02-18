@@ -1,5 +1,6 @@
 import type { IMenuOption } from "@svar-ui/svelte-menu";
 import type { IColumnConfig } from "@svar-ui/svelte-grid";
+import CellEditor from "$lib/CellEditor.svelte";
 
 export const menu_options: IMenuOption[] = [
     {
@@ -48,7 +49,7 @@ export const baseColumns: IColumnConfig[] = (() => {
         columns.push({
             id,
             header: id,
-            editor: "text",
+            cell: CellEditor,
             width: 100,
             resize: true,
         });
@@ -57,7 +58,7 @@ export const baseColumns: IColumnConfig[] = (() => {
 })();
 
 export const baseRows = Array.from({ length: 1000 }, (_, i) => {
-    const row: any = { rowNumber: i + 1 };
+    const row: any = { id: i + 1, rowNumber: i + 1 };
     for (let j = 0; j < 26; j++) {
         row[String.fromCharCode(65 + j)] = "";
     }

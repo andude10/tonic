@@ -96,6 +96,7 @@ pub struct CellRange {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ExprValue {
+    Boolean(bool),
     Number(f64),
     Text(String),
     Function(UserFuncId),
@@ -107,6 +108,7 @@ pub enum ExprValue {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ExprType {
+    Boolean,
     Number,
     Text,
     Function,
@@ -123,24 +125,22 @@ pub enum Expr {
     Subtract(ExprId, ExprId),
     Multiply(ExprId, ExprId),
     Divide(ExprId, ExprId),
-    FunctionCall(Func, Vec<Expr>),
+
+    // default formulas
+    Sum(ExprId),
+    Avg(ExprId),
+
+    ExtrnalFunctionCall {
+        func_id: UserFuncId,
+        args: Vec<ExprId>,
+    },
 }
 
-// formula is either single value or expression
-// if single value: size is fixed (unless string or smth like that),
-// if expression: size is dynamic
 #[derive(Serialize, Deserialize, Debug)]
-pub enum Formula {
-    SingleValue(ExprValue),
-    Expression(Vec<Expr>),
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub enum Func {
-    Sum,
-    Avg,
-    ExprFunction(UserFuncId),
-    // todo JsFunction(UserFuncId),
+pub enum CellValue {
+    Number(f64),
+    Text(String),
+    Formula(Vec<Expr>),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -181,7 +181,7 @@ pub struct NameRef {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Spreadsheet {
-    pub sheets: Vec<BTreeMap<CellId, Formula>>,
+    pub sheets: Vec<BTreeMap<CellId, CellValue>>,
 
     pub sheet_names: HashMap<String, SheetId>,
     pub sheet_names_lookup: HashMap<SheetId, String>,
@@ -194,6 +194,22 @@ pub struct Spreadsheet {
     pub user_functions_names_lookup: HashMap<UserFuncId, NameRef>,
 
     pub formulas_raw_text: HashMap<CellId, String>,
+}
+
+impl Spreadsheet {
+    pub fn new() -> Self {
+        Self {
+            sheets: vec![BTreeMap::new()],
+            sheet_names: HashMap::new(),
+            sheet_names_lookup: HashMap::new(),
+            cells_names: HashMap::new(),
+            cells_names_lookup: HashMap::new(),
+            user_functions: Vec::new(),
+            user_functions_names: HashMap::new(),
+            user_functions_names_lookup: HashMap::new(),
+            formulas_raw_text: HashMap::new(),
+        }
+    }
 }
 
 // pub fn number_to_letter(n: u32) -> char {
