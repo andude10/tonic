@@ -1,6 +1,7 @@
 <script lang="ts">
     import { getContext, tick } from "svelte";
     import type { IApi } from "@svar-ui/svelte-grid";
+    import FormulaInput from "./FormulaInput.svelte";
 
     let { row, column, api }: { row: any; column: any; api: IApi } = $props();
 
@@ -12,46 +13,42 @@
         return edited?.row === row.id && edited?.column === column.id;
     });
 
-    let inputNode: HTMLInputElement | undefined = $state();
+    let wrapper: HTMLDivElement | undefined = $state();
 
     $effect(() => {
         if (isEditing) {
-            tick().then(() => inputNode?.focus());
+            tick().then(() => {
+                const input =
+                    wrapper?.querySelector<HTMLInputElement>(".editor");
+                input?.focus();
+            });
         }
     });
 
-    function handleInput() {
-        if (inputNode) {
-            api.exec("update-cell", {
-                id: row.id,
-                column: column.id,
-                value: inputNode.value,
-            });
-        }
+    function handleChange(value: string) {
+        api.exec("update-cell", {
+            id: row.id,
+            column: column.id,
+            value,
+        });
     }
 </script>
 
 {#if isEditing}
-    <input
-        class="wx-text"
-        oninput={handleInput}
-        bind:this={inputNode}
-        type="text"
-        value={row[column.id] ?? ""}
-    />
+    <div bind:this={wrapper} class="cell-editor-wrap">
+        <FormulaInput
+            value={row[column.id] ?? ""}
+            onchange={handleChange}
+            class="cell-editor"
+        />
+    </div>
 {:else}
     {row[column.id] ?? ""}
 {/if}
 
 <style>
-    :global(.wx-text) {
-        box-sizing: border-box;
-        border: none;
-        outline: none;
-        padding: 0;
-        margin: 0;
-        font: inherit;
-        background: transparent;
-        color: inherit;
+    .cell-editor-wrap {
+        width: 100%;
+        height: 100%;
     }
 </style>

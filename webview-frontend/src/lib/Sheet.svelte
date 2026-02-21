@@ -26,12 +26,16 @@
     computeFormulaChannel.onmessage = (message: ComputeFormulaEvent) => {
         endTimer("enter_input");
         if ("displayString" in message) {
-            console.log(
-                `received compute formula event ${message.cellId.row}:${message.cellId.col} = ${message.displayString}`,
-            );
+            const column = String.fromCharCode(65 + message.cellId.col);
+            const row = message.cellId.row + 1;
+            gridApi?.exec("update-cell", {
+                id: row,
+                column,
+                value: message.displayString,
+            });
         } else if ("error" in message) {
             console.error(
-                `received compute formula error for ${message.cellId.row}:${message.cellId.col}: ${message.error}`,
+                `formula error ${message.cellId.row}:${message.cellId.col}: ${message.error}`,
             );
         }
     };
@@ -104,7 +108,7 @@
         invoke("enter_input", {
             cellId: { row: focusedCell.row, col: colIndex },
             userInput: value,
-            computeFromulaChannel: computeFormulaChannel,
+            computeFormulaChannel: computeFormulaChannel,
         });
     });
 
@@ -238,11 +242,11 @@
 
     function handleMouseDown(ev: MouseEvent) {
         // allow clicking inside the cell editor input without closing it
-        if (isEditing) {
-            const target = ev.target as HTMLElement;
-            if (target.closest("input.wx-text")) return;
-            closeEditor();
-        }
+        // if (isEditing) {
+        //     const target = ev.target as HTMLElement;
+        //     if (target.closest("formula-input")) return;
+        //     closeEditor();
+        // }
         // start a new selection from the hovered cell
         isSelecting = true;
         if (hoveredCell) {
@@ -565,5 +569,17 @@
 
     :global(.wx-cell:focus) {
         outline: 0px !important;
+    }
+
+    :global(.cell-editor) {
+        width: 100%;
+        box-sizing: border-box;
+        border: none;
+        outline: none;
+        padding: 0;
+        margin: 0;
+        font: inherit;
+        background: transparent;
+        color: inherit;
     }
 </style>

@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { TextArea } from "@svar-ui/svelte-core";
+    import FormulaInput from "./FormulaInput.svelte";
 
     let {
         focusedCell = $bindable(),
@@ -25,24 +25,19 @@
         <div class="separator"></div>
 
         <div class="content-group">
-            <div class="formula-label">ƒx</div>
-            <TextArea
+            <div class="formula-label">ƒ(x)</div>
+            <FormulaInput
                 value={cellEditorValue}
                 disabled={!focusedCell}
-                onchange={(ev) => (cellEditorValue = ev.value)}
+                onchange={(v) => (cellEditorValue = v)}
+                multiline
+                class="top-panel-editor"
             />
         </div>
     </div>
 </div>
 
 <style>
-    @font-face {
-        font-family: "JetBrains Mono";
-        src: url("../assets/JetBrainsMono-Regular.ttf") format("truetype");
-        font-weight: 400;
-        font-style: normal;
-    }
-
     .panel {
         display: flex;
         align-items: center;
@@ -114,20 +109,21 @@
         align-items: center;
     }
 
-    .content-group :global(.wx-textarea) {
-        resize: none;
+    .content-group :global(.top-panel-editor) {
         flex: 1;
         width: 0;
-        min-height: 0;
         height: 26px;
-        padding: 3px 10px;
-        font-family: "JetBrains Mono", monospace;
-        font-size: 13px;
+        background: var(--wx-input-background, #2a2b2d);
+        border: var(--wx-input-border, 1px solid #384047);
+        border-radius: var(--wx-input-border-radius, 3px);
+        overflow: hidden;
     }
 
-    .content-group :global(.wx-textarea[disabled]) {
-        background: color-mix(in srgb, var(--wx-input-background), black 10%);
-        color: var(--wx-color-font-alt, #9fa1ae);
-        cursor: default;
+    .content-group :global(.top-panel-editor .editor) {
+        padding: 3px 10px;
+    }
+
+    .content-group :global(.top-panel-editor .backdrop) {
+        padding: 3px 10px;
     }
 </style>

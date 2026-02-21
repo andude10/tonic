@@ -1,5 +1,9 @@
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt,
+};
+
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
 
 // #[macro_export]
 // macro_rules! display_cell {
@@ -73,12 +77,6 @@ use std::collections::{BTreeMap, HashMap};
 
 pub type SheetId = u32;
 
-#[derive(Serialize, Deserialize, Eq, PartialEq, Hash, Clone, Debug)]
-pub enum OptSheetId {
-    Id(SheetId),
-    None,
-}
-
 pub type UserFuncId = u32;
 pub type ExprId = u32;
 
@@ -88,26 +86,26 @@ pub struct CellId {
     pub row: u32,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct CellRange {
     pub start: CellId,
     pub end: CellId,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub enum ExprValue {
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum ExprAtom {
     Boolean(bool),
     Number(f64),
     Text(String),
     Function(UserFuncId),
-    CellRef(OptSheetId, CellId),
-    RelativeCellRef(OptSheetId, CellId),
-    CellRange(OptSheetId, CellRange),
-    RelativeCellRange(OptSheetId, CellRange),
+    CellRef(SheetId, CellId),
+    RelativeCellRef(SheetId, CellId),
+    CellRange(SheetId, CellRange),
+    RelativeCellRange(SheetId, CellRange),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum ExprType {
+pub enum AtomType {
     Boolean,
     Number,
     Text,
@@ -118,17 +116,27 @@ pub enum ExprType {
     RelativeCellRange,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+// todo: figure out correct types (u64, f64, etc) for number to sum correctly.
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum Expr {
-    Literal(ExprValue),
+    Atom(ExprAtom),
+    Negate(ExprId),
     Add(ExprId, ExprId),
     Subtract(ExprId, ExprId),
     Multiply(ExprId, ExprId),
     Divide(ExprId, ExprId),
 
     // default formulas
-    Sum(ExprId),
-    Avg(ExprId),
+    Sum {
+        range_id: ExprId,
+        sum: f64,
+    },
+    Avg {
+        range_id: ExprId,
+        count: u64,
+        sum: f64,
+    },
 
     ExtrnalFunctionCall {
         func_id: UserFuncId,
@@ -136,18 +144,41 @@ pub enum Expr {
     },
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum CellValue {
     Number(f64),
     Text(String),
-    Formula(Vec<Expr>),
+}
+
+impl CellValue {
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            CellValue::Text(s) => Some(s),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for CellValue {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            CellValue::Number(num) => write!(f, "{}", num),
+            CellValue::Text(text) => write!(f, "{}", text),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum Cell {
+    SingleValue(CellValue),
+    Formula { expr: Vec<Expr>, value: CellValue },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct UserFunction {
     pub args_names: Vec<String>,
-    pub args_types: Vec<ExprType>,
-    pub return_type: ExprType,
+    pub args_types: Vec<AtomType>,
+    pub return_type: AtomType,
     pub exprs: Vec<Expr>,
     // todo pub js_callback
 }
@@ -157,7 +188,7 @@ impl Default for UserFunction {
         Self {
             args_names: Vec::new(),
             args_types: Vec::new(),
-            return_type: ExprType::Number,
+            return_type: AtomType::Number,
             exprs: Vec::new(),
         }
     }
@@ -165,11 +196,19 @@ impl Default for UserFunction {
 
 #[derive(Serialize, Deserialize, Eq, PartialEq, Hash, Clone, Debug)]
 pub struct NameRef {
-    pub sheet_id: OptSheetId,
+    pub sheet_id: SheetId,
     pub name: String,
 }
 
-// todo: NameRef != CellId, because CellId does not have sheet index
+impl fmt::Display for NameRef {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if self.sheet_id == 0 {
+            write!(f, "{}", self.name)
+        } else {
+            write!(f, "{}.{}", self.sheet_id, self.name)
+        }
+    }
+}
 
 //
 // todo: engine uses IDs (CellId, SheetId, UserFuncId) when it needs to find cell,
@@ -181,32 +220,39 @@ pub struct NameRef {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Spreadsheet {
-    pub sheets: Vec<BTreeMap<CellId, CellValue>>,
+    pub sheets: Vec<BTreeMap<CellId, Cell>>,
 
     pub sheet_names: HashMap<String, SheetId>,
     pub sheet_names_lookup: HashMap<SheetId, String>,
 
-    pub cells_names: HashMap<NameRef, CellId>,
-    pub cells_names_lookup: HashMap<CellId, NameRef>,
+    pub cell_names: HashMap<NameRef, CellId>,
+    pub cell_names_lookup: HashMap<CellId, NameRef>,
 
     pub user_functions: Vec<UserFunction>,
-    pub user_functions_names: HashMap<NameRef, UserFuncId>,
-    pub user_functions_names_lookup: HashMap<UserFuncId, NameRef>,
+    pub user_function_names: HashMap<NameRef, UserFuncId>,
+    pub user_function_names_lookup: HashMap<UserFuncId, NameRef>,
 
     pub formulas_raw_text: HashMap<CellId, String>,
 }
 
 impl Spreadsheet {
+    pub fn get_cell_value(&self, cell_id: &CellId, sheet_id: SheetId) -> Option<&CellValue> {
+        match self.sheets.get(sheet_id as usize)?.get(cell_id)? {
+            Cell::SingleValue(v) => Some(v),
+            Cell::Formula { value, .. } => Some(value),
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             sheets: vec![BTreeMap::new()],
             sheet_names: HashMap::new(),
             sheet_names_lookup: HashMap::new(),
-            cells_names: HashMap::new(),
-            cells_names_lookup: HashMap::new(),
+            cell_names: HashMap::new(),
+            cell_names_lookup: HashMap::new(),
             user_functions: Vec::new(),
-            user_functions_names: HashMap::new(),
-            user_functions_names_lookup: HashMap::new(),
+            user_function_names: HashMap::new(),
+            user_function_names_lookup: HashMap::new(),
             formulas_raw_text: HashMap::new(),
         }
     }

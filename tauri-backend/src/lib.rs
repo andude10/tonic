@@ -1,15 +1,17 @@
 use std::{error::Error, sync::Mutex};
 
 use ::serde::Serialize;
-use chumsky::{prelude::SimpleSpan, span::Span, Parser};
+use chumsky::{span::Span, Parser};
 use tauri::{ipc::Channel, AppHandle, Manager};
 use tauri_plugin_log::log::debug;
 
 use crate::{
-    parser::{create_lexer, parse_errors_to_string, parse_formula, token_errors_to_string},
-    sheet::{CellId, CellValue, Spreadsheet},
+    engine::eval_formula,
+    parser::{create_lexer, lexer_errors_to_string, parse_formula, parse_formula_errors_to_string},
+    sheet::{Cell, CellId, CellValue, Spreadsheet},
 };
 
+mod engine;
 mod file_api;
 mod parser;
 mod sheet;
@@ -55,7 +57,7 @@ fn enter_input(
     app: AppHandle,
     cell_id: CellId,
     user_input: &str,
-    compute_fromula_channel: Channel<ComputeFormulaEvent>,
+    compute_formula_channel: Channel<ComputeFormulaEvent>,
 ) {
     let state = app.state::<TonicState>();
     let mut spreadsheet = state
@@ -66,45 +68,67 @@ fn enter_input(
     // if not entering formula, then just update value
     if !user_input.starts_with('=') {
         let value = match user_input.parse::<f64>() {
-            Ok(n) => CellValue::Number(n),
-            Err(_) => CellValue::Text(user_input.to_string()),
+            Ok(n) => Cell::SingleValue(CellValue::Number(n)),
+            Err(_) => Cell::SingleValue(CellValue::Text(user_input.to_string())),
         };
         spreadsheet.sheets[0].insert(cell_id, value);
         return;
     }
 
-    // parse formula
+    // start parsing formula
     let formula_text = &user_input[1..];
 
     let lex_output = create_lexer().parse(formula_text);
+    // report any errors happened during lexing
     if lex_output.has_errors() {
-        let msg = parse_errors_to_string(lex_output.errors());
-        let _ = compute_fromula_channel.send(ComputeFormulaEvent::ParseErr {
+        let msg = lexer_errors_to_string(lex_output.errors());
+        let _ = compute_formula_channel.send(ComputeFormulaEvent::ParseErr {
             cell_id,
             message: &msg,
         });
         return;
     }
 
+    // return if empty
     let Some(tokens) = lex_output.output() else {
         return;
     };
 
-    let eoi = SimpleSpan::new((), formula_text.len()..formula_text.len());
-    let (parsed, parse_errs) = parse_formula(tokens, eoi);
-
+    let (parsed, parse_errs) = parse_formula(tokens, formula_text.len(), &mut spreadsheet);
+    // report any errors happened during parsing formula (syntax, not found name)
     if !parse_errs.is_empty() {
-        let msg = token_errors_to_string(&parse_errs);
-        let _ = compute_fromula_channel.send(ComputeFormulaEvent::ParseErr {
+        let msg = parse_formula_errors_to_string(&parse_errs);
+        let _ = compute_formula_channel.send(ComputeFormulaEvent::ParseErr {
             cell_id,
             message: &msg,
         });
         return;
     }
 
-    if let Some((exprs, root)) = parsed {
-        debug!("formula parsed: root={}, exprs={:?}", root, exprs);
-        spreadsheet.sheets[0].insert(cell_id, CellValue::Formula(exprs));
+    debug!("parsed formula: {:?}", parsed);
+
+    if let Some((exprs, _root)) = parsed {
+        // report any evaluation errors
+        if let Err(e) = eval_formula(cell_id, 0, exprs, &mut spreadsheet) {
+            let msg = format!("Eval Error: {:?}", e);
+            let _ = compute_formula_channel.send(ComputeFormulaEvent::ParseErr {
+                cell_id,
+                message: &msg,
+            });
+            return;
+        }
+
+        let val = spreadsheet
+            .get_cell_value(&cell_id, 0)
+            .expect("to get cell value");
+
+        debug!("evaluated formula: {:?}", val);
+
+        let display = val.to_string();
+        let _ = compute_formula_channel.send(ComputeFormulaEvent::Finished {
+            cell_id,
+            display_string: &display,
+        });
     }
 }
 
