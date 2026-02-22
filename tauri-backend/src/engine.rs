@@ -1,5 +1,3 @@
-use tauri_plugin_log::log::debug;
-
 use crate::sheet::{AtomType, Cell, CellId, CellRange, CellValue, Expr, ExprAtom, Spreadsheet};
 
 #[derive(Debug)]
@@ -81,26 +79,19 @@ pub fn eval_formula(
             Expr::Sum { range_id, mut sum } => {
                 // todo: make arithmetic safe
                 let (sheet_id, range) = store[*range_id as usize].as_range()?;
-
-                for col in range.start.col..=range.end.col {
-                    for row in range.start.row..=range.end.row {
-                        let current_id = CellId { col, row };
-
-                        let cell = spreadsheet.sheets[sheet_id as usize].get(&current_id);
-                        debug!("cell: {:?}", cell);
-                        if let Some(cell) = cell {
-                            if let Cell::SingleValue(CellValue::Number(n)) = cell {
-                                sum += n;
-                            }
-                            if let Cell::Formula { value, .. } = cell {
-                                if let CellValue::Number(n) = value {
-                                    sum += n;
-                                }
-                            }
+                for (_, cell) in
+                    spreadsheet.sheets[sheet_id as usize].range(range.start..=range.end)
+                {
+                    // todo: remove branching?
+                    if let Cell::SingleValue(CellValue::Number(n)) = cell {
+                        sum += n;
+                    }
+                    if let Cell::Formula { value, .. } = cell {
+                        if let CellValue::Number(n) = value {
+                            sum += n;
                         }
                     }
                 }
-
                 ExprAtom::Number(sum)
             }
             Expr::Avg {
@@ -109,20 +100,16 @@ pub fn eval_formula(
                 mut count,
             } => {
                 let (sheet_id, range) = store[*range_id as usize].as_range()?;
-                for col in range.start.col..=range.end.col {
-                    for row in range.start.row..=range.end.row {
-                        let current_id = CellId { col, row };
-
-                        if let Some(cell) = spreadsheet.sheets[sheet_id as usize].get(&current_id) {
-                            if let Cell::SingleValue(CellValue::Number(n)) = cell {
-                                sum += n;
-                            }
-                            if let Cell::Formula { value, .. } = cell {
-                                if let CellValue::Number(n) = value {
-                                    sum += n;
-                                }
-                            }
-                            count += 1;
+                for (_, cell) in
+                    spreadsheet.sheets[sheet_id as usize].range(range.start..=range.end)
+                {
+                    count += 1;
+                    if let Cell::SingleValue(CellValue::Number(n)) = cell {
+                        sum += n;
+                    }
+                    if let Cell::Formula { value, .. } = cell {
+                        if let CellValue::Number(n) = value {
+                            sum += n;
                         }
                     }
                 }

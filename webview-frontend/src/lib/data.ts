@@ -1,6 +1,10 @@
 import type { IMenuOption } from "@svar-ui/svelte-menu";
 import type { IColumnConfig } from "@svar-ui/svelte-grid";
-import CellEditor from "$lib/CellEditor.svelte";
+import Cell from "$lib/Cell.svelte";
+
+// todo: decompose data.ts
+
+export type UICell = { row: number; column: string };
 
 export const menu_options: IMenuOption[] = [
     {
@@ -49,7 +53,7 @@ export const baseColumns: IColumnConfig[] = (() => {
         columns.push({
             id,
             header: id,
-            cell: CellEditor,
+            cell: Cell,
             width: 100,
             resize: true,
         });

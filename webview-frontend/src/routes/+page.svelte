@@ -3,14 +3,11 @@
     import { MenuBar } from "@svar-ui/svelte-menu";
     import { menu_options } from "$lib/data";
     import WindowBar from "$lib/WindowBar.svelte";
-    import SheetTopPanel from "$lib/SheetTopPanel.svelte";
     import Sheet from "$lib/Sheet.svelte";
     import DevBottomPanel from "$lib/DevBottomPanel.svelte";
     import { timeRenders } from "$lib/devBottomPanelApi.svelte";
+    import type { IApi } from "@svar-ui/svelte-grid";
     import { attachConsole } from "@tauri-apps/plugin-log";
-
-    let focusedCell: { row: number; column: string } | undefined = $state();
-    let cellEditorValue = $state("");
 
     attachConsole();
     timeRenders();
@@ -23,9 +20,7 @@
                 <MenuBar options={menu_options}></MenuBar>
             </WindowBar>
 
-            <SheetTopPanel bind:focusedCell bind:cellEditorValue />
-
-            <Sheet bind:focusedCell bind:cellEditorValue />
+            <Sheet />
 
             <DevBottomPanel />
         </div>

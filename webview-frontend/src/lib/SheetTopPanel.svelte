@@ -1,13 +1,27 @@
 <script lang="ts">
-    import FormulaInput from "./FormulaInput.svelte";
+    import type { IApi } from "@svar-ui/svelte-grid";
+    import InputCell from "./InputCell.svelte";
+    import { getContext } from "svelte";
+    import type { UICell } from "./data";
 
     let {
-        focusedCell = $bindable(),
-        cellEditorValue = $bindable(""),
+        gridApi,
     }: {
-        focusedCell?: { row: number; column: string };
-        cellEditorValue?: string;
+        gridApi: IApi | undefined;
     } = $props();
+
+    let focusedCell: { ref: UICell | undefined } = getContext("focusedCell");
+    let editorValue: { val: string } = getContext("editorValue");
+
+    function handleInput(value: string) {
+        if (!focusedCell.ref || !gridApi) return;
+        editorValue.val = value;
+        gridApi.exec("update-cell", {
+            id: focusedCell.ref.row,
+            column: focusedCell.ref.column,
+            value,
+        });
+    }
 </script>
 
 <div class="panel">
@@ -26,11 +40,10 @@
 
         <div class="content-group">
             <div class="formula-label">ƒ(x)</div>
-            <FormulaInput
-                value={cellEditorValue}
-                disabled={!focusedCell}
-                onchange={(v) => (cellEditorValue = v)}
-                multiline
+            <InputCell
+                value={editorValue.val}
+                disabled={!focusedCell.ref}
+                oninput={handleInput}
                 class="top-panel-editor"
             />
         </div>
@@ -117,6 +130,14 @@
         border: var(--wx-input-border, 1px solid #384047);
         border-radius: var(--wx-input-border-radius, 3px);
         overflow: hidden;
+    }
+
+    .content-group :global(.top-panel-editor.disabled) {
+        background: color-mix(
+            in srgb,
+            var(--wx-input-background, #2a2b2d) 85%,
+            black
+        );
     }
 
     .content-group :global(.top-panel-editor .editor) {
