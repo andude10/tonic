@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { devPanel, resetTimer } from "./devBottomPanelApi.svelte";
+    import { devPanel, resetTimer } from "./stats.svelte";
 </script>
 
 <div class="panel">

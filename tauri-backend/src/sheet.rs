@@ -150,21 +150,18 @@ pub enum CellValue {
     Text(String),
 }
 
-impl CellValue {
-    pub fn as_str(&self) -> Option<&str> {
-        match self {
-            CellValue::Text(s) => Some(s),
-            _ => None,
-        }
-    }
-}
-
 impl fmt::Display for CellValue {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             CellValue::Number(num) => write!(f, "{}", num),
             CellValue::Text(text) => write!(f, "{}", text),
         }
+    }
+}
+
+impl fmt::Display for CellId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "(column: {}, row: {})", self.col, self.row)
     }
 }
 

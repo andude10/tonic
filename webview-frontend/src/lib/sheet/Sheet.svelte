@@ -7,12 +7,18 @@
     // and see what kind of hacks we would need to implement missing features from component library (SVAR Grid)
     // todo: too much noise sometimes
 
-    import { setContext } from "svelte";
-    import { Grid, type IApi } from "@svar-ui/svelte-grid";
-    import { baseColumns, baseRows, type UICell } from "$lib/data";
+    import { Grid, type IApi, type IColumnConfig } from "@svar-ui/svelte-grid";
+    import {
+        isCellData,
+        setSheetSharedState,
+        type CellData,
+        type SheetRow,
+        type UICell,
+    } from "$lib/sheet/shared";
     import { invoke, Channel } from "@tauri-apps/api/core";
-    import { endTimer, startTimer } from "./devBottomPanelApi.svelte";
+    import { endTimer, startTimer } from "$lib/stats.svelte";
     import SheetTopPanel from "./SheetTopPanel.svelte";
+    import Cell from "./Cell.svelte";
 
     // -- backend (tauri) communication setup --
 
@@ -28,20 +34,24 @@
         const ch = new Channel<ComputeFormulaEvent>();
         ch.onmessage = (message: ComputeFormulaEvent) => {
             endTimer("enter_input");
-            if (message.event === "finished") {
-                // todo: extract conversion between frontend and backend rows/cols into functions
-                const column = String.fromCharCode(
-                    65 + message.data.cellId.col,
-                );
-                const row = message.data.cellId.row + 1;
-                gridApi?.exec("update-cell", {
-                    id: row,
-                    column,
-                    value: message.data.displayString,
-                });
-            } else if (message.event === "parseErr") {
+            const { cellId } = message.data;
+            const cell = getCell(toUICell(cellId));
+            if (!cell) {
                 console.error(
-                    `formula error ${message.data.cellId.row}:${message.data.cellId.col}: ${message.data.message}`,
+                    `Received cell from backend that does not exist: ${cellId.row}:${cellId.col}`,
+                );
+                return;
+            }
+
+            if (message.event === "finished") {
+                cell.computedValue = message.data.displayString;
+                console.info(
+                    `Formula computed for cell ${cellId.row}:${cellId.col}: ${message.data.displayString}`,
+                );
+            } else if (message.event === "parseErr") {
+                cell.computedValue = message.data.message;
+                console.error(
+                    `formula error ${cellId.row}:${cellId.col}: ${message.data.message}`,
                 );
             }
         };
@@ -49,13 +59,53 @@
     }
 
     // 1, 2, ... -> A, B, ...
-    function getColumnId(index: number): string {
+    function toColumnId(index: number): string {
         return String.fromCharCode(64 + index);
     }
 
-    const focusedCell: { ref: UICell | undefined } = $state({
-        ref: undefined,
+    // A, B, ... -> 1, 2, ... (inverse of getColumnId)
+    function toColumnIndex(id: string): number {
+        return id.charCodeAt(0) - 64;
+    }
+
+    function toCellId(cell: UICell): CellId {
+        return { col: toColumnIndex(cell.column) - 1, row: cell.row - 1 };
+    }
+
+    function toUICell(cell: CellId): UICell {
+        return { column: toColumnId(cell.col + 1), row: cell.row + 1 };
+    }
+
+    let focusedCell: UICell | undefined = $state();
+
+    const baseRows = Array.from({ length: 1000 }, (_, i) => {
+        const row: SheetRow = { id: i + 1, rowNumber: i + 1 };
+        for (let j = 0; j < 26; j++) {
+            row[String.fromCharCode(65 + j)] = {
+                computedValue: "",
+                enteredText: "",
+            };
+        }
+        return row;
     });
+
+    const baseColumns: IColumnConfig[] = (() => {
+        const columns: IColumnConfig[] = [
+            { id: "rowNumber", width: 50, resize: true },
+        ];
+        for (let i = 0; i < 26; i++) {
+            const id = String.fromCharCode(65 + i);
+            columns.push({
+                id,
+                header: id,
+                cell: Cell,
+                width: 100,
+                resize: true,
+            });
+        }
+        return columns;
+    })();
+
     let gridRows = $state(baseRows);
     let gridColumns = $state(baseColumns);
     let gridApi: IApi | undefined = $state();
@@ -66,41 +116,49 @@
     let hoveredCell: UICell | undefined = $state();
     let selectionRangeStart: UICell | undefined = $state();
     let isSelecting = $state(false); // is true during mouse drag or while shift is held
-    const isEditing: { val: boolean } = $state({ val: false });
-    const editorValue: { val: string } = $state({ val: "" });
+    let isEditing = $state(false);
+    let editorInput = $state("");
 
-    // expose state to Cell components via context
-    setContext("focusedCell", focusedCell);
-    setContext("isEditing", isEditing);
-    setContext("editorValue", editorValue);
+    // expose state to components via context
+    setSheetSharedState({
+        get focusedCell() {
+            return focusedCell;
+        },
+        set focusedCell(v) {
+            focusedCell = v;
+        },
+        get isEditing() {
+            return isEditing;
+        },
+        set isEditing(v) {
+            isEditing = v;
+        },
+        get editorInput() {
+            return editorInput;
+        },
+        set editorInput(v) {
+            editorInput = v;
+        },
+    });
 
     $effect(() => {
-        if (!focusedCell.ref || !gridApi) return;
+        if (!focusedCell || !gridApi) return;
         gridApi.exec("focus-cell", {
-            row: focusedCell.ref.row,
-            column: focusedCell.ref.column,
+            row: focusedCell.row,
+            column: focusedCell.column,
         });
     });
 
-    // --- derived state ---
-
-    // column's ID is a string (A, B, C, etc), and column's index is a number (1, 2, etc)
-    let columnIndexById = $derived(
-        new Map(gridColumns.map((c, i) => [c.id, i])),
-    );
-
     // bounding box of the selection range between selectionAnchor and focusedCell
     let selectedRangeBounds = $derived.by(() => {
-        if (!selectionRangeStart || !focusedCell.ref) return null;
+        if (!selectionRangeStart || !focusedCell) return null;
 
-        const c1 = columnIndexById.get(selectionRangeStart.column);
-        const c2 = columnIndexById.get(focusedCell.ref.column);
-
-        if (c1 === undefined || c2 === undefined) return null;
+        const c1 = toColumnIndex(selectionRangeStart.column);
+        const c2 = toColumnIndex(focusedCell.column);
 
         return {
-            minR: Math.min(selectionRangeStart.row, focusedCell.ref.row),
-            maxR: Math.max(selectionRangeStart.row, focusedCell.ref.row),
+            minR: Math.min(selectionRangeStart.row, focusedCell.row),
+            maxR: Math.max(selectionRangeStart.row, focusedCell.row),
             minC: Math.min(c1, c2),
             maxC: Math.max(c1, c2),
         };
@@ -108,25 +166,43 @@
 
     // --- backend calls ---
 
-    function commitFocusedCell() {
-        if (!focusedCell.ref) return;
-        const colIndex = columnIndexById.get(focusedCell.ref.column);
-        if (colIndex === undefined) return;
-        const value = getValueFromCell(focusedCell.ref);
-        if (value === "") return;
+    function commitEdit() {
+        if (!focusedCell) return;
+        const cell = getCell(focusedCell);
+        if (!cell) return;
+        if (editorInput == cell.enteredText) return;
+        cell.enteredText = editorInput;
         startTimer("enter_input");
         invoke("enter_input", {
-            cellId: { row: focusedCell.ref.row - 1, col: colIndex - 1 },
-            userInput: value,
+            cellId: toCellId(focusedCell),
+            userInput: cell.enteredText,
             computeFormulaChannel: createFormulaChannel(),
         });
     }
+
+    function commitDelete(uiCell: UICell) {
+        const cell = getCell(uiCell);
+        if (!cell) return;
+        cell.enteredText = "";
+        editorInput = "";
+        invoke("enter_input", {
+            cellId: toCellId(uiCell),
+            userInput: "",
+            computeFormulaChannel: createFormulaChannel(),
+        });
+    }
+
+    // set editor input to entered value of the focused cell
+    $effect(() => {
+        const cell = getCell(focusedCell)!;
+        if (!cell) return;
+        editorInput = cell.enteredText;
+    });
 
     // --- grid config ---
 
     let left = 1; // pin first column (row numbers) to the left
     let select = false; // disable Grid's built-in selection, we handle it ourselves
-    //let requestWindow = $state({ start: 0, end: 0 });
 
     function isInBounds(rowId: number, colIndex: number): boolean {
         return (
@@ -138,23 +214,17 @@
     }
 
     function clearFocus() {
-        focusedCell.ref = undefined;
+        focusedCell = undefined;
         gridApi?.exec("focus-cell", {
             row: undefined,
             column: undefined,
         });
     }
 
-    function getValueFromCell(cell: UICell): string {
-        return gridApi?.getRow(cell.row)[cell.column] as string;
-    }
-
-    function setValueInCell(cell: UICell, value: string): void {
-        gridApi?.exec("update-cell", {
-            id: cell.row,
-            column: cell.column,
-            value,
-        });
+    function getCell(id: UICell | undefined): CellData | undefined {
+        if (!id) return undefined;
+        const cell = gridApi?.getRow(id.row)[id.column];
+        if (isCellData(cell)) return cell;
     }
 
     function init(api: IApi) {
@@ -167,24 +237,13 @@
         });
 
         api.intercept("focus-cell", (ev: any) => {
-            if (isEditing.val) return false;
+            if (isEditing) return false;
             if (ev?.row == null || ev?.column == null) return;
             if (ev.column === "rowNumber") {
                 return false;
             }
-
-            if (isEditing) {
-                commitFocusedCell();
-            }
         });
     }
-
-    // function handleRequestData(
-    //     ev: { row: { start: number; end: number } } & { [key: string]: any },
-    // ): void {
-    //     requestWindow.start = Math.max(0, ev.row.start - 500);
-    //     requestWindow.end = ev.row.end + 500;
-    // }
 
     function handleMouseMove(ev: MouseEvent) {
         // if select is active but left-button on mouse is not pressed, stop selection
@@ -218,56 +277,41 @@
         }
 
         // extend selection range while dragging
-        if (isSelecting && hoveredCell && focusedCell.ref !== hoveredCell) {
-            focusedCell.ref = { ...hoveredCell };
+        if (isSelecting && hoveredCell && focusedCell !== hoveredCell) {
+            focusedCell = { ...hoveredCell };
         }
     }
 
-    // let pendingOpenEditor: CellRef | undefined = undefined;
-
     function handleMouseDown(ev: MouseEvent) {
-        // allow clicking inside the cell editor input without closing it
-        // if (isEditing.val) {
-        //     return;
-        // }
-
         const target = ev.target as HTMLElement;
         const clickedCell = target.closest<HTMLElement>(".wx-cell");
 
         if (!clickedCell) return;
-
         const { rowId, colId } = clickedCell.dataset;
 
+        // always start range selection on click
+        isSelecting = true;
+
+        // if clicked on already focused cell, start editing it
         if (
-            focusedCell.ref &&
-            focusedCell.ref.row === Number(rowId) &&
-            focusedCell.ref.column === colId
+            focusedCell &&
+            focusedCell.row === Number(rowId) &&
+            focusedCell.column === colId
         ) {
-            isEditing.val = true;
+            isEditing = true;
             return;
         }
 
-        // remember if we're clicking the already-focused cell (to open editor on mouseup)
-        // pendingOpenEditor =
-        //     hoveredCell &&
-        //     focusedCell &&
-        //     hoveredCell.row === focusedCell.row &&
-        //     hoveredCell.column === focusedCell.column &&
-        //     !isEditing
-        //         ? { ...focusedCell }
-        //         : undefined;
-
-        // start a new selection from the hovered cell
-
-        isSelecting = true;
+        // otherwise, if clicked on different cell, change focus
         if (hoveredCell) {
-            isEditing.val = false;
-            // if (isEditing) {
-            //     commitFocusedCell();
-            //     closeEditor();
-            // }
+            // if switched focus while editing, save edited cell
+            if (isEditing) {
+                commitEdit();
+            }
+
+            isEditing = false;
             selectionRangeStart = { ...hoveredCell };
-            focusedCell.ref = { ...hoveredCell };
+            focusedCell = { ...hoveredCell };
         }
     }
 
@@ -279,7 +323,6 @@
 
         if (!clickedCell) {
             if (hoveredCell) hoveredCell = undefined;
-            // pendingOpenEditor = undefined;
             return;
         }
 
@@ -289,20 +332,8 @@
         const isHeader = target.closest("[role='columnheader']");
         if (colId == "rowNumber" || isHeader) {
             clearFocus();
-            // pendingOpenEditor = undefined;
             return;
         }
-
-        // // open editor if this was a click (not drag) on the already-focused cell
-        // if (
-        //     pendingOpenEditor &&
-        //     hoveredCell &&
-        //     hoveredCell.row === pendingOpenEditor.row &&
-        //     hoveredCell.column === pendingOpenEditor.column
-        // ) {
-        //     openEditor(pendingOpenEditor);
-        // }
-        // pendingOpenEditor = undefined;
     }
 
     function handleKeyDown(ev: KeyboardEvent) {
@@ -312,7 +343,7 @@
         }
 
         if (ev.key === "Escape") {
-            isEditing.val = false;
+            isEditing = false;
             clearFocus();
             selectionRangeStart = undefined;
             isSelecting = false;
@@ -332,9 +363,9 @@
             ev.key === "ArrowLeft" ||
             ev.key === "ArrowRight";
 
-        if (pressedArrowButton && focusedCell.ref) {
+        if (pressedArrowButton && focusedCell) {
             // if pressing arrow key without ctrl in edit mode ...
-            if (isEditing.val && !ev.ctrlKey) {
+            if (isEditing && !ev.ctrlKey) {
                 // .. then use arrow key to navigate inside editor
                 // (propagate keyDown event further)
                 return;
@@ -351,15 +382,14 @@
             if (ev.key === "ArrowLeft") colDelta = -1;
             if (ev.key === "ArrowRight") colDelta = 1;
 
-            let nextRow = focusedCell.ref.row + rowDelta;
-            let nextCol =
-                columnIndexById.get(focusedCell.ref.column)! + colDelta;
+            let nextRow = focusedCell.row + rowDelta;
+            let nextCol = toColumnIndex(focusedCell.column) + colDelta;
 
             // if pressing ctrl + arrow key in edit mode ...
-            if (isEditing.val && ev.ctrlKey) {
+            if (isEditing && ev.ctrlKey) {
                 // ... then exit edit mode and move to cell in arrow direction
-                commitFocusedCell();
-                isEditing.val = false;
+                commitEdit();
+                isEditing = false;
                 if (!isInBounds(nextRow, nextCol)) return;
                 // todo: move focus logic from below to here
             }
@@ -369,20 +399,20 @@
             const hasMultiCellRange =
                 selectionRangeStart &&
                 selectedRangeBounds &&
-                (selectionRangeStart.row !== focusedCell.ref.row ||
-                    selectionRangeStart.column !== focusedCell.ref.column);
+                (selectionRangeStart.row !== focusedCell.row ||
+                    selectionRangeStart.column !== focusedCell.column);
 
             if (hasMultiCellRange && selectionRangeStart && !isSelecting) {
                 let nextAnchorRow = selectionRangeStart.row + rowDelta;
                 let nextAnchorCol =
-                    columnIndexById.get(selectionRangeStart.column)! + colDelta;
+                    toColumnIndex(selectionRangeStart.column) + colDelta;
 
                 if (!isInBounds(nextAnchorRow, nextAnchorCol)) {
                     return;
                 }
-                focusedCell.ref = {
+                focusedCell = {
                     row: nextRow,
-                    column: getColumnId(nextCol),
+                    column: toColumnId(nextCol),
                 };
                 selectionRangeStart = {
                     row: nextAnchorRow,
@@ -393,18 +423,18 @@
 
             // shift+arrow: extend selection by moving focusedCell, keep selectionAnchor anchored
             if (isInBounds(nextRow, nextCol) && isSelecting) {
-                focusedCell.ref = {
+                focusedCell = {
                     row: nextRow,
-                    column: getColumnId(nextCol),
+                    column: toColumnId(nextCol),
                 };
                 return;
             }
 
             // normal single-cell navigation (no multi-cell range, not selecting)
             if (isInBounds(nextRow, nextCol) && !isSelecting) {
-                focusedCell.ref = {
+                focusedCell = {
                     row: nextRow,
-                    column: getColumnId(nextCol),
+                    column: toColumnId(nextCol),
                 };
                 selectionRangeStart = {
                     row: nextRow,
@@ -414,25 +444,25 @@
             }
         }
 
-        if (focusedCell.ref) {
+        if (focusedCell) {
+            ev.preventDefault();
+            ev.stopPropagation();
+
             // on enter: edit cell in focus, but if already editing, move focus down
             if (ev.key === "Enter") {
-                ev.preventDefault();
-                ev.stopPropagation();
-
-                if (!isEditing.val) {
-                    isEditing.val = true;
+                if (!isEditing) {
+                    isEditing = true;
                     return;
                 }
 
-                if (focusedCell.ref.row < gridRows.length) {
-                    const nextRow = focusedCell.ref.row + 1;
-                    commitFocusedCell();
-                    isEditing.val = false;
-                    focusedCell.ref.row = nextRow;
+                if (focusedCell.row < gridRows.length) {
+                    const nextRow = focusedCell.row + 1;
+                    commitEdit();
+                    isEditing = false;
+                    focusedCell = { row: nextRow, column: focusedCell.column };
                     selectionRangeStart = {
                         row: nextRow,
-                        column: focusedCell.ref.column,
+                        column: focusedCell.column,
                     };
                     gridApi?.exec("scroll", { row: nextRow });
                 }
@@ -443,34 +473,34 @@
                 if (bounds) {
                     for (let r = bounds.minR; r <= bounds.maxR; r++) {
                         for (let c = bounds.minC; c <= bounds.maxC; c++) {
-                            setValueInCell(
-                                { row: r, column: gridColumns[c].id as string },
-                                "",
-                            );
+                            commitDelete({
+                                row: r,
+                                column: gridColumns[c].id as string,
+                            });
                         }
                     }
                 } else {
-                    setValueInCell(focusedCell.ref, "");
+                    commitDelete(focusedCell);
                 }
-                // cellEditorValue = "";
             }
-            // on any text input, enter edit mode
-            else if (
-                ev.key == "Backspace" ||
-                (ev.key.length === 1 &&
-                    !ev.ctrlKey &&
-                    !ev.altKey &&
-                    !ev.metaKey)
+            // on any text input or backspace, enter edit mode
+            else if (ev.key === "Backspace") {
+                editorInput = editorInput.slice(0, -1);
+                isEditing = true;
+            } else if (
+                ev.key.length === 1 &&
+                !ev.ctrlKey &&
+                !ev.altKey &&
+                !ev.metaKey
             ) {
-                if (!isEditing.val) {
-                    isEditing.val = true;
-                }
+                editorInput += ev.key;
+                isEditing = true;
             }
         }
     }
 
     function handleKeyUp(ev: KeyboardEvent) {
-        if (isEditing.val) return;
+        if (isEditing) return;
 
         if (ev.key === "Shift") {
             isSelecting = false;
@@ -486,14 +516,14 @@
 
     function columnStyle(col: any) {
         let style = "";
-        const colIndex = columnIndexById.get(col.id);
         const bounds = selectedRangeBounds;
 
-        if (bounds && colIndex !== undefined) {
+        if (bounds && col.id !== "rowNumber") {
+            const colIndex = toColumnIndex(col.id);
             if (colIndex >= bounds.minC && colIndex <= bounds.maxC) {
                 style += "highlight-col ";
             }
-        } else if (col.id === focusedCell.ref?.column) {
+        } else if (col.id === focusedCell?.column) {
             style += "highlight-col ";
         }
 
@@ -504,10 +534,10 @@
         let style = "";
 
         const rowIndex = row.id as number;
-        const colIndex = columnIndexById.get(col.id);
         const bounds = selectedRangeBounds;
 
-        if (bounds && colIndex !== undefined) {
+        if (bounds && col.id !== "rowNumber") {
+            const colIndex = toColumnIndex(col.id);
             const isInsideSelection =
                 rowIndex >= bounds.minR &&
                 rowIndex <= bounds.maxR &&
@@ -525,7 +555,7 @@
             style += "row-number-column ";
             let isRowSelected =
                 bounds && rowIndex >= bounds.minR && rowIndex <= bounds.maxR;
-            if (isRowSelected || row.id === focusedCell.ref?.row) {
+            if (isRowSelected || row.id === focusedCell?.row) {
                 style += "highlight-row ";
             }
         }

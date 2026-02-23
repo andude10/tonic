@@ -2,7 +2,7 @@
     import type { IApi } from "@svar-ui/svelte-grid";
     import InputCell from "./InputCell.svelte";
     import { getContext } from "svelte";
-    import type { UICell } from "./data";
+    import { getSheetSharedState, type UICell } from "$lib/sheet/shared";
 
     let {
         gridApi,
@@ -10,18 +10,10 @@
         gridApi: IApi | undefined;
     } = $props();
 
-    let focusedCell: { ref: UICell | undefined } = getContext("focusedCell");
-    let editorValue: { val: string } = getContext("editorValue");
+    const shared = getSheetSharedState();
 
-    function handleInput(value: string) {
-        if (!focusedCell.ref || !gridApi) return;
-        editorValue.val = value;
-        gridApi.exec("update-cell", {
-            id: focusedCell.ref.row,
-            column: focusedCell.ref.column,
-            value,
-        });
-    }
+    // todo: move isFormula to shared state
+    let isFormula = $derived(shared.editorInput.startsWith("="));
 </script>
 
 <div class="panel">
@@ -41,9 +33,9 @@
         <div class="content-group">
             <div class="formula-label">ƒ(x)</div>
             <InputCell
-                value={editorValue.val}
-                disabled={!focusedCell.ref}
-                oninput={handleInput}
+                {isFormula}
+                disabled={!shared.focusedCell}
+                bind:value={shared.editorInput}
                 class="top-panel-editor"
             />
         </div>

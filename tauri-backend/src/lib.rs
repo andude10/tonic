@@ -3,7 +3,7 @@ use std::{error::Error, sync::Mutex};
 use ::serde::Serialize;
 use chumsky::{span::Span, Parser};
 use tauri::{ipc::Channel, AppHandle, Manager};
-use tauri_plugin_log::log::debug;
+use tauri_plugin_log::log::{debug, error};
 
 use crate::{
     engine::eval_formula,
@@ -46,6 +46,21 @@ enum ComputeFormulaEvent<'a> {
     },
 }
 
+fn send_result(channel: &Channel<ComputeFormulaEvent>, cell_id: CellId, display_string: &str) {
+    if let Err(e) = channel.send(ComputeFormulaEvent::Finished {
+        cell_id,
+        display_string,
+    }) {
+        error!("failed to send formula result for {cell_id:?}: {e}");
+    }
+}
+
+fn send_error(channel: &Channel<ComputeFormulaEvent>, cell_id: CellId, message: &str) {
+    if let Err(e) = channel.send(ComputeFormulaEvent::ParseErr { cell_id, message }) {
+        error!("failed to send formula error for {cell_id:?}: {e}");
+    }
+}
+
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -67,11 +82,19 @@ fn enter_input(
 
     // if not entering formula, then just update value
     if !user_input.starts_with('=') {
-        let value = match user_input.parse::<f64>() {
-            Ok(n) => Cell::SingleValue(CellValue::Number(n)),
-            Err(_) => Cell::SingleValue(CellValue::Text(user_input.to_string())),
-        };
-        spreadsheet.sheets[0].insert(cell_id, value);
+        if let Ok(n) = user_input.parse::<f64>() {
+            spreadsheet.sheets[0].insert(cell_id, Cell::SingleValue(CellValue::Number(n)));
+            debug!("User entered number: {}, to {}", n, cell_id);
+            let display = n.to_string();
+            send_result(&compute_formula_channel, cell_id, &display);
+        } else {
+            spreadsheet.sheets[0].insert(
+                cell_id,
+                Cell::SingleValue(CellValue::Text(user_input.to_string())),
+            );
+            debug!("User entered text: {}, to {}", user_input, cell_id);
+            send_result(&compute_formula_channel, cell_id, user_input);
+        }
         return;
     }
 
@@ -82,10 +105,7 @@ fn enter_input(
     // report any errors happened during lexing
     if lex_output.has_errors() {
         let msg = lexer_errors_to_string(lex_output.errors());
-        let _ = compute_formula_channel.send(ComputeFormulaEvent::ParseErr {
-            cell_id,
-            message: &msg,
-        });
+        send_error(&compute_formula_channel, cell_id, &msg);
         return;
     }
 
@@ -98,10 +118,7 @@ fn enter_input(
     // report any errors happened during parsing formula (syntax, not found name)
     if !parse_errs.is_empty() {
         let msg = parse_formula_errors_to_string(&parse_errs);
-        let _ = compute_formula_channel.send(ComputeFormulaEvent::ParseErr {
-            cell_id,
-            message: &msg,
-        });
+        send_error(&compute_formula_channel, cell_id, &msg);
         return;
     }
 
@@ -111,10 +128,7 @@ fn enter_input(
         // report any evaluation errors
         if let Err(e) = eval_formula(cell_id, 0, exprs, &mut spreadsheet) {
             let msg = format!("Eval Error: {:?}", e);
-            let _ = compute_formula_channel.send(ComputeFormulaEvent::ParseErr {
-                cell_id,
-                message: &msg,
-            });
+            send_error(&compute_formula_channel, cell_id, &msg);
             return;
         }
 
@@ -125,10 +139,7 @@ fn enter_input(
         debug!("evaluated formula: {:?}", val);
 
         let display = val.to_string();
-        let _ = compute_formula_channel.send(ComputeFormulaEvent::Finished {
-            cell_id,
-            display_string: &display,
-        });
+        send_result(&compute_formula_channel, cell_id, &display);
     }
 }
 
@@ -142,9 +153,6 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(
             tauri_plugin_log::Builder::new()
-                .target(tauri_plugin_log::Target::new(
-                    tauri_plugin_log::TargetKind::Stdout,
-                ))
                 .target(tauri_plugin_log::Target::new(
                     tauri_plugin_log::TargetKind::Webview,
                 ))

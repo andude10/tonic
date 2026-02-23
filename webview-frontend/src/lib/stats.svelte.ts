@@ -11,11 +11,16 @@ export function startTimer(name: string) {
 }
 
 export function endTimer(name: string) {
-    const time = performance.now() - devPanel.starts[name];
+    // do nothing if startTimer wasn't called before
+    const start = devPanel.starts[name];
+    if (start === undefined) return;
+    delete devPanel.starts[name];
 
+    // otherwise, save new time
+    const time = performance.now() - start;
     devPanel.stats[name] = time;
 
-    if (!devPanel.highestTime[name] || devPanel.highestTime[name] < time) {
+    if (!(devPanel.highestTime[name] >= time)) {
         devPanel.highestTime[name] = time;
     }
 }

@@ -3,9 +3,9 @@
     import { MenuBar } from "@svar-ui/svelte-menu";
     import { menu_options } from "$lib/data";
     import WindowBar from "$lib/WindowBar.svelte";
-    import Sheet from "$lib/Sheet.svelte";
+    import Sheet from "$lib/sheet/Sheet.svelte";
     import DevBottomPanel from "$lib/DevBottomPanel.svelte";
-    import { timeRenders } from "$lib/devBottomPanelApi.svelte";
+    import { timeRenders } from "$lib/stats.svelte";
     import type { IApi } from "@svar-ui/svelte-grid";
     import { attachConsole } from "@tauri-apps/plugin-log";
 

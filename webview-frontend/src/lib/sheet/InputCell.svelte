@@ -2,18 +2,16 @@
     let {
         disabled = false,
         class: className = "",
+        isFormula,
         value = $bindable(""),
-        oninput,
     }: {
         disabled?: boolean;
         class?: string;
-        value?: string;
-        oninput?: (value: string) => void;
+        isFormula: boolean;
+        value: string;
     } = $props();
 
     const FN_RE = /\b(sum|avg)\b/gi;
-
-    let isFormula = $derived(value.startsWith("="));
 
     let highlighted = $derived.by(() => {
         if (!isFormula) return "";
@@ -28,13 +26,7 @@
     {#if isFormula}
         <div class="backdrop" aria-hidden="true">{@html highlighted}</div>
     {/if}
-    <input
-        class="editor"
-        type="text"
-        bind:value
-        {disabled}
-        oninput={() => oninput?.(value)}
-    />
+    <input class="editor" type="text" bind:value {disabled} />
 </div>
 
 <style>
