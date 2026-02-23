@@ -1,6 +1,10 @@
-use std::fmt;
+use std::{
+    fmt,
+    sync::{Arc, LazyLock},
+};
 
 use chumsky::{
+    cache::{Cache, Cached},
     extra,
     input::{self, Cursor, Input as _, MappedInput},
     inspector::Inspector,
@@ -136,6 +140,30 @@ pub fn create_lexer<'src>(
     .padded()
     .repeated()
     .collect()
+}
+
+// --- Cached lexer ---
+
+#[derive(Default)]
+struct CachedLexer;
+
+impl Cached for CachedLexer {
+    type Parser<'src> = Arc<
+        dyn Parser<'src, LexerInput<'src>, LexerOutput<'src>, LexerExtra<'src>>
+            + Send
+            + Sync
+            + 'src,
+    >;
+
+    fn make_parser<'src>(self) -> Self::Parser<'src> {
+        Arc::new(create_lexer())
+    }
+}
+
+static LEXER: LazyLock<Cache<CachedLexer>> = LazyLock::new(Cache::default);
+
+pub fn lex_formula(input: &str) -> ParseResult<LexerOutput<'_>, Rich<'_, char>> {
+    LEXER.get().parse(input)
 }
 
 /// Input tokens
@@ -336,7 +364,9 @@ pub fn parse_formula<'tokens, 'src: 'tokens>(
         spreadsheet,
         expr_arena: Vec::new(),
     };
-    let result = create_formula_praser().parse_with_state(tokens.split_spanned(eoi), &mut state);
+    let result = create_formula_praser()
+        .boxed()
+        .parse_with_state(tokens.split_spanned(eoi), &mut state);
     let errs: Vec<_> = result.errors().cloned().collect();
     let output = result.into_output().map(|root| (state.expr_arena, root));
     (output, errs)
@@ -345,14 +375,10 @@ pub fn parse_formula<'tokens, 'src: 'tokens>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chumsky::Parser;
 
     /// Lex + parse a formula string, return (arena, root_id) or panic with errors.
     fn parse(src: &str, spreadsheet: &mut Spreadsheet) -> (Vec<Expr>, ExprId) {
-        let tokens = create_lexer()
-            .parse(src)
-            .into_output()
-            .expect("lexer failed");
+        let tokens = lex_formula(src).into_output().expect("lexer failed");
         let (parsed, errs) = parse_formula(&tokens, src.len(), spreadsheet);
         assert!(
             errs.is_empty(),

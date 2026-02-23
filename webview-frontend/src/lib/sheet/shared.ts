@@ -1,6 +1,4 @@
 import { createContext } from "svelte";
-import type { IColumnConfig } from "@svar-ui/svelte-grid";
-import Cell from "$lib/sheet/Cell.svelte";
 
 export type UICell = { row: number; column: string };
 export type CellData = { computedValue: string; enteredText: string };

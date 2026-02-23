@@ -1,6 +1,4 @@
 import type { IMenuOption } from "@svar-ui/svelte-menu";
-import type { IColumnConfig } from "@svar-ui/svelte-grid";
-import Cell from "$lib/sheet/Cell.svelte";
 
 export const menu_options: IMenuOption[] = [
     {

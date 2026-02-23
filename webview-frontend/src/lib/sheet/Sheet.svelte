@@ -445,11 +445,10 @@
         }
 
         if (focusedCell) {
-            ev.preventDefault();
-            ev.stopPropagation();
-
             // on enter: edit cell in focus, but if already editing, move focus down
             if (ev.key === "Enter") {
+                ev.preventDefault();
+
                 if (!isEditing) {
                     isEditing = true;
                     return;
@@ -469,6 +468,8 @@
             }
             // on delete, clear value in focus or in selected range
             else if (ev.key === "Delete") {
+                ev.preventDefault();
+
                 const bounds = selectedRangeBounds;
                 if (bounds) {
                     for (let r = bounds.minR; r <= bounds.maxR; r++) {
@@ -483,18 +484,22 @@
                     commitDelete(focusedCell);
                 }
             }
+
             // on any text input or backspace, enter edit mode
-            else if (ev.key === "Backspace") {
-                editorInput = editorInput.slice(0, -1);
-                isEditing = true;
-            } else if (
-                ev.key.length === 1 &&
-                !ev.ctrlKey &&
-                !ev.altKey &&
-                !ev.metaKey
-            ) {
-                editorInput += ev.key;
-                isEditing = true;
+            if (!isEditing) {
+                if (ev.key === "Backspace") {
+                    editorInput = editorInput.slice(0, -1);
+                    isEditing = true;
+                }
+                let pressedAnyOtherKey =
+                    ev.key.length === 1 &&
+                    !ev.ctrlKey &&
+                    !ev.altKey &&
+                    !ev.metaKey;
+                if (pressedAnyOtherKey) {
+                    editorInput += ev.key;
+                    isEditing = true;
+                }
             }
         }
     }
