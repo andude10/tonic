@@ -15,7 +15,9 @@
                 "title": "tonic",
                 "width": 1600,
                 "height": 1400,
-                "decorations": false
+                "decorations": false,
+                "backgroundColor": "#2a2b2d",
+                "visible": false
             }
         ],
         "security": {

@@ -58,14 +58,25 @@
         return ch;
     }
 
-    // 1, 2, ... -> A, B, ...
+    // 1 -> A, 26 -> Z, 27 -> AA, 28 -> AB, ...
     function toColumnId(index: number): string {
-        return String.fromCharCode(64 + index);
+        let s = "";
+        let n = index;
+        while (n > 0) {
+            n--;
+            s = String.fromCharCode(65 + (n % 26)) + s;
+            n = Math.floor(n / 26);
+        }
+        return s;
     }
 
-    // A, B, ... -> 1, 2, ... (inverse of getColumnId)
+    // A -> 1, Z -> 26, AA -> 27, AB -> 28, ...
     function toColumnIndex(id: string): number {
-        return id.charCodeAt(0) - 64;
+        let n = 0;
+        for (let i = 0; i < id.length; i++) {
+            n = n * 26 + (id.charCodeAt(i) - 64);
+        }
+        return n;
     }
 
     function toCellId(cell: UICell): CellId {
@@ -512,61 +523,116 @@
         }
     }
 
-    $inspect({
-        isEditing,
-        isSelecting,
-        focusedCell,
-        selectionRangeStart,
+    let nextTickReady = true;
+    function handleScroll(ev: Event) {
+        // scroll event fires too often, so throttle any action taken
+        if (nextTickReady) {
+            setTimeout(() => {
+                applySheetStyles();
+
+                // todo: infinite scroll
+                // const el = ev.target as HTMLElement;
+                // if (el.scrollTop + el.clientHeight > el.scrollHeight - 200) {
+                //     growRows(gridRows.length + GROW_BUFFER);
+                // }
+                // if (el.scrollLeft + el.clientWidth > el.scrollWidth - 200) {
+                //     growColumns(gridColumns.length - 1 + GROW_BUFFER);
+                // }
+
+                nextTickReady = true;
+            }, 10);
+            nextTickReady = false;
+        }
+    }
+
+    function applySheetStyles() {
+        const wrapper = document.querySelector(".grid-wrapper");
+        if (!wrapper) return;
+        const bounds = selectedRangeBounds;
+        const focused = focusedCell;
+
+        // style headers
+        for (const columnHeader of wrapper.querySelectorAll<HTMLElement>(
+            "[data-header-id]",
+        )) {
+            const idx = toColumnIndex(columnHeader.dataset.headerId!);
+            if (bounds) {
+                // highlight all columns of cells in range selec
+                columnHeader.classList.toggle(
+                    "highlight-col",
+                    idx >= bounds.minC && idx <= bounds.maxC,
+                );
+            } else if (focused) {
+                // highlight column of focused cell
+                columnHeader.classList.toggle(
+                    "highlight-col",
+                    idx === toColumnIndex(focused.column),
+                );
+            } else {
+                columnHeader.classList.remove("highlight-col");
+            }
+        }
+
+        // style cells
+        for (const cell of wrapper.querySelectorAll<HTMLElement>(
+            ".wx-cell[data-row-id][data-col-id]",
+        )) {
+            const rowId = Number(cell.dataset.rowId);
+            const colId = cell.dataset.colId!;
+
+            if (colId === "rowNumber") {
+                if (bounds && rowId >= bounds.minR && rowId <= bounds.maxR) {
+                    cell.classList.add("highlight-row");
+                } else if (focused && rowId === focused.row) {
+                    cell.classList.add("highlight-row");
+                } else {
+                    cell.classList.remove("highlight-row");
+                }
+                continue;
+            }
+
+            if (!bounds) {
+                cell.classList.remove(
+                    "selection-top",
+                    "selection-bottom",
+                    "selection-left",
+                    "selection-right",
+                );
+                continue;
+            }
+
+            const colIdx = toColumnIndex(colId);
+            const inside =
+                rowId >= bounds.minR &&
+                rowId <= bounds.maxR &&
+                colIdx >= bounds.minC &&
+                colIdx <= bounds.maxC;
+
+            cell.classList.toggle(
+                "selection-top",
+                inside && rowId === bounds.minR,
+            );
+            cell.classList.toggle(
+                "selection-bottom",
+                inside && rowId === bounds.maxR,
+            );
+            cell.classList.toggle(
+                "selection-left",
+                inside && colIdx === bounds.minC,
+            );
+            cell.classList.toggle(
+                "selection-right",
+                inside && colIdx === bounds.maxC,
+            );
+        }
+    }
+
+    // apply sheet styles when selectedRangeBounds or focusedCell changes
+    $effect(() => {
+        selectedRangeBounds;
+        focusedCell;
+        applySheetStyles();
     });
-
-    function columnStyle(col: any) {
-        let style = "";
-        const bounds = selectedRangeBounds;
-
-        if (bounds && col.id !== "rowNumber") {
-            const colIndex = toColumnIndex(col.id);
-            if (colIndex >= bounds.minC && colIndex <= bounds.maxC) {
-                style += "highlight-col ";
-            }
-        } else if (col.id === focusedCell?.column) {
-            style += "highlight-col ";
-        }
-
-        return style;
-    }
-
-    function cellStyle(row: any, col: any) {
-        let style = "";
-
-        const rowIndex = row.id as number;
-        const bounds = selectedRangeBounds;
-
-        if (bounds && col.id !== "rowNumber") {
-            const colIndex = toColumnIndex(col.id);
-            const isInsideSelection =
-                rowIndex >= bounds.minR &&
-                rowIndex <= bounds.maxR &&
-                colIndex >= bounds.minC &&
-                colIndex <= bounds.maxC;
-            if (isInsideSelection) {
-                if (rowIndex === bounds.minR) style += "selection-top ";
-                if (rowIndex === bounds.maxR) style += "selection-bottom ";
-                if (colIndex === bounds.minC) style += "selection-left ";
-                if (colIndex === bounds.maxC) style += "selection-right ";
-            }
-        }
-
-        if (col.id === "rowNumber") {
-            style += "row-number-column ";
-            let isRowSelected =
-                bounds && rowIndex >= bounds.minR && rowIndex <= bounds.maxR;
-            if (isRowSelected || row.id === focusedCell?.row) {
-                style += "highlight-row ";
-            }
-        }
-
-        return style;
-    }
 </script>
 
 <SheetTopPanel {gridApi} />
@@ -578,6 +644,7 @@
     onmousedown={handleMouseDown}
     onkeydowncapture={handleKeyDown}
     onkeyupcapture={handleKeyUp}
+    onscrollcapture={handleScroll}
     tabindex="-1"
     role="grid"
 >
@@ -590,8 +657,6 @@
             split={{ left }}
             {select}
             undo
-            {columnStyle}
-            {cellStyle}
         />
     </div>
 </div>
@@ -624,7 +689,7 @@
         border-right: 2px dashed var(--wx-color-primary) !important;
     }
 
-    :global(.row-number-column) {
+    :global(.wx-cell[data-col-id="rowNumber"]) {
         background: var(--wx-table-header-background) !important;
         font-weight: var(--wx-header-font-weight) !important;
         text-align: center;

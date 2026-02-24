@@ -44,10 +44,8 @@
 
     const displayContent = $derived.by(() => {
         const cell = row[column.id];
-        if (isCellData(cell)) {
-            return cell.computedValue;
-        }
-        return cell;
+        if (isCellData(cell)) return cell.computedValue;
+        return cell ?? "";
     });
 </script>
 

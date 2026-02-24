@@ -2,7 +2,7 @@ use std::{error::Error, sync::Mutex, time::Instant};
 
 use ::serde::Serialize;
 use chumsky::{span::Span, Parser};
-use tauri::{ipc::Channel, AppHandle, Manager};
+use tauri::{ipc::Channel, window::Color, AppHandle, Manager};
 use tauri_plugin_log::log::{debug, error};
 
 use crate::{

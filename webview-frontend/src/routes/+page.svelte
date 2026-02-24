@@ -8,9 +8,18 @@
     import { timeRenders } from "$lib/stats.svelte";
     import type { IApi } from "@svar-ui/svelte-grid";
     import { attachConsole } from "@tauri-apps/plugin-log";
+    import { getCurrentWindow } from "@tauri-apps/api/window";
+    import { onMount } from "svelte";
 
     attachConsole();
     timeRenders();
+
+    // on start-up, window flashes white screen before rendering
+    // it is known webview issue: https://github.com/tauri-apps/tauri/issues/1564
+    // this allows to show window once everything is loaded
+    onMount(() => {
+        getCurrentWindow().show();
+    });
 </script>
 
 <div class="root noselect">
