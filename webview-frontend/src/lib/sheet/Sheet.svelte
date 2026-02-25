@@ -19,10 +19,13 @@
     import { endTimer, startTimer } from "$lib/stats.svelte";
     import SheetTopPanel from "./SheetTopPanel.svelte";
     import Cell from "./Cell.svelte";
+    import { onMount, untrack } from "svelte";
 
     // -- backend (tauri) communication setup --
 
     type CellId = { row: number; col: number };
+
+    type RequestWindow = { start: CellId; end: CellId };
 
     // Union type for ComputeFormulaEvent to properly represent either success or error
     type ComputeFormulaEvent =
@@ -122,6 +125,12 @@
     let gridRows = $state(baseRows);
     let gridColumns = $state(baseColumns);
     let gridApi: IApi | undefined = $state();
+    let requestWindow: RequestWindow = $state({
+        start: { row: 0, col: 0 },
+        end: { row: 500, col: 500 },
+    });
+
+    $inspect(requestWindow);
 
     // --- selection state ---
 
@@ -129,6 +138,7 @@
     let hoveredCell: UICell | undefined = $state();
     let focusedRangeStart: UICell | undefined = $state();
     let isSelecting = $state(false); // is true during mouse drag or while shift is held
+    let shiftClickedOnce = $state(false); // true after first shift-click (waiting for second to complete range)
     let isEditing = $state(false);
     let editorInput = $state("");
     let caretPosition = $state(0);
@@ -169,7 +179,7 @@
     const cell_references_regex = /\b([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\b/gi;
 
     let editorInputHtml = $derived.by(() => {
-        if (!editorInputIsFormula || !isEditing) return "";
+        if (!editorInputIsFormula) return "";
 
         let html = editorInput.replace(
             function_names_regex,
@@ -184,6 +194,8 @@
 
         return html;
     });
+
+    $inspect(editorInputHtml);
 
     // parse references from formula — only depends on editorInput
     let parsedFormulaReferencesHighlights = $derived.by(() => {
@@ -273,6 +285,15 @@
         });
     });
 
+    // set editorInput to the enteredText of focused cell
+    $effect(() => {
+        let cell = getCell(focusedCell);
+        if (cell) {
+            console.log(cell.enteredText);
+            editorInput = cell.enteredText;
+        }
+    });
+
     // bounding box of the selection range between selectionRangeStart and focusedCell
     let focusedRangeBounds = $derived.by(() => {
         if (!focusedRangeStart || !focusedCell) return null;
@@ -304,22 +325,28 @@
             ? `${start.column}${start.row}`
             : `${start.column}${start.row}:${end.column}${end.row}`;
 
-        const activeRef = formulaReferencesHighlights?.find((r) => r.isActive);
-        if (activeRef) {
-            // replace existing reference under cursor
-            editorInput =
-                editorInput.slice(0, activeRef.matchIndex) +
-                ref +
-                editorInput.slice(activeRef.matchIndex + activeRef.matchLength);
-            caretPosition = activeRef.matchIndex + ref.length;
-        } else {
-            // otherwise, insert new reference at cursor
-            editorInput =
-                editorInput.slice(0, caretPosition) +
-                ref +
-                editorInput.slice(caretPosition);
-            caretPosition += ref.length;
-        }
+        untrack(() => {
+            const activeRef = formulaReferencesHighlights?.find(
+                (r) => r.isActive,
+            );
+            if (activeRef) {
+                // replace existing reference under cursor
+                editorInput =
+                    editorInput.slice(0, activeRef.matchIndex) +
+                    ref +
+                    editorInput.slice(
+                        activeRef.matchIndex + activeRef.matchLength,
+                    );
+                caretPosition = activeRef.matchIndex + ref.length;
+            } else {
+                // otherwise, insert new reference at cursor
+                editorInput =
+                    editorInput.slice(0, caretPosition) +
+                    ref +
+                    editorInput.slice(caretPosition);
+                caretPosition += ref.length;
+            }
+        });
     });
 
     // --- backend calls ---
@@ -350,6 +377,54 @@
         });
     }
 
+    type WindowCell = {
+        cellId: CellId;
+        display: string;
+        enteredText: string;
+    };
+
+    function fetchSpreadsheetWindow() {
+        const firstVisibleCell = document.querySelector<HTMLElement>(
+            ".wx-cell[data-row-id][data-col-id]:not([data-col-id='rowNumber'])",
+        );
+
+        if (!firstVisibleCell) {
+            console.error(
+                "No visible cell found when fetching spreadsheet window",
+            );
+            return;
+        }
+
+        const windowStartRow = Number(firstVisibleCell.dataset.rowId) - 1;
+        const windowStartCol =
+            toColumnIndex(firstVisibleCell.dataset.colId!) - 1;
+
+        // todo: request only cells that are not already in the window
+        // right now, it fetches the whole window each time
+
+        const newWindow: RequestWindow = {
+            start: { row: windowStartRow, col: windowStartCol },
+            end: {
+                row: windowStartRow + gridRows.length - 1,
+                col: windowStartCol + gridColumns.length - 2,
+            },
+        };
+
+        invoke<WindowCell[]>("get_spreadsheet_window", {
+            window: newWindow,
+        }).then((cells) => {
+            for (const { cellId, display, enteredText } of cells) {
+                const uiCell = toUICell(cellId);
+                const cell = getCell(uiCell);
+                if (cell) {
+                    cell.computedValue = display;
+                    cell.enteredText = enteredText;
+                }
+            }
+            requestWindow = newWindow;
+        });
+    }
+
     // set editor input to entered value of the focused cell
     $effect(() => {
         const cell = getCell(focusedCell)!;
@@ -372,7 +447,10 @@
     }
 
     function clearFocus() {
+        commitEdit();
         focusedCell = undefined;
+        editorInput = "";
+        isEditing = false;
         gridApi?.exec("focus-cell", {
             row: undefined,
             column: undefined,
@@ -482,11 +560,29 @@
 
         // if clicked on different cell ...
         if (hoveredCell) {
+            // if clicked while holding control, move focus
+            if (ev.ctrlKey) {
+                if (isEditing) {
+                    commitEdit();
+                }
+                shiftClickedOnce = false;
+                focusedRangeStart = { ...hoveredCell };
+                focusedCell = { ...hoveredCell };
+                return;
+            }
+
             // ... while editing formula, then insert reference into editor
             if (isEditing && editorInputIsFormula) {
                 ev.preventDefault(); // prevent focus from leaving the editor
                 editorInsertReference = true;
-                editorInsertReferenceStart = { ...hoveredCell };
+                if (ev.shiftKey && shiftClickedOnce) {
+                    // second shift-click: keep reference start, move end to complete the range
+                    shiftClickedOnce = false;
+                } else {
+                    // first shift-click or no shift: set reference start to clicked cell
+                    editorInsertReferenceStart = { ...hoveredCell };
+                    shiftClickedOnce = ev.shiftKey;
+                }
                 editorInsertReferenceEnd = { ...hoveredCell };
                 return;
             }
@@ -497,7 +593,15 @@
             // switch focus (and start selection)
             isSelecting = true;
             isEditing = false;
-            focusedRangeStart = { ...hoveredCell };
+
+            if (ev.shiftKey && shiftClickedOnce) {
+                // second shift-click: keep range start, move focus to complete the range
+                shiftClickedOnce = false;
+            } else {
+                // first shift-click or no shift: set range start to clicked cell
+                focusedRangeStart = { ...hoveredCell };
+                shiftClickedOnce = ev.shiftKey;
+            }
             focusedCell = { ...hoveredCell };
         }
     }
@@ -697,10 +801,11 @@
     }
 
     function handleKeyUp(ev: KeyboardEvent) {
-        if (isEditing) return;
-
         if (ev.key === "Shift") {
-            isSelecting = false;
+            shiftClickedOnce = false;
+            if (!isEditing) {
+                isSelecting = false;
+            }
         }
     }
 
@@ -710,16 +815,7 @@
         if (nextTickReady) {
             setTimeout(() => {
                 applySheetStyles();
-
-                // todo: infinite scroll
-                // const el = ev.target as HTMLElement;
-                // if (el.scrollTop + el.clientHeight > el.scrollHeight - 200) {
-                //     growRows(gridRows.length + GROW_BUFFER);
-                // }
-                // if (el.scrollLeft + el.clientWidth > el.scrollWidth - 200) {
-                //     growColumns(gridColumns.length - 1 + GROW_BUFFER);
-                // }
-
+                fetchSpreadsheetWindow();
                 nextTickReady = true;
             }, 100);
             nextTickReady = false;
@@ -870,6 +966,10 @@
         formulaReferencesHighlights;
         applySheetStyles();
     });
+
+    onMount(() => {
+        fetchSpreadsheetWindow();
+    });
 </script>
 
 <SheetTopPanel />
@@ -900,6 +1000,7 @@
 
 <style>
     .grid-wrapper {
+        content-visibility: auto;
         flex: 1;
         position: relative;
         min-height: 0;

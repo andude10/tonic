@@ -1,7 +1,5 @@
 <script lang="ts">
-    import type { IApi } from "@svar-ui/svelte-grid";
     import InputCell from "./InputCell.svelte";
-    import { getContext } from "svelte";
     import { getSheetSharedState, type UICell } from "$lib/sheet/shared";
 
     const shared = getSheetSharedState();
@@ -13,7 +11,6 @@
     function handleKeyDown(ev: KeyboardEvent): void {
         // on Enter or Escape, commit change and move focus to sheet
         if (ev.key === "Enter" || ev.key === "Escape") {
-            ev.preventDefault();
             shared.commitEdit();
             shared.isEditing = false;
             document.querySelector<HTMLElement>(".grid-wrapper")?.focus();

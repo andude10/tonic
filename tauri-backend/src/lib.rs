@@ -1,7 +1,8 @@
 use std::{error::Error, sync::Mutex, time::Instant};
 
-use ::serde::Serialize;
+use ::serde::{Deserialize, Serialize};
 use chumsky::{span::Span, Parser};
+use fastnum::D256;
 use tauri::{ipc::Channel, window::Color, AppHandle, Manager};
 use tauri_plugin_log::log::{debug, error};
 
@@ -26,6 +27,21 @@ impl TonicState {
             spreadsheet: Mutex::new(Spreadsheet::new()),
         }
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RequestWindow {
+    start: CellId,
+    end: CellId,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WindowCell {
+    cell_id: CellId,
+    display: String,
+    entered_text: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -61,10 +77,43 @@ fn send_error(channel: &Channel<ComputeFormulaEvent>, cell_id: CellId, message: 
     }
 }
 
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
+fn get_spreadsheet_window(app: AppHandle, window: RequestWindow) -> Vec<WindowCell> {
+    let state = app.state::<TonicState>();
+    let spreadsheet = state
+        .spreadsheet
+        .lock()
+        .expect("to able to lock spreadsheet in get_spreadsheet_window");
+
+    let sheet = &spreadsheet.sheets[0];
+    let start = CellId {
+        col: window.start.col,
+        row: window.start.row,
+    };
+    let end = CellId {
+        col: window.end.col,
+        row: window.end.row,
+    };
+
+    let mut result = Vec::new();
+    for (&cell_id, cell) in sheet.range(start..=end) {
+        let display = match cell {
+            Cell::SingleValue(v) => v.to_string(),
+            Cell::Formula { value, .. } => value.to_string(),
+        };
+        let entered_text = spreadsheet
+            .user_input_raw_text
+            .get(&cell_id)
+            .cloned()
+            .unwrap_or_default();
+        result.push(WindowCell {
+            cell_id,
+            display,
+            entered_text,
+        });
+    }
+
+    result
 }
 
 #[tauri::command]
@@ -80,11 +129,22 @@ fn enter_input(
         .lock()
         .expect("to able to lock spreadsheet in enter_input");
 
+    // always save user input
+    spreadsheet
+        .user_input_raw_text
+        .insert(cell_id, user_input.to_string());
+
     // if not entering formula, then just update value
     if !user_input.starts_with('=') {
-        if let Ok(n) = user_input.parse::<f64>() {
+        let insert_time = Instant::now();
+        if let Ok(n) = user_input.parse::<D256>() {
             spreadsheet.sheets[0].insert(cell_id, Cell::SingleValue(CellValue::Number(n)));
-            debug!("User entered number: \"{}\", to {}", n, cell_id);
+            debug!(
+                "User entered number ({:?}): \"{}\", to {}",
+                insert_time.elapsed(),
+                n,
+                cell_id
+            );
             let display = n.to_string();
             send_result(&compute_formula_channel, cell_id, &display);
         } else {
@@ -92,7 +152,12 @@ fn enter_input(
                 cell_id,
                 Cell::SingleValue(CellValue::Text(user_input.to_string())),
             );
-            debug!("User entered text: \"{}\", to {}", user_input, cell_id);
+            debug!(
+                "User entered text ({:?}): \"{}\", to {}",
+                insert_time.elapsed(),
+                user_input,
+                cell_id
+            );
             send_result(&compute_formula_channel, cell_id, user_input);
         }
         return;
@@ -169,7 +234,10 @@ pub fn run() {
                 .build(),
         )
         .setup(setup)
-        .invoke_handler(tauri::generate_handler![greet, enter_input])
+        .invoke_handler(tauri::generate_handler![
+            enter_input,
+            get_spreadsheet_window
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

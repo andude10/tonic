@@ -26,3 +26,4 @@ chumsky = {version = "0.12.0", features = ["pratt", "regex"] }
 ron = "0.12.0"
 thiserror = "2.0.18"
 tauri-plugin-log = "2"
+fastnum = { version = "0.7", features = ["serde"] }

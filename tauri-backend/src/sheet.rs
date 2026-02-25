@@ -3,6 +3,7 @@ use std::{
     fmt,
 };
 
+use fastnum::D256;
 use serde::{Deserialize, Serialize};
 
 // #[macro_export]
@@ -95,7 +96,7 @@ pub struct CellRange {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum ExprAtom {
     Boolean(bool),
-    Number(f64),
+    Number(D256),
     Text(String),
     Function(UserFuncId),
     CellRef(SheetId, CellId),
@@ -116,8 +117,6 @@ pub enum AtomType {
     RelativeCellRange,
 }
 
-// todo: figure out correct types (u64, f64, etc) for number to sum correctly.
-
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum Expr {
     Atom(ExprAtom),
@@ -130,12 +129,12 @@ pub enum Expr {
     // default formulas
     Sum {
         range_id: ExprId,
-        sum: f64,
+        sum: D256,
     },
     Avg {
         range_id: ExprId,
         count: u64,
-        sum: f64,
+        sum: D256,
     },
 
     ExtrnalFunctionCall {
@@ -146,7 +145,7 @@ pub enum Expr {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum CellValue {
-    Number(f64),
+    Number(D256),
     Text(String),
 }
 
@@ -229,7 +228,7 @@ pub struct Spreadsheet {
     pub user_function_names: HashMap<NameRef, UserFuncId>,
     pub user_function_names_lookup: HashMap<UserFuncId, NameRef>,
 
-    pub formulas_raw_text: HashMap<CellId, String>,
+    pub user_input_raw_text: HashMap<CellId, String>,
 }
 
 impl Spreadsheet {
@@ -250,7 +249,7 @@ impl Spreadsheet {
             user_functions: Vec::new(),
             user_function_names: HashMap::new(),
             user_function_names_lookup: HashMap::new(),
-            formulas_raw_text: HashMap::new(),
+            user_input_raw_text: HashMap::new(),
         }
     }
 }

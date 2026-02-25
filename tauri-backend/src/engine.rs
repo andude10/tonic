@@ -1,3 +1,5 @@
+use fastnum::D256;
+
 use crate::sheet::{AtomType, Cell, CellId, CellRange, CellValue, Expr, ExprAtom, Spreadsheet};
 
 #[derive(Debug)]
@@ -19,7 +21,7 @@ impl ExprAtom {
         }
     }
 
-    fn as_number(&self) -> Result<f64, EvalError> {
+    fn as_number(&self) -> Result<D256, EvalError> {
         match self {
             ExprAtom::Number(n) => Ok(*n),
             other => Err(EvalError::TypeError {
@@ -92,16 +94,15 @@ pub fn eval_formula(
                 ExprAtom::Number(a / b)
             }
             Expr::Sum { range_id, mut sum } => {
-                // todo: make arithmetic safe
                 let (sheet_id, start, end) = store[*range_id as usize].as_range_normalized()?;
                 for (_, cell) in spreadsheet.sheets[sheet_id as usize].range(start..=end) {
                     // todo: remove branching?
                     if let Cell::SingleValue(CellValue::Number(n)) = cell {
-                        sum += n;
+                        sum += *n;
                     }
                     if let Cell::Formula { value, .. } = cell {
                         if let CellValue::Number(n) = value {
-                            sum += n;
+                            sum += *n;
                         }
                     }
                 }
@@ -116,11 +117,11 @@ pub fn eval_formula(
                 for (_, cell) in spreadsheet.sheets[sheet_id as usize].range(start..=end) {
                     count += 1;
                     if let Cell::SingleValue(CellValue::Number(n)) = cell {
-                        sum += n;
+                        sum += *n;
                     }
                     if let Cell::Formula { value, .. } = cell {
                         if let CellValue::Number(n) = value {
-                            sum += n;
+                            sum += *n;
                         }
                     }
                 }
