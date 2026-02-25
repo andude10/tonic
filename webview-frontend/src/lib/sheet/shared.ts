@@ -6,7 +6,11 @@ export type CellData = { computedValue: string; enteredText: string };
 export type SheetSharedState = {
     focusedCell: UICell | undefined;
     isEditing: boolean;
+    readonly editorInputIsFormula: boolean;
     editorInput: string;
+    readonly editorInputHtml: string;
+    caretPosition: number;
+    commitEdit(): void;
 };
 
 export const [getSheetSharedState, setSheetSharedState] =

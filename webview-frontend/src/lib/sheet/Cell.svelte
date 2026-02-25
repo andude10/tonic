@@ -20,27 +20,10 @@
 
     const shared = getSheetSharedState();
 
-    // todo: move isFormula to shared state
-    let isFormula = $derived(shared.editorInput.startsWith("="));
-
-    let wrapper: HTMLDivElement | undefined = $state();
-
     let focusedThisCell = $derived(
         shared.focusedCell?.row === row.id &&
             shared.focusedCell?.column === column.id,
     );
-
-    $effect(() => {
-        if (focusedThisCell && shared.isEditing) {
-            tick().then(() => {
-                requestAnimationFrame(() => {
-                    wrapper
-                        ?.querySelector<HTMLInputElement>(".editor")
-                        ?.focus();
-                });
-            });
-        }
-    });
 
     const displayContent = $derived.by(() => {
         const cell = row[column.id];
@@ -50,8 +33,12 @@
 </script>
 
 {#if shared.isEditing && focusedThisCell}
-    <div bind:this={wrapper}>
-        <InputCell {isFormula} bind:value={shared.editorInput} />
+    <div>
+        <InputCell
+            editorInputIsFormula={shared.editorInputIsFormula}
+            bind:editorInput={shared.editorInput}
+            editorInputHtml={shared.editorInputHtml}
+        />
     </div>
 {:else}
     <div>

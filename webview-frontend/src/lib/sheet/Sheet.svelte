@@ -125,10 +125,98 @@
 
     // tracks which cell the mouse is currently over (ignoring row number column)
     let hoveredCell: UICell | undefined = $state();
-    let selectionRangeStart: UICell | undefined = $state();
+    let focusedRangeStart: UICell | undefined = $state();
     let isSelecting = $state(false); // is true during mouse drag or while shift is held
     let isEditing = $state(false);
     let editorInput = $state("");
+    let caretPosition = $state(0);
+
+    let editorInputIsFormula = $derived(editorInput.startsWith("="));
+
+    const REF_COLORS = [
+        "#4285f4",
+        "#ea4335",
+        "#9c27b0",
+        "#ff9800",
+        "#34a853",
+        "#e91e63",
+    ];
+
+    type FormulaReferenceHighlight = {
+        bounds: { minR: number; maxR: number; minC: number; maxC: number };
+        colorIndex: number;
+        isActive: boolean;
+    };
+
+    const function_names_regex = /\b(sum|avg)\b/gi;
+
+    // matches "A1", "A1:B3", and incomplete "A1:", "A1:B"
+    const cell_incomplete_references_regex =
+        /\b([A-Z]+)(\d+)(?::(?:([A-Z]+)(\d+)?)?)?(?![a-z0-9])/gi;
+    // matches "A1" and "A1:B3"
+    const cell_references_regex = /\b([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\b/gi;
+
+    let editorInputHtml = $derived.by(() => {
+        if (!editorInputIsFormula || !isEditing) return "";
+
+        let html = editorInput.replace(
+            function_names_regex,
+            (m) => `<span class="formula-fn-name">${m}</span>`,
+        );
+        let refIndex = 0;
+        html = html.replace(
+            cell_incomplete_references_regex,
+            (m) =>
+                `<span class="formula-cell-reference" style="--ref-color-bg:${REF_COLORS[refIndex++ % REF_COLORS.length]}">${m}</span>`,
+        );
+
+        return html;
+    });
+
+    // parse references from formula — only depends on editorInput
+    let parsedFormulaReferencesHighlights = $derived.by(() => {
+        if (!editorInputIsFormula || !isEditing || !editorInput)
+            return undefined;
+
+        let match;
+        let reference_index = 0;
+        const results: (FormulaReferenceHighlight & {
+            matchIndex: number;
+            matchLength: number;
+        })[] = [];
+        cell_references_regex.lastIndex = 0;
+        while ((match = cell_references_regex.exec(editorInput)) !== null) {
+            const start_column = toColumnIndex(match[1]);
+            const start_row = Number(match[2]);
+            const end_column = match[3]
+                ? toColumnIndex(match[3])
+                : start_column;
+            const end_row = match[4] ? Number(match[4]) : start_row;
+            results.push({
+                bounds: {
+                    minR: Math.min(start_row, end_row),
+                    maxR: Math.max(start_row, end_row),
+                    minC: Math.min(start_column, end_column),
+                    maxC: Math.max(start_column, end_column),
+                },
+                colorIndex: reference_index++ % REF_COLORS.length,
+                isActive: false,
+                matchIndex: match.index,
+                matchLength: match[0].length,
+            });
+        }
+        return results;
+    });
+
+    let formulaReferencesHighlights = $derived.by(() => {
+        if (!parsedFormulaReferencesHighlights) return undefined;
+        return parsedFormulaReferencesHighlights.map((ref) => ({
+            ...ref,
+            isActive:
+                caretPosition >= ref.matchIndex &&
+                caretPosition <= ref.matchIndex + ref.matchLength,
+        }));
+    });
 
     // expose state to components via context
     setSheetSharedState({
@@ -144,12 +232,25 @@
         set isEditing(v) {
             isEditing = v;
         },
+        get editorInputIsFormula() {
+            return editorInputIsFormula;
+        },
         get editorInput() {
             return editorInput;
         },
         set editorInput(v) {
             editorInput = v;
         },
+        get editorInputHtml() {
+            return editorInputHtml;
+        },
+        get caretPosition() {
+            return caretPosition;
+        },
+        set caretPosition(v) {
+            caretPosition = v;
+        },
+        commitEdit,
     });
 
     $effect(() => {
@@ -160,16 +261,16 @@
         });
     });
 
-    // bounding box of the selection range between selectionAnchor and focusedCell
-    let selectedRangeBounds = $derived.by(() => {
-        if (!selectionRangeStart || !focusedCell) return null;
+    // bounding box of the selection range between selectionRangeStart and focusedCell
+    let focusedRangeBounds = $derived.by(() => {
+        if (!focusedRangeStart || !focusedCell) return null;
 
-        const c1 = toColumnIndex(selectionRangeStart.column);
+        const c1 = toColumnIndex(focusedRangeStart.column);
         const c2 = toColumnIndex(focusedCell.column);
 
         return {
-            minR: Math.min(selectionRangeStart.row, focusedCell.row),
-            maxR: Math.max(selectionRangeStart.row, focusedCell.row),
+            minR: Math.min(focusedRangeStart.row, focusedCell.row),
+            maxR: Math.max(focusedRangeStart.row, focusedCell.row),
             minC: Math.min(c1, c2),
             maxC: Math.max(c1, c2),
         };
@@ -229,6 +330,16 @@
         gridApi?.exec("focus-cell", {
             row: undefined,
             column: undefined,
+        });
+    }
+
+    function moveFocusToInlineEditor(cell: UICell) {
+        requestAnimationFrame(() => {
+            document
+                .querySelector<HTMLInputElement>(
+                    `.wx-cell[data-row-id="${cell.row}"][data-col-id="${cell.column}"] .editor`,
+                )
+                ?.focus();
         });
     }
 
@@ -300,18 +411,19 @@
         if (!clickedCell) return;
         const { rowId, colId } = clickedCell.dataset;
 
-        // always start range selection on click
-        isSelecting = true;
-
-        // if clicked on already focused cell, start editing it
+        //if clicked on already focused cell, start editing it
         if (
             focusedCell &&
             focusedCell.row === Number(rowId) &&
             focusedCell.column === colId
         ) {
             isEditing = true;
+            moveFocusToInlineEditor(focusedCell);
             return;
         }
+
+        // start range selection on click
+        isSelecting = true;
 
         // otherwise, if clicked on different cell, change focus
         if (hoveredCell) {
@@ -321,12 +433,13 @@
             }
 
             isEditing = false;
-            selectionRangeStart = { ...hoveredCell };
+            focusedRangeStart = { ...hoveredCell };
             focusedCell = { ...hoveredCell };
         }
     }
 
     function handleMouseUp(ev: MouseEvent) {
+        // stop selecting on mouse button release
         isSelecting = false;
 
         const target = ev.target as HTMLElement;
@@ -356,7 +469,7 @@
         if (ev.key === "Escape") {
             isEditing = false;
             clearFocus();
-            selectionRangeStart = undefined;
+            focusedRangeStart = undefined;
             isSelecting = false;
             return;
         }
@@ -408,15 +521,15 @@
             // if a multi-cell range is selected (and not in selection mode),
             // move the entire range in the direction of the arrow
             const hasMultiCellRange =
-                selectionRangeStart &&
-                selectedRangeBounds &&
-                (selectionRangeStart.row !== focusedCell.row ||
-                    selectionRangeStart.column !== focusedCell.column);
+                focusedRangeStart &&
+                focusedRangeBounds &&
+                (focusedRangeStart.row !== focusedCell.row ||
+                    focusedRangeStart.column !== focusedCell.column);
 
-            if (hasMultiCellRange && selectionRangeStart && !isSelecting) {
-                let nextAnchorRow = selectionRangeStart.row + rowDelta;
+            if (hasMultiCellRange && focusedRangeStart && !isSelecting) {
+                let nextAnchorRow = focusedRangeStart.row + rowDelta;
                 let nextAnchorCol =
-                    toColumnIndex(selectionRangeStart.column) + colDelta;
+                    toColumnIndex(focusedRangeStart.column) + colDelta;
 
                 if (!isInBounds(nextAnchorRow, nextAnchorCol)) {
                     return;
@@ -425,7 +538,7 @@
                     row: nextRow,
                     column: toColumnId(nextCol),
                 };
-                selectionRangeStart = {
+                focusedRangeStart = {
                     row: nextAnchorRow,
                     column: gridColumns[nextAnchorCol].id as string,
                 };
@@ -447,7 +560,7 @@
                     row: nextRow,
                     column: toColumnId(nextCol),
                 };
-                selectionRangeStart = {
+                focusedRangeStart = {
                     row: nextRow,
                     column: gridColumns[nextCol].id as string,
                 };
@@ -462,6 +575,7 @@
 
                 if (!isEditing) {
                     isEditing = true;
+                    moveFocusToInlineEditor(focusedCell);
                     return;
                 }
 
@@ -470,7 +584,7 @@
                     commitEdit();
                     isEditing = false;
                     focusedCell = { row: nextRow, column: focusedCell.column };
-                    selectionRangeStart = {
+                    focusedRangeStart = {
                         row: nextRow,
                         column: focusedCell.column,
                     };
@@ -481,7 +595,7 @@
             else if (ev.key === "Delete") {
                 ev.preventDefault();
 
-                const bounds = selectedRangeBounds;
+                const bounds = focusedRangeBounds;
                 if (bounds) {
                     for (let r = bounds.minR; r <= bounds.maxR; r++) {
                         for (let c = bounds.minC; c <= bounds.maxC; c++) {
@@ -501,6 +615,7 @@
                 if (ev.key === "Backspace") {
                     editorInput = editorInput.slice(0, -1);
                     isEditing = true;
+                    moveFocusToInlineEditor(focusedCell);
                 }
                 let pressedAnyOtherKey =
                     ev.key.length === 1 &&
@@ -510,6 +625,7 @@
                 if (pressedAnyOtherKey) {
                     editorInput += ev.key;
                     isEditing = true;
+                    moveFocusToInlineEditor(focusedCell);
                 }
             }
         }
@@ -540,15 +656,42 @@
                 // }
 
                 nextTickReady = true;
-            }, 10);
+            }, 100);
             nextTickReady = false;
+        }
+    }
+
+    function applySelectCellStyle(
+        cell: HTMLElement,
+        row: number,
+        col: number,
+        b: { minR: number; maxR: number; minC: number; maxC: number },
+        color: string,
+    ) {
+        const inside =
+            row >= b.minR && row <= b.maxR && col >= b.minC && col <= b.maxC;
+        if (!inside) return;
+        if (row === b.minR) {
+            cell.classList.add("selection-top");
+            cell.style.setProperty("--sel-top", color);
+        }
+        if (row === b.maxR) {
+            cell.classList.add("selection-bottom");
+            cell.style.setProperty("--sel-bottom", color);
+        }
+        if (col === b.minC) {
+            cell.classList.add("selection-left");
+            cell.style.setProperty("--sel-left", color);
+        }
+        if (col === b.maxC) {
+            cell.classList.add("selection-right");
+            cell.style.setProperty("--sel-right", color);
         }
     }
 
     function applySheetStyles() {
         const wrapper = document.querySelector(".grid-wrapper");
         if (!wrapper) return;
-        const bounds = selectedRangeBounds;
         const focused = focusedCell;
 
         // style headers
@@ -556,11 +699,12 @@
             "[data-header-id]",
         )) {
             const idx = toColumnIndex(columnHeader.dataset.headerId!);
-            if (bounds) {
+            if (focusedRangeBounds) {
                 // highlight all columns of cells in range selec
                 columnHeader.classList.toggle(
                     "highlight-col",
-                    idx >= bounds.minC && idx <= bounds.maxC,
+                    idx >= focusedRangeBounds.minC &&
+                        idx <= focusedRangeBounds.maxC,
                 );
             } else if (focused) {
                 // highlight column of focused cell
@@ -580,8 +724,13 @@
             const rowId = Number(cell.dataset.rowId);
             const colId = cell.dataset.colId!;
 
+            // highlight rows of selected cells
             if (colId === "rowNumber") {
-                if (bounds && rowId >= bounds.minR && rowId <= bounds.maxR) {
+                if (
+                    focusedRangeBounds &&
+                    rowId >= focusedRangeBounds.minR &&
+                    rowId <= focusedRangeBounds.maxR
+                ) {
                     cell.classList.add("highlight-row");
                 } else if (focused && rowId === focused.row) {
                     cell.classList.add("highlight-row");
@@ -591,51 +740,74 @@
                 continue;
             }
 
-            if (!bounds) {
-                cell.classList.remove(
-                    "selection-top",
-                    "selection-bottom",
-                    "selection-left",
-                    "selection-right",
+            const colIndex = toColumnIndex(colId);
+
+            // clear previous border styles
+            cell.classList.remove(
+                "selection-top",
+                "selection-bottom",
+                "selection-left",
+                "selection-right",
+                "formula-ref-active",
+            );
+
+            // show borders around range selection
+            if (focusedRangeBounds) {
+                applySelectCellStyle(
+                    cell,
+                    rowId,
+                    colIndex,
+                    focusedRangeBounds,
+                    "var(--wx-color-primary)",
                 );
-                continue;
             }
 
-            const colIdx = toColumnIndex(colId);
-            const inside =
-                rowId >= bounds.minR &&
-                rowId <= bounds.maxR &&
-                colIdx >= bounds.minC &&
-                colIdx <= bounds.maxC;
-
-            cell.classList.toggle(
-                "selection-top",
-                inside && rowId === bounds.minR,
-            );
-            cell.classList.toggle(
-                "selection-bottom",
-                inside && rowId === bounds.maxR,
-            );
-            cell.classList.toggle(
-                "selection-left",
-                inside && colIdx === bounds.minC,
-            );
-            cell.classList.toggle(
-                "selection-right",
-                inside && colIdx === bounds.maxC,
-            );
+            // show cell references in formula on the spreadsheet
+            // active ref is processed last so its color wins on overlapping cells
+            if (formulaReferencesHighlights) {
+                let activeRef: FormulaReferenceHighlight | undefined;
+                for (const ref of formulaReferencesHighlights) {
+                    if (ref.isActive) {
+                        activeRef = ref;
+                    }
+                    applySelectCellStyle(
+                        cell,
+                        rowId,
+                        colIndex,
+                        ref.bounds,
+                        REF_COLORS[ref.colorIndex],
+                    );
+                }
+                if (activeRef) {
+                    const bounds = activeRef.bounds;
+                    const isActive =
+                        bounds &&
+                        rowId >= bounds.minR &&
+                        rowId <= bounds.maxR &&
+                        colIndex >= bounds.minC &&
+                        colIndex <= bounds.maxC;
+                    if (isActive) {
+                        cell.classList.add("formula-ref-active");
+                        cell.style.setProperty(
+                            "--ref-active-color",
+                            REF_COLORS[activeRef!.colorIndex] + "18",
+                        );
+                    }
+                }
+            }
         }
     }
 
     // apply sheet styles when selectedRangeBounds or focusedCell changes
     $effect(() => {
-        selectedRangeBounds;
+        focusedRangeBounds;
         focusedCell;
+        formulaReferencesHighlights;
         applySheetStyles();
     });
 </script>
 
-<SheetTopPanel {gridApi} />
+<SheetTopPanel />
 
 <div
     class="grid-wrapper"
@@ -676,17 +848,21 @@
         bottom: 0;
     }
 
+    :global(.formula-ref-active) {
+        background-color: var(--ref-active-color) !important;
+    }
+
     :global(.selection-top) {
-        border-top: 2px dashed var(--wx-color-primary) !important;
+        border-top: 2px dashed var(--sel-top) !important;
     }
     :global(.selection-bottom) {
-        border-bottom: 2px dashed var(--wx-color-primary) !important;
+        border-bottom: 2px dashed var(--sel-bottom) !important;
     }
     :global(.selection-left) {
-        border-left: 2px dashed var(--wx-color-primary) !important;
+        border-left: 2px dashed var(--sel-left) !important;
     }
     :global(.selection-right) {
-        border-right: 2px dashed var(--wx-color-primary) !important;
+        border-right: 2px dashed var(--sel-right) !important;
     }
 
     :global(.wx-cell[data-col-id="rowNumber"]) {

@@ -4,16 +4,21 @@
     import { getContext } from "svelte";
     import { getSheetSharedState, type UICell } from "$lib/sheet/shared";
 
-    let {
-        gridApi,
-    }: {
-        gridApi: IApi | undefined;
-    } = $props();
-
     const shared = getSheetSharedState();
 
-    // todo: move isFormula to shared state
-    let isFormula = $derived(shared.editorInput.startsWith("="));
+    function handleInput(ev: Event): void {
+        shared.isEditing = true;
+    }
+
+    function handleKeyDown(ev: KeyboardEvent): void {
+        // on Enter or Escape, commit change and move focus to sheet
+        if (ev.key === "Enter" || ev.key === "Escape") {
+            ev.preventDefault();
+            shared.commitEdit();
+            shared.isEditing = false;
+            document.querySelector<HTMLElement>(".grid-wrapper")?.focus();
+        }
+    }
 </script>
 
 <div class="panel">
@@ -32,11 +37,15 @@
 
         <div class="content-group">
             <div class="formula-label">ƒ(x)</div>
+
             <InputCell
-                {isFormula}
+                editorInputIsFormula={shared.editorInputIsFormula}
+                bind:editorInput={shared.editorInput}
+                editorInputHtml={shared.editorInputHtml}
                 disabled={!shared.focusedCell}
-                bind:value={shared.editorInput}
                 class="top-panel-editor"
+                oninput={handleInput}
+                onkeydown={handleKeyDown}
             />
         </div>
     </div>

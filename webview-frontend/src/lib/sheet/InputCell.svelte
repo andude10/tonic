@@ -1,32 +1,68 @@
 <script lang="ts">
+    import { getSheetSharedState } from "./shared";
+
     let {
         disabled = false,
         class: className = "",
-        isFormula,
-        value = $bindable(""),
+        editorInputIsFormula,
+        editorInput = $bindable(""),
+        editorInputHtml,
+        oninput,
+        onchange,
+        onkeydown,
     }: {
         disabled?: boolean;
         class?: string;
-        isFormula: boolean;
-        value: string;
+        editorInputIsFormula: boolean;
+        editorInput: string;
+        editorInputHtml: string;
+        oninput?: (ev: Event) => void;
+        onchange?: (ev: Event) => void;
+        onkeydown?: (ev: KeyboardEvent) => void;
     } = $props();
 
-    const FN_RE = /\b(sum|avg)\b/gi;
+    const shared = getSheetSharedState();
 
-    let highlighted = $derived.by(() => {
-        if (!isFormula) return "";
-        return value.replace(
-            FN_RE,
-            (m) => `<span class="formula-fn-name">${m}</span>`,
-        );
-    });
+    let backdropEl: HTMLDivElement | undefined = $state();
+
+    function updateCaretPosition(ev: Event) {
+        const input = ev.target as HTMLInputElement;
+        shared.caretPosition = input.selectionStart ?? 0;
+        if (backdropEl) backdropEl.scrollLeft = input.scrollLeft;
+    }
 </script>
 
-<div class="formula-input {className}" class:formula={isFormula} class:disabled>
-    {#if isFormula}
-        <div class="backdrop" aria-hidden="true">{@html highlighted}</div>
+<div
+    class="formula-input {className}"
+    class:formula={editorInputIsFormula}
+    class:disabled
+>
+    {#if editorInputIsFormula}
+        <div class="backdrop" bind:this={backdropEl} aria-hidden="true">
+            {@html editorInputHtml}
+        </div>
     {/if}
-    <input class="editor" type="text" bind:value {disabled} />
+    <input
+        class="editor"
+        type="text"
+        bind:value={editorInput}
+        {disabled}
+        oninput={(ev) => {
+            updateCaretPosition(ev);
+            oninput?.(ev);
+        }}
+        {onchange}
+        {onkeydown}
+        onclick={updateCaretPosition}
+        onkeyup={updateCaretPosition}
+        onselect={updateCaretPosition}
+        onscroll={(ev) => {
+            if (backdropEl)
+                backdropEl.scrollLeft = (
+                    ev.target as HTMLInputElement
+                ).scrollLeft;
+        }}
+    />
 </div>
 
 <style>
@@ -79,5 +115,9 @@
 
     .backdrop :global(.formula-fn-name) {
         color: #61afef;
+    }
+
+    .backdrop :global(.formula-cell-reference) {
+        color: color-mix(in srgb, var(--ref-color-bg) 70%, white);
     }
 </style>
