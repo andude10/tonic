@@ -58,6 +58,8 @@
         return ch;
     }
 
+    // todo: it's gonna be non trivial refactor when introducing named cells
+
     // 1 -> A, 26 -> Z, 27 -> AA, 28 -> AB, ...
     function toColumnId(index: number): string {
         let s = "";
@@ -131,6 +133,12 @@
     let editorInput = $state("");
     let caretPosition = $state(0);
 
+    // the start of reference that user is trying to insert into formula they edit
+    let editorInsertReferenceStart: UICell | undefined = $state();
+    // the end of reference (similar to editorInsertReferenceStart)
+    let editorInsertReferenceEnd: UICell | undefined = $state();
+    let editorInsertReference = $state(false);
+
     let editorInputIsFormula = $derived(editorInput.startsWith("="));
 
     const REF_COLORS = [
@@ -148,8 +156,12 @@
         isActive: boolean;
     };
 
-    const function_names_regex = /\b(sum|avg)\b/gi;
+    // todo: we need to know something about AST of formula to highlight function names,
+    // referenced cells, etc. But the actuall AST is created only in rust, and now we
+    // just use some regex to workaround this. Having AST will also allow to do nice things
+    // like inserting cell/range reference only when need (after the binary op, inside function args, etc)
 
+    const function_names_regex = /\b(sum|avg)\b/gi;
     // matches "A1", "A1:B3", and incomplete "A1:", "A1:B"
     const cell_incomplete_references_regex =
         /\b([A-Z]+)(\d+)(?::(?:([A-Z]+)(\d+)?)?)?(?![a-z0-9])/gi;
@@ -276,6 +288,40 @@
         };
     });
 
+    // insert new reference (single cell or range) when user edits formula
+    $effect(() => {
+        if (
+            !editorInsertReference ||
+            !editorInsertReferenceStart ||
+            !editorInsertReferenceEnd
+        )
+            return;
+
+        const start = editorInsertReferenceStart;
+        const end = editorInsertReferenceEnd;
+        const isSameCell = start.row === end.row && start.column === end.column;
+        const ref = isSameCell
+            ? `${start.column}${start.row}`
+            : `${start.column}${start.row}:${end.column}${end.row}`;
+
+        const activeRef = formulaReferencesHighlights?.find((r) => r.isActive);
+        if (activeRef) {
+            // replace existing reference under cursor
+            editorInput =
+                editorInput.slice(0, activeRef.matchIndex) +
+                ref +
+                editorInput.slice(activeRef.matchIndex + activeRef.matchLength);
+            caretPosition = activeRef.matchIndex + ref.length;
+        } else {
+            // otherwise, insert new reference at cursor
+            editorInput =
+                editorInput.slice(0, caretPosition) +
+                ref +
+                editorInput.slice(caretPosition);
+            caretPosition += ref.length;
+        }
+    });
+
     // --- backend calls ---
 
     function commitEdit() {
@@ -372,6 +418,10 @@
         if (isSelecting && !(ev.buttons & 1)) {
             isSelecting = false;
         }
+        // same for inserting reference into formula
+        if (editorInsertReference && !(ev.buttons & 1)) {
+            editorInsertReference = false;
+        }
 
         const target = ev.target as HTMLElement;
         const clickedCell = target.closest<HTMLElement>(".wx-cell");
@@ -398,9 +448,17 @@
             hoveredCell = { row: Number(rowId), column: colId };
         }
 
-        // extend selection range while dragging
+        // if selecting, then extend selection range (while dragging)
         if (isSelecting && hoveredCell && focusedCell !== hoveredCell) {
             focusedCell = { ...hoveredCell };
+        }
+        // if inserting reference into formula, then extend reference range
+        if (
+            editorInsertReference &&
+            hoveredCell &&
+            editorInsertReferenceEnd !== hoveredCell
+        ) {
+            editorInsertReferenceEnd = { ...hoveredCell };
         }
     }
 
@@ -422,16 +480,22 @@
             return;
         }
 
-        // start range selection on click
-        isSelecting = true;
-
-        // otherwise, if clicked on different cell, change focus
+        // if clicked on different cell ...
         if (hoveredCell) {
-            // if switched focus while editing, save edited cell
-            if (isEditing) {
+            // ... while editing formula, then insert reference into editor
+            if (isEditing && editorInputIsFormula) {
+                ev.preventDefault(); // prevent focus from leaving the editor
+                editorInsertReference = true;
+                editorInsertReferenceStart = { ...hoveredCell };
+                editorInsertReferenceEnd = { ...hoveredCell };
+                return;
+            }
+            // ... while editing not formula, then commit cell (before switching focus)
+            if (isEditing && !editorInputIsFormula) {
                 commitEdit();
             }
-
+            // switch focus (and start selection)
+            isSelecting = true;
             isEditing = false;
             focusedRangeStart = { ...hoveredCell };
             focusedCell = { ...hoveredCell };
@@ -439,8 +503,9 @@
     }
 
     function handleMouseUp(ev: MouseEvent) {
-        // stop selecting on mouse button release
+        // stop selecting and inserting on mouse button release
         isSelecting = false;
+        editorInsertReference = false;
 
         const target = ev.target as HTMLElement;
         const clickedCell = target.closest<HTMLElement>(".wx-cell");

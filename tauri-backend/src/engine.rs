@@ -31,12 +31,27 @@ impl ExprAtom {
 
     fn as_range(&self) -> Result<(u32, CellRange), EvalError> {
         match self {
-            ExprAtom::CellRange(sheet_id, range) => Ok((*sheet_id, *range)),
+            ExprAtom::CellRange(sheet_id, range) | ExprAtom::RelativeCellRange(sheet_id, range) => {
+                Ok((*sheet_id, *range))
+            }
             other => Err(EvalError::TypeError {
                 expected: AtomType::CellRange,
                 got: other.atom_type(),
             }),
         }
+    }
+
+    fn as_range_normalized(&self) -> Result<(u32, CellId, CellId), EvalError> {
+        let (sheet_id, range) = self.as_range()?;
+        let lo = CellId {
+            col: range.start.col.min(range.end.col),
+            row: range.start.row.min(range.end.row),
+        };
+        let hi = CellId {
+            col: range.start.col.max(range.end.col),
+            row: range.start.row.max(range.end.row),
+        };
+        Ok((sheet_id, lo, hi))
     }
 }
 
@@ -78,10 +93,8 @@ pub fn eval_formula(
             }
             Expr::Sum { range_id, mut sum } => {
                 // todo: make arithmetic safe
-                let (sheet_id, range) = store[*range_id as usize].as_range()?;
-                for (_, cell) in
-                    spreadsheet.sheets[sheet_id as usize].range(range.start..=range.end)
-                {
+                let (sheet_id, start, end) = store[*range_id as usize].as_range_normalized()?;
+                for (_, cell) in spreadsheet.sheets[sheet_id as usize].range(start..=end) {
                     // todo: remove branching?
                     if let Cell::SingleValue(CellValue::Number(n)) = cell {
                         sum += n;
@@ -99,10 +112,8 @@ pub fn eval_formula(
                 mut sum,
                 mut count,
             } => {
-                let (sheet_id, range) = store[*range_id as usize].as_range()?;
-                for (_, cell) in
-                    spreadsheet.sheets[sheet_id as usize].range(range.start..=range.end)
-                {
+                let (sheet_id, start, end) = store[*range_id as usize].as_range_normalized()?;
+                for (_, cell) in spreadsheet.sheets[sheet_id as usize].range(start..=end) {
                     count += 1;
                     if let Cell::SingleValue(CellValue::Number(n)) = cell {
                         sum += n;
