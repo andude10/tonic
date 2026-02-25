@@ -98,6 +98,10 @@
         display: flex;
         align-items: center;
         justify-content: center;
+
+        /*sketchy style*/
+        border-radius: 12px 3px 10px 3px / 3px 10px 3px 12px;
+        transition: all 0.2s ease;
     }
 
     .window-controls button:hover {

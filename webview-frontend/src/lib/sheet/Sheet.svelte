@@ -809,162 +809,211 @@
         }
     }
 
-    let nextTickReady = true;
+    // --- scroll handling & selection overlays ---
+
+    let overlayBaseScrollTop = 0;
+    let overlayBaseScrollLeft = 0;
+    let highlightThrottleId: ReturnType<typeof setTimeout> | null = null;
+    let fetchThrottleId: ReturnType<typeof setTimeout> | null = null;
+
     function handleScroll(ev: Event) {
-        // scroll event fires too often, so throttle any action taken
-        if (nextTickReady) {
-            setTimeout(() => {
-                applySheetStyles();
-                fetchSpreadsheetWindow();
-                nextTickReady = true;
+        if (isEditing) return;
+
+        const scroller = ev.target as HTMLElement;
+
+        // move overlays via transform (no layout reflow)
+        const dx = overlayBaseScrollLeft - scroller.scrollLeft;
+        const dy = overlayBaseScrollTop - scroller.scrollTop;
+        const container = document.querySelector<HTMLElement>(
+            ".selection-overlays",
+        );
+        if (container) {
+            container.style.transform = `translate(${dx}px, ${dy}px)`;
+        }
+
+        // throttle header/row highlights
+        if (!highlightThrottleId) {
+            highlightThrottleId = setTimeout(() => {
+                applyHeaderHighlights();
+                highlightThrottleId = null;
             }, 100);
-            nextTickReady = false;
+        }
+
+        // throttle backend fetch
+        if (!fetchThrottleId) {
+            fetchThrottleId = setTimeout(() => {
+                fetchSpreadsheetWindow();
+                fetchThrottleId = null;
+            }, 100);
         }
     }
 
-    function applySelectCellStyle(
-        cell: HTMLElement,
-        row: number,
-        col: number,
+    function positionSelectionOverlay(
+        wrapperRect: DOMRect,
+        overlay: HTMLElement,
         b: { minR: number; maxR: number; minC: number; maxC: number },
         color: string,
+        cells: HTMLElement[],
     ) {
-        const inside =
-            row >= b.minR && row <= b.maxR && col >= b.minC && col <= b.maxC;
-        if (!inside) return;
-        if (row === b.minR) {
-            cell.classList.add("selection-top");
-            cell.style.setProperty("--sel-top", color);
+        let left = Infinity,
+            top = Infinity,
+            right = -Infinity,
+            bottom = -Infinity;
+        let found = false;
+
+        for (const cell of cells) {
+            const rowId = Number(cell.dataset.rowId);
+            const colIndex = toColumnIndex(cell.dataset.colId!);
+            if (
+                rowId < b.minR ||
+                rowId > b.maxR ||
+                colIndex < b.minC ||
+                colIndex > b.maxC
+            )
+                continue;
+
+            const rect = cell.getBoundingClientRect();
+            if (rowId === b.minR) top = Math.min(top, rect.top);
+            if (rowId === b.maxR) bottom = Math.max(bottom, rect.bottom);
+            if (colIndex === b.minC) left = Math.min(left, rect.left);
+            if (colIndex === b.maxC) right = Math.max(right, rect.right);
+            found = true;
         }
-        if (row === b.maxR) {
-            cell.classList.add("selection-bottom");
-            cell.style.setProperty("--sel-bottom", color);
+
+        if (!found) {
+            overlay.style.display = "none";
+            return;
         }
-        if (col === b.minC) {
-            cell.classList.add("selection-left");
-            cell.style.setProperty("--sel-left", color);
-        }
-        if (col === b.maxC) {
-            cell.classList.add("selection-right");
-            cell.style.setProperty("--sel-right", color);
-        }
+
+        if (top === Infinity) top = wrapperRect.top;
+        if (bottom === -Infinity) bottom = wrapperRect.bottom;
+        if (left === Infinity) left = wrapperRect.left;
+        if (right === -Infinity) right = wrapperRect.right;
+
+        overlay.style.display = "block";
+        overlay.style.left = `${left - wrapperRect.left}px`;
+        overlay.style.top = `${top - wrapperRect.top}px`;
+        overlay.style.width = `${right - left}px`;
+        overlay.style.height = `${bottom - top}px`;
+        overlay.style.color = color;
     }
 
-    function applySheetStyles() {
+    function applyHeaderHighlights() {
         const wrapper = document.querySelector(".grid-wrapper");
         if (!wrapper) return;
         const focused = focusedCell;
 
-        // style headers
-        for (const columnHeader of wrapper.querySelectorAll<HTMLElement>(
+        for (const col of wrapper.querySelectorAll<HTMLElement>(
             "[data-header-id]",
         )) {
-            const idx = toColumnIndex(columnHeader.dataset.headerId!);
+            const idx = toColumnIndex(col.dataset.headerId!);
             if (focusedRangeBounds) {
-                // highlight all columns of cells in range selec
-                columnHeader.classList.toggle(
+                col.classList.toggle(
                     "highlight-col",
                     idx >= focusedRangeBounds.minC &&
                         idx <= focusedRangeBounds.maxC,
                 );
             } else if (focused) {
-                // highlight column of focused cell
-                columnHeader.classList.toggle(
+                col.classList.toggle(
                     "highlight-col",
                     idx === toColumnIndex(focused.column),
                 );
             } else {
-                columnHeader.classList.remove("highlight-col");
+                col.classList.remove("highlight-col");
             }
         }
 
-        // style cells
         for (const cell of wrapper.querySelectorAll<HTMLElement>(
-            ".wx-cell[data-row-id][data-col-id]",
+            '.wx-cell[data-col-id="rowNumber"]',
         )) {
             const rowId = Number(cell.dataset.rowId);
-            const colId = cell.dataset.colId!;
-
-            // highlight rows of selected cells
-            if (colId === "rowNumber") {
-                if (
-                    focusedRangeBounds &&
-                    rowId >= focusedRangeBounds.minR &&
-                    rowId <= focusedRangeBounds.maxR
-                ) {
-                    cell.classList.add("highlight-row");
-                } else if (focused && rowId === focused.row) {
-                    cell.classList.add("highlight-row");
-                } else {
-                    cell.classList.remove("highlight-row");
-                }
-                continue;
+            if (
+                focusedRangeBounds &&
+                rowId >= focusedRangeBounds.minR &&
+                rowId <= focusedRangeBounds.maxR
+            ) {
+                cell.classList.add("highlight-row");
+            } else if (focused && rowId === focused.row) {
+                cell.classList.add("highlight-row");
+            } else {
+                cell.classList.remove("highlight-row");
             }
+        }
+    }
 
-            const colIndex = toColumnIndex(colId);
+    function positionOverlays() {
+        const wrapper = document.querySelector(".grid-wrapper");
+        if (!wrapper) return;
+        const wrapperRect = wrapper.getBoundingClientRect();
 
-            // clear previous border styles
-            cell.classList.remove(
-                "selection-top",
-                "selection-bottom",
-                "selection-left",
-                "selection-right",
-                "formula-ref-active",
-            );
+        // record scroll baseline for transform-based scroll tracking
+        const scroller =
+            wrapper.querySelector<HTMLElement>("[style*='overflow']") ??
+            wrapper;
+        overlayBaseScrollTop = scroller.scrollTop;
+        overlayBaseScrollLeft = scroller.scrollLeft;
 
-            // show borders around range selection
+        const container = wrapper.querySelector<HTMLElement>(
+            ".selection-overlays",
+        );
+        if (container) container.style.transform = "translate(0px, 0px)";
+
+        // collect data cells once (skip rowNumber column)
+        const dataCells = [
+            ...wrapper.querySelectorAll<HTMLElement>(
+                ".wx-cell[data-row-id][data-col-id]:not([data-col-id='rowNumber'])",
+            ),
+        ];
+
+        // focus overlay
+        const focusOverlay = wrapper.querySelector<HTMLElement>(
+            ".selection-overlay-focus",
+        );
+        if (focusOverlay) {
             if (focusedRangeBounds) {
-                applySelectCellStyle(
-                    cell,
-                    rowId,
-                    colIndex,
+                positionSelectionOverlay(
+                    wrapperRect,
+                    focusOverlay,
                     focusedRangeBounds,
                     "var(--wx-color-primary)",
+                    dataCells,
                 );
+            } else {
+                focusOverlay.style.display = "none";
             }
+        }
 
-            // show cell references in formula on the spreadsheet
-            // active ref is processed last so its color wins on overlapping cells
+        // formula reference overlays
+        const refsContainer = wrapper.querySelector<HTMLElement>(
+            ".selection-overlays-refs",
+        );
+        if (refsContainer) {
+            refsContainer.innerHTML = "";
             if (formulaReferencesHighlights) {
-                let activeRef: FormulaReferenceHighlight | undefined;
                 for (const ref of formulaReferencesHighlights) {
-                    if (ref.isActive) {
-                        activeRef = ref;
-                    }
-                    applySelectCellStyle(
-                        cell,
-                        rowId,
-                        colIndex,
+                    const el = document.createElement("div");
+                    el.className =
+                        "selection-overlay-ref" +
+                        (ref.isActive ? " active" : "");
+                    refsContainer.appendChild(el);
+                    positionSelectionOverlay(
+                        wrapperRect,
+                        el,
                         ref.bounds,
                         REF_COLORS[ref.colorIndex],
+                        dataCells,
                     );
-                }
-                if (activeRef) {
-                    const bounds = activeRef.bounds;
-                    const isActive =
-                        bounds &&
-                        rowId >= bounds.minR &&
-                        rowId <= bounds.maxR &&
-                        colIndex >= bounds.minC &&
-                        colIndex <= bounds.maxC;
-                    if (isActive) {
-                        cell.classList.add("formula-ref-active");
-                        cell.style.setProperty(
-                            "--ref-active-color",
-                            REF_COLORS[activeRef!.colorIndex] + "18",
-                        );
-                    }
                 }
             }
         }
     }
 
-    // apply sheet styles when selectedRangeBounds or focusedCell changes
     $effect(() => {
         focusedRangeBounds;
         focusedCell;
         formulaReferencesHighlights;
-        applySheetStyles();
+        applyHeaderHighlights();
+        positionOverlays();
     });
 
     onMount(() => {
@@ -996,6 +1045,10 @@
             undo
         />
     </div>
+    <div class="selection-overlays">
+        <div class="selection-overlay-focus" style="display:none"></div>
+        <div class="selection-overlays-refs"></div>
+    </div>
 </div>
 
 <style>
@@ -1014,21 +1067,40 @@
         bottom: 0;
     }
 
-    :global(.formula-ref-active) {
-        background-color: var(--ref-active-color) !important;
+    /* Container for all selection overlays — moved via GPU transform on scroll */
+    .selection-overlays {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        pointer-events: none;
+        z-index: 5;
+        will-change: transform;
     }
 
-    :global(.selection-top) {
-        border-top: 2px dashed var(--sel-top) !important;
+    /* Sketchy selection overlay (focus range) */
+    .selection-overlay-focus {
+        position: absolute;
+        border: 3px solid var(--wx-color-primary);
+        border-radius: 255px 15px 225px 15px / 15px 225px 15px 255px;
     }
-    :global(.selection-bottom) {
-        border-bottom: 2px dashed var(--sel-bottom) !important;
+
+    /* Sketchy selection overlay (formula references) */
+    .selection-overlays-refs {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
     }
-    :global(.selection-left) {
-        border-left: 2px dashed var(--sel-left) !important;
+    :global(.selection-overlay-ref) {
+        position: absolute;
+        border: 3px solid currentColor;
+        border-radius: 255px 15px 225px 15px / 15px 225px 15px 255px;
     }
-    :global(.selection-right) {
-        border-right: 2px dashed var(--sel-right) !important;
+    :global(.selection-overlay-ref.active) {
+        background-color: color-mix(in srgb, currentColor 8%, transparent);
     }
 
     :global(.wx-cell[data-col-id="rowNumber"]) {
@@ -1059,5 +1131,12 @@
 
     :global(.wx-cell:focus) {
         outline: 0px !important;
+    }
+
+    /* Disable grid scrolling when inline editor is active (exclude the editor and its container) */
+    :global(
+        .grid-wrapper:has(.formula-input) *:not(.editor):not(.formula-input)
+    ) {
+        overflow: hidden !important;
     }
 </style>
