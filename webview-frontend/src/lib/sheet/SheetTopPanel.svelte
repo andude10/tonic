@@ -8,6 +8,12 @@
         shared.isEditing = true;
     }
 
+    function handleFocus(ev: FocusEvent): void {
+        if (shared.focusedCell) {
+            shared.isEditing = true;
+        }
+    }
+
     function handleKeyDown(ev: KeyboardEvent): void {
         // on Enter or Escape, commit change and move focus to sheet
         if (ev.key === "Enter" || ev.key === "Escape") {
@@ -32,7 +38,7 @@
 
         <div class="separator"></div>
 
-        <div class="content-group">
+        <div class="content-group" onfocusin={handleFocus}>
             <div class="formula-label">ƒ(x)</div>
 
             <InputCell

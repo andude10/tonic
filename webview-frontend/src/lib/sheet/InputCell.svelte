@@ -100,8 +100,6 @@
         font: inherit;
         background: transparent;
         color: inherit;
-
-        overflow-y: hidden;
     }
 
     .formula .editor {

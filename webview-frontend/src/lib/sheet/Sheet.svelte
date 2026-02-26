@@ -130,8 +130,6 @@
         end: { row: 500, col: 500 },
     });
 
-    $inspect(requestWindow);
-
     // --- selection state ---
 
     // tracks which cell the mouse is currently over (ignoring row number column)
@@ -195,8 +193,6 @@
         return html;
     });
 
-    $inspect(editorInputHtml);
-
     // parse references from formula — only depends on editorInput
     let parsedFormulaReferencesHighlights = $derived.by(() => {
         if (!editorInputIsFormula || !isEditing || !editorInput)
@@ -232,14 +228,13 @@
         return results;
     });
 
-    let formulaReferencesHighlights = $derived.by(() => {
-        if (!parsedFormulaReferencesHighlights) return undefined;
-        return parsedFormulaReferencesHighlights.map((ref) => ({
-            ...ref,
-            isActive:
+    let activeRefIndex = $derived.by(() => {
+        if (!parsedFormulaReferencesHighlights) return -1;
+        return parsedFormulaReferencesHighlights.findIndex(
+            (ref) =>
                 caretPosition >= ref.matchIndex &&
                 caretPosition <= ref.matchIndex + ref.matchLength,
-        }));
+        );
     });
 
     // expose state to components via context
@@ -289,7 +284,6 @@
     $effect(() => {
         let cell = getCell(focusedCell);
         if (cell) {
-            console.log(cell.enteredText);
             editorInput = cell.enteredText;
         }
     });
@@ -326,9 +320,10 @@
             : `${start.column}${start.row}:${end.column}${end.row}`;
 
         untrack(() => {
-            const activeRef = formulaReferencesHighlights?.find(
-                (r) => r.isActive,
-            );
+            const activeRef =
+                activeRefIndex >= 0
+                    ? parsedFormulaReferencesHighlights?.[activeRefIndex]
+                    : undefined;
             if (activeRef) {
                 // replace existing reference under cursor
                 editorInput =
@@ -813,15 +808,23 @@
 
     let overlayBaseScrollTop = 0;
     let overlayBaseScrollLeft = 0;
-    let highlightThrottleId: ReturnType<typeof setTimeout> | null = null;
     let fetchThrottleId: ReturnType<typeof setTimeout> | null = null;
+    let highlightDebounceId: ReturnType<typeof setTimeout> | null = null;
+
+    // get the grid's scroll container element
+    function getScrollContainer(): HTMLElement | null {
+        const wrapper = document.querySelector<HTMLElement>(".grid-wrapper");
+        if (!wrapper) return null;
+        return (
+            wrapper.querySelector<HTMLElement>("[style*='overflow']") ?? wrapper
+        );
+    }
 
     function handleScroll(ev: Event) {
-        if (isEditing) return;
-
-        const scroller = ev.target as HTMLElement;
+        if ((ev.target as HTMLElement).closest(".formula-input")) return;
 
         // move overlays via transform (no layout reflow)
+        const scroller = ev.target as HTMLElement;
         const dx = overlayBaseScrollLeft - scroller.scrollLeft;
         const dy = overlayBaseScrollTop - scroller.scrollTop;
         const container = document.querySelector<HTMLElement>(
@@ -831,15 +834,12 @@
             container.style.transform = `translate(${dx}px, ${dy}px)`;
         }
 
-        // throttle header/row highlights
-        if (!highlightThrottleId) {
-            highlightThrottleId = setTimeout(() => {
-                applyHeaderHighlights();
-                highlightThrottleId = null;
-            }, 100);
-        }
+        if (highlightDebounceId) clearTimeout(highlightDebounceId);
+        highlightDebounceId = setTimeout(() => {
+            applyHeaderHighlights();
+            highlightDebounceId = null;
+        }, 50);
 
-        // throttle backend fetch
         if (!fetchThrottleId) {
             fetchThrottleId = setTimeout(() => {
                 fetchSpreadsheetWindow();
@@ -848,53 +848,59 @@
         }
     }
 
-    function positionSelectionOverlay(
-        wrapperRect: DOMRect,
-        overlay: HTMLElement,
-        b: { minR: number; maxR: number; minC: number; maxC: number },
-        color: string,
-        cells: HTMLElement[],
-    ) {
-        let left = Infinity,
-            top = Infinity,
-            right = -Infinity,
-            bottom = -Infinity;
-        let found = false;
+    // compute pixel rect for a cell range from logical coordinates (no DOM cell queries)
+    // positions are relative to the current scroll position at time of positionOverlays()
+    function getOverlayRect(bounds: {
+        minR: number;
+        maxR: number;
+        minC: number;
+        maxC: number;
+    }) {
+        if (!gridApi) return null;
+        const state = gridApi.getState();
+        const columns = state._columns;
+        const rowHeight = state._sizes.rowHeight ?? 37;
+        const headerHeight = state._sizes.headerHeight ?? 37;
 
-        for (const cell of cells) {
-            const rowId = Number(cell.dataset.rowId);
-            const colIndex = toColumnIndex(cell.dataset.colId!);
-            if (
-                rowId < b.minR ||
-                rowId > b.maxR ||
-                colIndex < b.minC ||
-                colIndex > b.maxC
-            )
-                continue;
-
-            const rect = cell.getBoundingClientRect();
-            if (rowId === b.minR) top = Math.min(top, rect.top);
-            if (rowId === b.maxR) bottom = Math.max(bottom, rect.bottom);
-            if (colIndex === b.minC) left = Math.min(left, rect.left);
-            if (colIndex === b.maxC) right = Math.max(right, rect.right);
-            found = true;
+        // compute column left offsets by summing widths
+        const minColId = toColumnId(bounds.minC);
+        const maxColId = toColumnId(bounds.maxC);
+        let colLeft = 0;
+        let minColLeft = -1;
+        let maxColRight = -1;
+        for (const col of columns) {
+            const w = col.width ?? 100;
+            if (col.id === minColId) minColLeft = colLeft;
+            if (col.id === maxColId) maxColRight = colLeft + w;
+            colLeft += w;
         }
+        if (minColLeft < 0 || maxColRight < 0) return null;
 
-        if (!found) {
+        const left = minColLeft - overlayBaseScrollLeft;
+        const right = maxColRight - overlayBaseScrollLeft;
+        const top =
+            headerHeight + (bounds.minR - 1) * rowHeight - overlayBaseScrollTop;
+        const bottom =
+            headerHeight + bounds.maxR * rowHeight - overlayBaseScrollTop;
+
+        return { left, top, width: right - left, height: bottom - top };
+    }
+
+    function positionSelectionOverlay(
+        overlay: HTMLElement,
+        bounds: { minR: number; maxR: number; minC: number; maxC: number },
+        color: string,
+    ) {
+        const rect = getOverlayRect(bounds);
+        if (!rect) {
             overlay.style.display = "none";
             return;
         }
-
-        if (top === Infinity) top = wrapperRect.top;
-        if (bottom === -Infinity) bottom = wrapperRect.bottom;
-        if (left === Infinity) left = wrapperRect.left;
-        if (right === -Infinity) right = wrapperRect.right;
-
         overlay.style.display = "block";
-        overlay.style.left = `${left - wrapperRect.left}px`;
-        overlay.style.top = `${top - wrapperRect.top}px`;
-        overlay.style.width = `${right - left}px`;
-        overlay.style.height = `${bottom - top}px`;
+        overlay.style.left = `${rect.left}px`;
+        overlay.style.top = `${rect.top}px`;
+        overlay.style.width = `${rect.width}px`;
+        overlay.style.height = `${rect.height}px`;
         overlay.style.color = color;
     }
 
@@ -942,41 +948,41 @@
     }
 
     function positionOverlays() {
-        const wrapper = document.querySelector(".grid-wrapper");
-        if (!wrapper) return;
-        const wrapperRect = wrapper.getBoundingClientRect();
+        if (!gridApi) return;
+        const state = gridApi.getState();
+        const headerHeight = state._sizes.headerHeight ?? 37;
+        const rowNumCol = state._columns.find((c) => c.id === "rowNumber");
+        const rowNumWidth = rowNumCol ? (rowNumCol.width ?? 50) : 50;
 
-        // record scroll baseline for transform-based scroll tracking
-        const scroller =
-            wrapper.querySelector<HTMLElement>("[style*='overflow']") ??
-            wrapper;
-        overlayBaseScrollTop = scroller.scrollTop;
-        overlayBaseScrollLeft = scroller.scrollLeft;
-
-        const container = wrapper.querySelector<HTMLElement>(
+        // record scroll baseline and reset transform
+        const scroller = getScrollContainer();
+        overlayBaseScrollTop = scroller?.scrollTop ?? 0;
+        overlayBaseScrollLeft = scroller?.scrollLeft ?? 0;
+        const container = document.querySelector<HTMLElement>(
             ".selection-overlays",
         );
-        if (container) container.style.transform = "translate(0px, 0px)";
+        if (container) {
+            container.style.transform = "translate(0px, 0px)";
+        }
 
-        // collect data cells once (skip rowNumber column)
-        const dataCells = [
-            ...wrapper.querySelectorAll<HTMLElement>(
-                ".wx-cell[data-row-id][data-col-id]:not([data-col-id='rowNumber'])",
-            ),
-        ];
+        // clip overlays so they don't render above headers or left of row-number column
+        const clipWrapper = document.querySelector<HTMLElement>(
+            ".selection-overlays-clip",
+        );
+        if (clipWrapper) {
+            clipWrapper.style.clipPath = `inset(${headerHeight}px 0 0 ${rowNumWidth}px)`;
+        }
 
         // focus overlay
-        const focusOverlay = wrapper.querySelector<HTMLElement>(
+        const focusOverlay = document.querySelector<HTMLElement>(
             ".selection-overlay-focus",
         );
         if (focusOverlay) {
             if (focusedRangeBounds) {
                 positionSelectionOverlay(
-                    wrapperRect,
                     focusOverlay,
                     focusedRangeBounds,
                     "var(--wx-color-primary)",
-                    dataCells,
                 );
             } else {
                 focusOverlay.style.display = "none";
@@ -984,36 +990,44 @@
         }
 
         // formula reference overlays
-        const refsContainer = wrapper.querySelector<HTMLElement>(
+        const refsContainer = document.querySelector<HTMLElement>(
             ".selection-overlays-refs",
         );
         if (refsContainer) {
             refsContainer.innerHTML = "";
-            if (formulaReferencesHighlights) {
-                for (const ref of formulaReferencesHighlights) {
+            if (parsedFormulaReferencesHighlights) {
+                parsedFormulaReferencesHighlights.forEach((ref, i) => {
                     const el = document.createElement("div");
                     el.className =
                         "selection-overlay-ref" +
-                        (ref.isActive ? " active" : "");
+                        (i === activeRefIndex ? " active" : "");
                     refsContainer.appendChild(el);
                     positionSelectionOverlay(
-                        wrapperRect,
                         el,
                         ref.bounds,
                         REF_COLORS[ref.colorIndex],
-                        dataCells,
                     );
-                }
+                });
             }
         }
     }
 
+    // reposition overlays when selection or formula bounds change (not on caret move)
     $effect(() => {
         focusedRangeBounds;
         focusedCell;
-        formulaReferencesHighlights;
+        parsedFormulaReferencesHighlights;
         applyHeaderHighlights();
         positionOverlays();
+    });
+
+    // update active ref highlight when caret moves (lightweight, no repositioning)
+    $effect(() => {
+        const idx = activeRefIndex;
+        const refs = document.querySelectorAll<HTMLElement>(
+            ".selection-overlay-ref",
+        );
+        refs.forEach((el, i) => el.classList.toggle("active", i === idx));
     });
 
     onMount(() => {
@@ -1045,9 +1059,11 @@
             undo
         />
     </div>
-    <div class="selection-overlays">
-        <div class="selection-overlay-focus" style="display:none"></div>
-        <div class="selection-overlays-refs"></div>
+    <div class="selection-overlays-clip">
+        <div class="selection-overlays">
+            <div class="selection-overlay-focus" style="display:none"></div>
+            <div class="selection-overlays-refs"></div>
+        </div>
     </div>
 </div>
 
@@ -1067,15 +1083,19 @@
         bottom: 0;
     }
 
-    /* Container for all selection overlays — moved via GPU transform on scroll */
-    .selection-overlays {
+    /* Static clip wrapper — prevents overlays from rendering over headers/row numbers */
+    .selection-overlays-clip {
         position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
+        inset: 0;
         pointer-events: none;
         z-index: 5;
+    }
+
+    /* Container for all selection overlays */
+    .selection-overlays {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
         will-change: transform;
     }
 
@@ -1131,12 +1151,5 @@
 
     :global(.wx-cell:focus) {
         outline: 0px !important;
-    }
-
-    /* Disable grid scrolling when inline editor is active (exclude the editor and its container) */
-    :global(
-        .grid-wrapper:has(.formula-input) *:not(.editor):not(.formula-input)
-    ) {
-        overflow: hidden !important;
     }
 </style>
