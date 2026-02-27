@@ -323,7 +323,7 @@
         const start = editorInsertReferenceStart;
         const end = editorInsertReferenceEnd;
         const isSameCell = start.row === end.row && start.column === end.column;
-        const ref = isSameCell
+        const nonRelativeRef = isSameCell
             ? `${start.column}${start.row}`
             : `${start.column}${start.row}:${end.column}${end.row}`;
 
@@ -334,6 +334,9 @@
                     : undefined;
             if (activeRef) {
                 // replace existing reference under cursor
+                const relative_prefix =
+                    editorInput[activeRef.matchIndex] === "~" ? "~" : "";
+                const ref = relative_prefix + nonRelativeRef;
                 editorInput =
                     editorInput.slice(0, activeRef.matchIndex) +
                     ref +
@@ -345,9 +348,9 @@
                 // otherwise, insert new reference at cursor
                 editorInput =
                     editorInput.slice(0, caretPosition) +
-                    ref +
+                    nonRelativeRef +
                     editorInput.slice(caretPosition);
-                caretPosition += ref.length;
+                caretPosition += nonRelativeRef.length;
             }
         });
     });
