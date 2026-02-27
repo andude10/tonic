@@ -137,6 +137,13 @@
     let focusedRangeStart: UICell | undefined = $state();
     let isSelecting = $state(false); // is true during mouse drag or while shift is held
     let shiftClickedOnce = $state(false); // true after first shift-click (waiting for second to complete range)
+    let isFilling = $state(false);
+    let fillOriginalBounds: {
+        minR: number;
+        maxR: number;
+        minC: number;
+        maxC: number;
+    } | null = null;
     let isEditing = $state(false);
     let editorInput = $state("");
     let caretPosition = $state(0);
@@ -170,11 +177,12 @@
     // like inserting cell/range reference only when need (after the binary op, inside function args, etc)
 
     const function_names_regex = /\b(sum|avg)\b/gi;
-    // matches "A1", "A1:B3", and incomplete "A1:", "A1:B"
+    // matches "A1", "~A1", "A1:B3", "~A1:B3", and incomplete "A1:", "~A1:B"
     const cell_incomplete_references_regex =
-        /\b([A-Z]+)(\d+)(?::(?:([A-Z]+)(\d+)?)?)?(?![a-z0-9])/gi;
-    // matches "A1" and "A1:B3"
-    const cell_references_regex = /\b([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\b/gi;
+        /~?(?<!\w)([A-Z]+)(\d+)(?::(?:([A-Z]+)(\d+)?)?)?(?![a-z0-9])/gi;
+    // matches "A1", "~A1", "A1:B3", "~A1:B3"
+    const cell_references_regex =
+        /~?(?<!\w)([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?(?!\w)/gi;
 
     let editorInputHtml = $derived.by(() => {
         if (!editorInputIsFormula) return "";
@@ -372,6 +380,34 @@
         });
     }
 
+    function commitCellUpdate(uiCell: UICell, value: string) {
+        const cell = getCell(uiCell);
+        if (!cell) return;
+        cell.enteredText = value;
+        invoke("enter_input", {
+            cellId: toCellId(uiCell),
+            userInput: value,
+            computeFormulaChannel: createFormulaChannel(),
+        });
+    }
+
+    async function commitCellFill(source: UICell, destinations: UICell[]) {
+        const src = toCellId(source);
+        for (const d of destinations) {
+            const result = await invoke<WindowCell | null>("fill_cell", {
+                source: src,
+                dest: toCellId(d),
+            });
+            if (result) {
+                const cell = getCell(toUICell(result.cellId));
+                if (cell) {
+                    cell.computedValue = result.display;
+                    cell.enteredText = result.enteredText;
+                }
+            }
+        }
+    }
+
     type WindowCell = {
         cellId: CellId;
         display: string;
@@ -535,6 +571,16 @@
         }
     }
 
+    function handleFillStart(ev: MouseEvent) {
+        ev.stopPropagation();
+        if (!focusedCell) return;
+        isFilling = true;
+        isSelecting = true;
+        fillOriginalBounds = focusedRangeBounds
+            ? { ...focusedRangeBounds }
+            : null;
+    }
+
     function handleMouseDown(ev: MouseEvent) {
         const target = ev.target as HTMLElement;
         const clickedCell = target.closest<HTMLElement>(".wx-cell");
@@ -602,6 +648,48 @@
     }
 
     function handleMouseUp(ev: MouseEvent) {
+        // fill cells on release
+        if (isFilling && focusedRangeStart && focusedRangeBounds) {
+            const bounds = focusedRangeBounds;
+            const srcR = focusedRangeStart.row;
+            const srcC = toColumnIndex(focusedRangeStart.column);
+
+            // collect destination cells and send to backend
+            const destinations: UICell[] = [];
+            for (let r = bounds.minR; r <= bounds.maxR; r++) {
+                for (let c = bounds.minC; c <= bounds.maxC; c++) {
+                    if (r === srcR && c === srcC) continue;
+                    destinations.push(toUICell({ row: r - 1, col: c - 1 }));
+                }
+            }
+            if (destinations.length > 0) {
+                commitCellFill(focusedRangeStart, destinations);
+            }
+
+            // delete cells that were in original bounds but not in final bounds (shrinking)
+            const orig = fillOriginalBounds;
+            if (orig) {
+                for (let r = orig.minR; r <= orig.maxR; r++) {
+                    for (let c = orig.minC; c <= orig.maxC; c++) {
+                        if (r === srcR && c === srcC) continue;
+                        if (
+                            r >= bounds.minR &&
+                            r <= bounds.maxR &&
+                            c >= bounds.minC &&
+                            c <= bounds.maxC
+                        )
+                            continue;
+                        commitCellUpdate(
+                            toUICell({ row: r - 1, col: c - 1 }),
+                            "",
+                        );
+                    }
+                }
+            }
+
+            isFilling = false;
+            fillOriginalBounds = null;
+        }
         // stop selecting and inserting on mouse button release
         isSelecting = false;
         editorInsertReference = false;
@@ -989,6 +1077,22 @@
             }
         }
 
+        // fill origin overlay (shows original selection during fill)
+        const fillOriginOverlay = document.querySelector<HTMLElement>(
+            ".selection-overlay-fill-origin",
+        );
+        if (fillOriginOverlay) {
+            if (isFilling && fillOriginalBounds) {
+                positionSelectionOverlay(
+                    fillOriginOverlay,
+                    fillOriginalBounds,
+                    "var(--wx-color-primary)",
+                );
+            } else {
+                fillOriginOverlay.style.display = "none";
+            }
+        }
+
         // formula reference overlays
         const refsContainer = document.querySelector<HTMLElement>(
             ".selection-overlays-refs",
@@ -1075,7 +1179,18 @@
     </div>
     <div class="selection-overlays-clip">
         <div class="selection-overlays">
-            <div class="selection-overlay-focus" style="display:none"></div>
+            <div
+                class="selection-overlay-fill-origin"
+                style="display:none"
+            ></div>
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div class="selection-overlay-focus" style="display:none">
+                <div
+                    class="fill-handle"
+                    class:filling={isFilling}
+                    onmousedown={handleFillStart}
+                ></div>
+            </div>
             <div class="selection-overlays-refs"></div>
         </div>
     </div>
@@ -1113,6 +1228,16 @@
         will-change: transform;
     }
 
+    /* Original selection shown during fill drag */
+    .selection-overlay-fill-origin {
+        position: absolute;
+        background: color-mix(in srgb, var(--wx-color-primary) 8%, transparent);
+        border: 2px dashed
+            color-mix(in srgb, var(--wx-color-primary) 40%, transparent);
+        border-radius: 2px;
+        pointer-events: none;
+    }
+
     /* Sketchy selection overlay (focus range) */
     .selection-overlay-focus {
         position: absolute;
@@ -1136,6 +1261,36 @@
         border-width: 1px 3px 2.5px 1.5px;
         border-radius: 4px 3px 5px 3px / 4px 5px 3px 4px;
         opacity: 0.7;
+    }
+
+    .fill-handle {
+        position: absolute;
+        bottom: -4px;
+        right: -4px;
+        width: 9px;
+        height: 9px;
+        background: var(--wx-color-primary);
+        border: 1px solid var(--wx-background);
+        cursor: crosshair;
+        pointer-events: auto;
+        z-index: 10;
+    }
+
+    .fill-handle.filling {
+        width: 12px;
+        height: 12px;
+        bottom: -6px;
+        right: -6px;
+        animation: fill-spin 0.8s linear infinite;
+    }
+
+    @keyframes fill-spin {
+        from {
+            transform: rotate(0deg);
+        }
+        to {
+            transform: rotate(360deg);
+        }
     }
 
     /* Sketchy selection overlay (formula references) */

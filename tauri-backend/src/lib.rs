@@ -1,15 +1,17 @@
 use std::{error::Error, sync::Mutex, time::Instant};
 
 use ::serde::{Deserialize, Serialize};
-use chumsky::{span::Span, Parser};
 use fastnum::D256;
-use tauri::{ipc::Channel, window::Color, AppHandle, Manager};
+use tauri::{ipc::Channel, AppHandle, Manager};
 use tauri_plugin_log::log::{debug, error};
 
 use crate::{
     engine::eval_formula,
-    parser::{lex_formula, lexer_errors_to_string, parse_formula, parse_formula_errors_to_string},
-    sheet::{Cell, CellId, CellValue, Spreadsheet},
+    parser::{
+        lex_formula, lexer_errors_to_string, offset_relative_refs, parse_formula,
+        parse_formula_errors_to_string,
+    },
+    sheet::{Cell, CellId, CellValue, Expr, ExprAtom, Spreadsheet},
 };
 
 mod engine;
@@ -218,6 +220,93 @@ fn enter_input(
     }
 }
 
+#[tauri::command]
+fn fill_cell(app: AppHandle, source: CellId, dest: CellId) -> Option<WindowCell> {
+    let state = app.state::<TonicState>();
+    let mut spreadsheet = state
+        .spreadsheet
+        .lock()
+        .expect("to able to lock spreadsheet in fill_cell");
+
+    let source_cell = spreadsheet.sheets[0].get(&source);
+
+    match source_cell {
+        Some(Cell::Formula { expr, value: _ }) => {
+            let row_off = dest.row as i32 - source.row as i32;
+            let col_off = dest.col as i32 - source.col as i32;
+
+            // clone and offset relative refs in the AST
+            let mut new_exprs: Vec<Expr> = expr.clone();
+            for e in &mut new_exprs {
+                if let Expr::Atom(atom) = e {
+                    match atom {
+                        ExprAtom::RelativeCellRef(_, ref mut cell) => {
+                            cell.row = (cell.row as i32 + row_off).max(0) as u32;
+                            cell.col = (cell.col as i32 + col_off).max(0) as u32;
+                        }
+                        ExprAtom::RelativeCellRange(_, ref mut range) => {
+                            for cell in [&mut range.start, &mut range.end] {
+                                cell.row = (cell.row as i32 + row_off).max(0) as u32;
+                                cell.col = (cell.col as i32 + col_off).max(0) as u32;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // offset relative refs in the raw text for display
+            let raw = spreadsheet
+                .user_input_raw_text
+                .get(&source)
+                .cloned()
+                .unwrap_or_default();
+            let adjusted_raw = if raw.starts_with('=') {
+                format!("={}", offset_relative_refs(&raw[1..], row_off, col_off))
+            } else {
+                raw
+            };
+            let entered_text = adjusted_raw.clone();
+            spreadsheet.user_input_raw_text.insert(dest, adjusted_raw);
+
+            // eval the offset AST
+            if let Err(e) = eval_formula(dest, 0, new_exprs, &mut spreadsheet) {
+                return Some(WindowCell {
+                    cell_id: dest,
+                    display: format!("Eval Error: {:?}", e),
+                    entered_text,
+                });
+            }
+
+            let display = spreadsheet
+                .get_cell_value(&dest, 0)
+                .expect("to get cell value")
+                .to_string();
+            Some(WindowCell {
+                cell_id: dest,
+                display,
+                entered_text,
+            })
+        }
+        Some(Cell::SingleValue(value)) => {
+            let value = value.clone();
+            let raw = spreadsheet
+                .user_input_raw_text
+                .get(&source)
+                .cloned()
+                .unwrap_or_default();
+            spreadsheet.user_input_raw_text.insert(dest, raw.clone());
+            spreadsheet.sheets[0].insert(dest, Cell::SingleValue(value.clone()));
+            Some(WindowCell {
+                cell_id: dest,
+                display: value.to_string(),
+                entered_text: raw,
+            })
+        }
+        None => None,
+    }
+}
+
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn Error + 'static>> {
     app.manage(TonicState::new());
     Ok(())
@@ -236,6 +325,7 @@ pub fn run() {
         .setup(setup)
         .invoke_handler(tauri::generate_handler![
             enter_input,
+            fill_cell,
             get_spreadsheet_window
         ])
         .run(tauri::generate_context!())

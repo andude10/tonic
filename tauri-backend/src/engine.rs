@@ -21,9 +21,15 @@ impl ExprAtom {
         }
     }
 
-    fn as_number(&self) -> Result<D256, EvalError> {
+    fn as_number(&self, spreadsheet: &Spreadsheet) -> Result<D256, EvalError> {
         match self {
             ExprAtom::Number(n) => Ok(*n),
+            ExprAtom::CellRef(sheet_id, cell_id) | ExprAtom::RelativeCellRef(sheet_id, cell_id) => {
+                match spreadsheet.get_cell_value(cell_id, *sheet_id) {
+                    Some(CellValue::Number(n)) => Ok(*n),
+                    _ => Ok(D256::ZERO),
+                }
+            }
             other => Err(EvalError::TypeError {
                 expected: AtomType::Number,
                 got: other.atom_type(),
@@ -70,27 +76,27 @@ pub fn eval_formula(
         let res = match expr {
             Expr::Atom(atom) => atom.clone(),
             Expr::Negate(id) => {
-                let n = store[*id as usize].as_number()?;
+                let n = store[*id as usize].as_number(spreadsheet)?;
                 ExprAtom::Number(-n)
             }
             Expr::Add(a_id, b_id) => {
-                let a = store[*a_id as usize].as_number()?;
-                let b = store[*b_id as usize].as_number()?;
+                let a = store[*a_id as usize].as_number(spreadsheet)?;
+                let b = store[*b_id as usize].as_number(spreadsheet)?;
                 ExprAtom::Number(a + b)
             }
             Expr::Subtract(a_id, b_id) => {
-                let a = store[*a_id as usize].as_number()?;
-                let b = store[*b_id as usize].as_number()?;
+                let a = store[*a_id as usize].as_number(spreadsheet)?;
+                let b = store[*b_id as usize].as_number(spreadsheet)?;
                 ExprAtom::Number(a - b)
             }
             Expr::Multiply(a_id, b_id) => {
-                let a = store[*a_id as usize].as_number()?;
-                let b = store[*b_id as usize].as_number()?;
+                let a = store[*a_id as usize].as_number(spreadsheet)?;
+                let b = store[*b_id as usize].as_number(spreadsheet)?;
                 ExprAtom::Number(a * b)
             }
             Expr::Divide(a_id, b_id) => {
-                let a = store[*a_id as usize].as_number()?;
-                let b = store[*b_id as usize].as_number()?;
+                let a = store[*a_id as usize].as_number(spreadsheet)?;
+                let b = store[*b_id as usize].as_number(spreadsheet)?;
                 ExprAtom::Number(a / b)
             }
             Expr::Sum { range_id, mut sum } => {

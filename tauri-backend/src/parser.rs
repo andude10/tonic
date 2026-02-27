@@ -373,6 +373,92 @@ pub fn parse_formula<'tokens, 'src: 'tokens>(
     (output, errs)
 }
 
+/// Convert 0-indexed column to letter(s): 0→A, 25→Z, 26→AA
+fn col_to_letters(buf: &mut String, mut col: u32) {
+    let mut tmp = [0u8; 4];
+    let mut len = 0;
+    loop {
+        tmp[len] = b'A' + (col % 26) as u8;
+        len += 1;
+        if col < 26 {
+            break;
+        }
+        col = col / 26 - 1;
+    }
+    for i in (0..len).rev() {
+        buf.push(tmp[i] as char);
+    }
+}
+
+/// Parse a cell reference at position `pos` in `s` (letters then digits).
+/// Returns (col 0-indexed, row 0-indexed, end position) or None.
+fn parse_cell_at(s: &[u8], pos: usize) -> Option<(u32, u32, usize)> {
+    let mut i = pos;
+    if i >= s.len() || !s[i].is_ascii_alphabetic() {
+        return None;
+    }
+    let mut col: u32 = 0;
+    while i < s.len() && s[i].is_ascii_alphabetic() {
+        col = col * 26 + (s[i].to_ascii_uppercase() - b'A') as u32 + 1;
+        i += 1;
+    }
+    col -= 1;
+    if i >= s.len() || !s[i].is_ascii_digit() {
+        return None;
+    }
+    let mut row: u32 = 0;
+    while i < s.len() && s[i].is_ascii_digit() {
+        row = row * 10 + (s[i] - b'0') as u32;
+        i += 1;
+    }
+    row -= 1; // 1-indexed in text → 0-indexed
+    Some((col, row, i))
+}
+
+/// Offset relative references (~A1, ~A1:B2) in a formula string.
+/// Only scans for '~' characters, skipping everything else.
+/// Returns a new string with adjusted references, or the original if nothing changed.
+pub fn offset_relative_refs(formula: &str, row_off: i32, col_off: i32) -> String {
+    let bytes = formula.as_bytes();
+    // quick check: no tilde → return as-is
+    if !bytes.contains(&b'~') || (row_off == 0 && col_off == 0) {
+        return formula.to_string();
+    }
+
+    let mut result = String::with_capacity(formula.len());
+    let mut pos = 0;
+
+    while pos < bytes.len() {
+        if bytes[pos] == b'~' {
+            if let Some((col, row, end)) = parse_cell_at(bytes, pos + 1) {
+                let new_col = (col as i32 + col_off).max(0) as u32;
+                let new_row = (row as i32 + row_off).max(0) as u32;
+                result.push('~');
+                col_to_letters(&mut result, new_col);
+                result.push_str(&(new_row + 1).to_string());
+
+                // check for range: ~A1:B2
+                if end < bytes.len() && bytes[end] == b':' {
+                    if let Some((col2, row2, end2)) = parse_cell_at(bytes, end + 1) {
+                        let new_col2 = (col2 as i32 + col_off).max(0) as u32;
+                        let new_row2 = (row2 as i32 + row_off).max(0) as u32;
+                        result.push(':');
+                        col_to_letters(&mut result, new_col2);
+                        result.push_str(&(new_row2 + 1).to_string());
+                        pos = end2;
+                        continue;
+                    }
+                }
+                pos = end;
+                continue;
+            }
+        }
+        result.push(bytes[pos] as char);
+        pos += 1;
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

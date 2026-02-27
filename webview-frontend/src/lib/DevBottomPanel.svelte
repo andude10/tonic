@@ -45,6 +45,7 @@
 <style>
     .panel {
         display: flex;
+        flex-direction: row;
         flex-wrap: wrap;
         gap: 8px;
         padding: 8px;
