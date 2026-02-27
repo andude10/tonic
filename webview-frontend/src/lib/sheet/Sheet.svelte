@@ -150,12 +150,12 @@
     let editorInputIsFormula = $derived(editorInput.startsWith("="));
 
     const REF_COLORS = [
-        "#4285f4",
-        "#ea4335",
-        "#9c27b0",
-        "#ff9800",
-        "#34a853",
-        "#e91e63",
+        "#2a96d6",
+        "#ff6b70",
+        "#ffd24d",
+        "#9ad636",
+        "#f0527a",
+        "#7e5dab",
     ];
 
     type FormulaReferenceHighlight = {
@@ -994,20 +994,34 @@
             ".selection-overlays-refs",
         );
         if (refsContainer) {
-            refsContainer.innerHTML = "";
-            if (parsedFormulaReferencesHighlights) {
-                parsedFormulaReferencesHighlights.forEach((ref, i) => {
-                    const el = document.createElement("div");
-                    el.className =
-                        "selection-overlay-ref" +
-                        (i === activeRefIndex ? " active" : "");
+            const existing = refsContainer.querySelectorAll<HTMLElement>(
+                ".selection-overlay-ref",
+            );
+            const refs = parsedFormulaReferencesHighlights ?? [];
+
+            // reuse or create ref overlay elements
+            refs.forEach((ref, i) => {
+                let el: HTMLElement;
+                if (i < existing.length) {
+                    el = existing[i];
+                } else {
+                    el = document.createElement("div");
+                    el.className = "selection-overlay-ref";
                     refsContainer.appendChild(el);
-                    positionSelectionOverlay(
-                        el,
-                        ref.bounds,
-                        REF_COLORS[ref.colorIndex],
-                    );
-                });
+                }
+                el.className =
+                    "selection-overlay-ref" +
+                    (i === activeRefIndex ? " active" : "");
+                positionSelectionOverlay(
+                    el,
+                    ref.bounds,
+                    REF_COLORS[ref.colorIndex],
+                );
+            });
+
+            // remove excess elements
+            for (let i = existing.length - 1; i >= refs.length; i--) {
+                existing[i].remove();
             }
         }
     }
@@ -1102,8 +1116,26 @@
     /* Sketchy selection overlay (focus range) */
     .selection-overlay-focus {
         position: absolute;
-        border: 3px solid var(--wx-color-primary);
-        border-radius: 255px 15px 225px 15px / 15px 225px 15px 255px;
+        border-style: solid;
+        border-color: var(--wx-color-primary);
+        border-width: 3px 1px 1.5px 2.5px;
+        border-radius: 3px 5px 4px 4px / 2px 3px 5px 3px;
+        will-change: left, top, width, height;
+        transition:
+            left 30ms cubic-bezier(0, 0, 0.2, 1),
+            top 30ms cubic-bezier(0, 0, 0.2, 1),
+            width 30ms cubic-bezier(0, 0, 0.2, 1),
+            height 30ms cubic-bezier(0, 0, 0.2, 1);
+    }
+    .selection-overlay-focus::before {
+        content: "";
+        position: absolute;
+        inset: -2px;
+        border-style: solid;
+        border-color: var(--wx-color-primary);
+        border-width: 1px 3px 2.5px 1.5px;
+        border-radius: 4px 3px 5px 3px / 4px 5px 3px 4px;
+        opacity: 0.7;
     }
 
     /* Sketchy selection overlay (formula references) */
@@ -1116,11 +1148,30 @@
     }
     :global(.selection-overlay-ref) {
         position: absolute;
-        border: 3px solid currentColor;
-        border-radius: 255px 15px 225px 15px / 15px 225px 15px 255px;
+        border-style: solid;
+        border-color: currentColor;
+        border-width: 3px 1px 1.5px 2.5px;
+        border-radius: 3px 5px 4px 4px / 2px 3px 5px 3px;
+        will-change: left, top, width, height;
+        transition:
+            left 30ms cubic-bezier(0, 0, 0.2, 1),
+            top 30ms cubic-bezier(0, 0, 0.2, 1),
+            width 30ms cubic-bezier(0, 0, 0.2, 1),
+            height 30ms cubic-bezier(0, 0, 0.2, 1),
+            color 30ms cubic-bezier(0, 0, 0.2, 1);
+    }
+    :global(.selection-overlay-ref)::before {
+        content: "";
+        position: absolute;
+        inset: -2px;
+        border-style: solid;
+        border-color: currentColor;
+        border-width: 1px 3px 2.5px 1.5px;
+        border-radius: 4px 3px 5px 3px / 4px 5px 3px 4px;
+        opacity: 0.7;
     }
     :global(.selection-overlay-ref.active) {
-        background-color: color-mix(in srgb, currentColor 8%, transparent);
+        background-color: color-mix(in srgb, currentColor 4%, transparent);
     }
 
     :global(.wx-cell[data-col-id="rowNumber"]) {
@@ -1128,7 +1179,16 @@
         font-weight: var(--wx-header-font-weight) !important;
         text-align: center;
         user-select: none;
+        transition:
+            background-color 30ms cubic-bezier(0, 0, 0.2, 1),
+            box-shadow 30ms cubic-bezier(0, 0, 0.2, 1);
         -webkit-user-select: none;
+    }
+
+    :global(div[role="columnheader"]) {
+        transition:
+            background-color 30ms cubic-bezier(0, 0, 0.2, 1),
+            box-shadow 30ms cubic-bezier(0, 0, 0.2, 1);
     }
 
     :global(div[role="columnheader"].highlight-col) {
