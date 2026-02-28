@@ -168,6 +168,7 @@ impl fmt::Display for CellId {
 pub enum Cell {
     SingleValue(CellValue),
     Formula { expr: Vec<Expr>, value: CellValue },
+    FormulaError { error: String },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -236,6 +237,7 @@ impl Spreadsheet {
         match self.sheets.get(sheet_id as usize)?.get(cell_id)? {
             Cell::SingleValue(v) => Some(v),
             Cell::Formula { value, .. } => Some(value),
+            Cell::FormulaError { .. } => None,
         }
     }
 

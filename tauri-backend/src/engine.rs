@@ -65,14 +65,12 @@ impl ExprAtom {
 
 // todo: figure out how to reference cell (remove sheet_id?)
 pub fn eval_formula(
-    cell_id: CellId,
-    sheet_id: u32,
-    formula_exprs: Vec<Expr>,
-    spreadsheet: &mut Spreadsheet,
-) -> Result<(), EvalError> {
+    formula_exprs: &[Expr],
+    spreadsheet: &Spreadsheet,
+) -> Result<CellValue, EvalError> {
     let mut store: Vec<ExprAtom> = Vec::with_capacity(formula_exprs.len());
 
-    for expr in &formula_exprs {
+    for expr in formula_exprs {
         let res = match expr {
             Expr::Atom(atom) => atom.clone(),
             Expr::Negate(id) => {
@@ -138,23 +136,15 @@ pub fn eval_formula(
         store.push(res);
     }
 
-    if let Some(last) = store.pop() {
-        let value = match last {
-            ExprAtom::Number(n) => CellValue::Number(n),
-            ExprAtom::Text(s) => CellValue::Text(s),
-            ExprAtom::Boolean(b) => CellValue::Text(b.to_string()),
-            other => CellValue::Text(format!("{:?}", other)),
-        };
-        spreadsheet.sheets[sheet_id as usize].insert(
-            cell_id,
-            Cell::Formula {
-                expr: formula_exprs,
-                value,
-            },
-        );
-    }
+    let value = match store.pop() {
+        Some(ExprAtom::Number(n)) => CellValue::Number(n),
+        Some(ExprAtom::Text(s)) => CellValue::Text(s),
+        Some(ExprAtom::Boolean(b)) => CellValue::Text(b.to_string()),
+        Some(other) => CellValue::Text(format!("{:?}", other)),
+        None => CellValue::Text(String::new()),
+    };
 
-    Ok(())
+    Ok(value)
 }
 
 // Expr::Atom(expr_atom) => match expr_atom {

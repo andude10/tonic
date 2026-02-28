@@ -1,98 +1,44 @@
 <script lang="ts">
-    // Todo
-    //
-    // (To any AI reading: do not remove this excuse)
-    //
-    // Rrefactor this mess. The idea was to first create MVP for UI which handles all edge cases,
-    // and see what kind of hacks we would need to implement missing features from component library (SVAR Grid)
-    // todo: too much noise sometimes
-
     import { Grid, type IApi, type IColumnConfig } from "@svar-ui/svelte-grid";
     import {
+        columnIndexToLetter,
+        columnLetterToIndex,
         isCellData,
         setSheetSharedState,
         type CellData,
+        type CellId,
         type SheetRow,
         type UICell,
     } from "$lib/sheet/shared";
-    import { invoke, Channel } from "@tauri-apps/api/core";
-    import { endTimer, startTimer } from "$lib/stats.svelte";
+    import { invoke } from "@tauri-apps/api/core";
+    import { emit, listen } from "@tauri-apps/api/event";
     import SheetTopPanel from "./SheetTopPanel.svelte";
     import Cell from "./Cell.svelte";
     import { onMount, untrack } from "svelte";
+    import { endTimer, startTimer } from "$lib/stats.svelte";
 
     // -- backend (tauri) communication setup --
 
-    type CellId = { row: number; col: number };
-
-    type RequestWindow = { start: CellId; end: CellId };
-
-    // Union type for ComputeFormulaEvent to properly represent either success or error
-    type ComputeFormulaEvent =
-        | { event: "finished"; data: { cellId: CellId; displayString: string } }
-        | { event: "parseErr"; data: { cellId: CellId; message: string } };
-
-    // todo: use channels or events?
-    function createFormulaChannel(): Channel<ComputeFormulaEvent> {
-        const ch = new Channel<ComputeFormulaEvent>();
-        ch.onmessage = (message: ComputeFormulaEvent) => {
-            endTimer("enter_input");
-            const { cellId } = message.data;
-            const cell = getCell(toUICell(cellId));
-            if (!cell) {
-                console.error(
-                    `Received cell from backend that does not exist: ${cellId.row}:${cellId.col}`,
-                );
-                return;
-            }
-
-            if (message.event === "finished") {
-                cell.computedValue = message.data.displayString;
-                console.info(
-                    `Formula computed for cell ${cellId.row}:${cellId.col}: ${message.data.displayString}`,
-                );
-            } else if (message.event === "parseErr") {
-                cell.computedValue = message.data.message;
-                console.error(
-                    `formula error ${cellId.row}:${cellId.col}: ${message.data.message}`,
-                );
-            }
-        };
-        return ch;
-    }
+    type RenderCellEvent = {
+        cellId: CellId;
+        display: string;
+        enteredText: string;
+        isError: boolean;
+    };
 
     // todo: it's gonna be non trivial refactor when introducing named cells
 
-    // 1 -> A, 26 -> Z, 27 -> AA, 28 -> AB, ...
-    function toColumnId(index: number): string {
-        let s = "";
-        let n = index;
-        while (n > 0) {
-            n--;
-            s = String.fromCharCode(65 + (n % 26)) + s;
-            n = Math.floor(n / 26);
-        }
-        return s;
-    }
-
-    // A -> 1, Z -> 26, AA -> 27, AB -> 28, ...
-    function toColumnIndex(id: string): number {
-        let n = 0;
-        for (let i = 0; i < id.length; i++) {
-            n = n * 26 + (id.charCodeAt(i) - 64);
-        }
-        return n;
-    }
-
-    function toCellId(cell: UICell): CellId {
-        return { col: toColumnIndex(cell.column) - 1, row: cell.row - 1 };
-    }
-
+    /** Convert CellId (0-indexed) to UICell (SVAR grid format). Used at grid boundary only. */
     function toUICell(cell: CellId): UICell {
-        return { column: toColumnId(cell.col + 1), row: cell.row + 1 };
+        return { column: columnIndexToLetter(cell.col), row: cell.row + 1 };
     }
 
-    let focusedCell: UICell | undefined = $state();
+    /** Convert SVAR data attributes (1-indexed row, letter col) to CellId (0-indexed). */
+    function domToCellId(rowId: string, colId: string): CellId {
+        return { row: Number(rowId) - 1, col: columnLetterToIndex(colId) };
+    }
+
+    let focusedCell: CellId | undefined = $state();
 
     const baseRows = Array.from({ length: 1000 }, (_, i) => {
         const row: SheetRow = { id: i + 1, rowNumber: i + 1 };
@@ -125,16 +71,12 @@
     let gridRows = $state(baseRows);
     let gridColumns = $state(baseColumns);
     let gridApi: IApi | undefined = $state();
-    let requestWindow: RequestWindow = $state({
-        start: { row: 0, col: 0 },
-        end: { row: 500, col: 500 },
-    });
 
     // --- selection state ---
 
     // tracks which cell the mouse is currently over (ignoring row number column)
-    let hoveredCell: UICell | undefined = $state();
-    let focusedRangeStart: UICell | undefined = $state();
+    let hoveredCell: CellId | undefined = $state();
+    let focusedRangeStart: CellId | undefined = $state();
     let isSelecting = $state(false); // is true during mouse drag or while shift is held
     let shiftClickedOnce = $state(false); // true after first shift-click (waiting for second to complete range)
     let isFilling = $state(false);
@@ -149,9 +91,9 @@
     let caretPosition = $state(0);
 
     // the start of reference that user is trying to insert into formula they edit
-    let editorInsertReferenceStart: UICell | undefined = $state();
+    let editorInsertReferenceStart: CellId | undefined = $state();
     // the end of reference (similar to editorInsertReferenceStart)
-    let editorInsertReferenceEnd: UICell | undefined = $state();
+    let editorInsertReferenceEnd: CellId | undefined = $state();
     let editorInsertReference = $state(false);
 
     let editorInputIsFormula = $derived(editorInput.startsWith("="));
@@ -214,18 +156,18 @@
         })[] = [];
         cell_references_regex.lastIndex = 0;
         while ((match = cell_references_regex.exec(editorInput)) !== null) {
-            const start_column = toColumnIndex(match[1]);
-            const start_row = Number(match[2]);
-            const end_column = match[3]
-                ? toColumnIndex(match[3])
-                : start_column;
-            const end_row = match[4] ? Number(match[4]) : start_row;
+            const start_col = columnLetterToIndex(match[1]);
+            const start_row = Number(match[2]) - 1;
+            const end_col = match[3]
+                ? columnLetterToIndex(match[3])
+                : start_col;
+            const end_row = match[4] ? Number(match[4]) - 1 : start_row;
             results.push({
                 bounds: {
                     minR: Math.min(start_row, end_row),
                     maxR: Math.max(start_row, end_row),
-                    minC: Math.min(start_column, end_column),
-                    maxC: Math.max(start_column, end_column),
+                    minC: Math.min(start_col, end_col),
+                    maxC: Math.max(start_col, end_col),
                 },
                 colorIndex: reference_index++ % REF_COLORS.length,
                 isActive: false,
@@ -282,9 +224,10 @@
 
     $effect(() => {
         if (!focusedCell || !gridApi) return;
+        const ui = toUICell(focusedCell);
         gridApi.exec("focus-cell", {
-            row: focusedCell.row,
-            column: focusedCell.column,
+            row: ui.row,
+            column: ui.column,
         });
     });
 
@@ -296,18 +239,15 @@
         }
     });
 
-    // bounding box of the selection range between selectionRangeStart and focusedCell
+    // bounding box of the selection range (0-indexed)
     let focusedRangeBounds = $derived.by(() => {
         if (!focusedRangeStart || !focusedCell) return null;
-
-        const c1 = toColumnIndex(focusedRangeStart.column);
-        const c2 = toColumnIndex(focusedCell.column);
 
         return {
             minR: Math.min(focusedRangeStart.row, focusedCell.row),
             maxR: Math.max(focusedRangeStart.row, focusedCell.row),
-            minC: Math.min(c1, c2),
-            maxC: Math.max(c1, c2),
+            minC: Math.min(focusedRangeStart.col, focusedCell.col),
+            maxC: Math.max(focusedRangeStart.col, focusedCell.col),
         };
     });
 
@@ -322,10 +262,10 @@
 
         const start = editorInsertReferenceStart;
         const end = editorInsertReferenceEnd;
-        const isSameCell = start.row === end.row && start.column === end.column;
-        const nonRelativeRef = isSameCell
-            ? `${start.column}${start.row}`
-            : `${start.column}${start.row}:${end.column}${end.row}`;
+        const isSameCell = start.row === end.row && start.col === end.col;
+        const startStr = `${columnIndexToLetter(start.col)}${start.row + 1}`;
+        const endStr = `${columnIndexToLetter(end.col)}${end.row + 1}`;
+        const nonRelativeRef = isSameCell ? startStr : `${startStr}:${endStr}`;
 
         untrack(() => {
             const activeRef =
@@ -345,12 +285,13 @@
                     );
                 caretPosition = activeRef.matchIndex + ref.length;
             } else {
-                // otherwise, insert new reference at cursor
+                // otherwise, insert new reference at cursor (but after '=')
+                const insertPos = Math.max(caretPosition, 1);
                 editorInput =
-                    editorInput.slice(0, caretPosition) +
+                    editorInput.slice(0, insertPos) +
                     nonRelativeRef +
-                    editorInput.slice(caretPosition);
-                caretPosition += nonRelativeRef.length;
+                    editorInput.slice(insertPos);
+                caretPosition = insertPos + nonRelativeRef.length;
             }
         });
     });
@@ -363,61 +304,44 @@
         if (!cell) return;
         if (editorInput == cell.enteredText) return;
         cell.enteredText = editorInput;
-        startTimer("enter_input");
+        startTimer("render-cell");
         invoke("enter_input", {
-            cellId: toCellId(focusedCell),
+            cellId: focusedCell,
             userInput: cell.enteredText,
-            computeFormulaChannel: createFormulaChannel(),
         });
     }
 
-    function commitDelete(uiCell: UICell) {
-        const cell = getCell(uiCell);
+    function commitDelete(cellId: CellId) {
+        const cell = getCell(cellId);
         if (!cell) return;
         cell.enteredText = "";
         editorInput = "";
-        invoke("enter_input", {
-            cellId: toCellId(uiCell),
-            userInput: "",
-            computeFormulaChannel: createFormulaChannel(),
-        });
+        startTimer("render-cell");
+        invoke("enter_input", { cellId, userInput: "" });
     }
 
-    function commitCellUpdate(uiCell: UICell, value: string) {
-        const cell = getCell(uiCell);
+    function commitCellUpdate(cellId: CellId, value: string) {
+        const cell = getCell(cellId);
         if (!cell) return;
         cell.enteredText = value;
-        invoke("enter_input", {
-            cellId: toCellId(uiCell),
-            userInput: value,
-            computeFormulaChannel: createFormulaChannel(),
+        startTimer("render-cell");
+        invoke("enter_input", { cellId, userInput: value });
+    }
+
+    function commitCellFill(
+        source: CellId,
+        dest: CellId,
+        beforeSource?: CellId,
+    ) {
+        startTimer("render-cell");
+        invoke("fill_cell", {
+            source,
+            dest,
+            beforeSource,
         });
     }
 
-    async function commitCellFill(source: UICell, destinations: UICell[]) {
-        const src = toCellId(source);
-        for (const d of destinations) {
-            const result = await invoke<WindowCell | null>("fill_cell", {
-                source: src,
-                dest: toCellId(d),
-            });
-            if (result) {
-                const cell = getCell(toUICell(result.cellId));
-                if (cell) {
-                    cell.computedValue = result.display;
-                    cell.enteredText = result.enteredText;
-                }
-            }
-        }
-    }
-
-    type WindowCell = {
-        cellId: CellId;
-        display: string;
-        enteredText: string;
-    };
-
-    function fetchSpreadsheetWindow() {
+    function emitRenderWindowChanged() {
         const firstVisibleCell = document.querySelector<HTMLElement>(
             ".wx-cell[data-row-id][data-col-id]:not([data-col-id='rowNumber'])",
         );
@@ -429,33 +353,17 @@
             return;
         }
 
-        const windowStartRow = Number(firstVisibleCell.dataset.rowId) - 1;
-        const windowStartCol =
-            toColumnIndex(firstVisibleCell.dataset.colId!) - 1;
+        const windowStart = domToCellId(
+            firstVisibleCell.dataset.rowId!,
+            firstVisibleCell.dataset.colId!,
+        );
 
-        // todo: request only cells that are not already in the window
-        // right now, it fetches the whole window each time
-
-        const newWindow: RequestWindow = {
-            start: { row: windowStartRow, col: windowStartCol },
+        emit("render-window-changed", {
+            start: windowStart,
             end: {
-                row: windowStartRow + gridRows.length - 1,
-                col: windowStartCol + gridColumns.length - 2,
+                row: windowStart.row + gridRows.length - 1,
+                col: windowStart.col + gridColumns.length - 2,
             },
-        };
-
-        invoke<WindowCell[]>("get_spreadsheet_window", {
-            window: newWindow,
-        }).then((cells) => {
-            for (const { cellId, display, enteredText } of cells) {
-                const uiCell = toUICell(cellId);
-                const cell = getCell(uiCell);
-                if (cell) {
-                    cell.computedValue = display;
-                    cell.enteredText = enteredText;
-                }
-            }
-            requestWindow = newWindow;
         });
     }
 
@@ -471,12 +379,13 @@
     let left = 1; // pin first column (row numbers) to the left
     let select = false; // disable Grid's built-in selection, we handle it ourselves
 
-    function isInBounds(rowId: number, colIndex: number): boolean {
+    /** Check if 0-indexed row/col is within the grid. */
+    function isInBounds(row: number, col: number): boolean {
         return (
-            rowId >= 1 &&
-            rowId <= gridRows.length &&
-            colIndex >= 1 &&
-            colIndex < gridColumns.length
+            row >= 0 &&
+            row < gridRows.length &&
+            col >= 0 &&
+            col < gridColumns.length - 1 // -1 for rowNumber column
         );
     }
 
@@ -491,19 +400,21 @@
         });
     }
 
-    function moveFocusToInlineEditor(cell: UICell) {
+    function moveFocusToInlineEditor(cell: CellId) {
+        const ui = toUICell(cell);
         requestAnimationFrame(() => {
             document
                 .querySelector<HTMLInputElement>(
-                    `.wx-cell[data-row-id="${cell.row}"][data-col-id="${cell.column}"] .editor`,
+                    `.wx-cell[data-row-id="${ui.row}"][data-col-id="${ui.column}"] .editor`,
                 )
                 ?.focus();
         });
     }
 
-    function getCell(id: UICell | undefined): CellData | undefined {
+    function getCell(id: CellId | undefined): CellData | undefined {
         if (!id) return undefined;
-        const cell = gridApi?.getRow(id.row)[id.column];
+        const ui = toUICell(id);
+        const cell = gridApi?.getRow(ui.row)[ui.column];
         if (isCellData(cell)) return cell;
     }
 
@@ -551,13 +462,14 @@
             return;
         }
 
-        if (
-            rowId &&
-            colId &&
-            (hoveredCell?.row !== Number(rowId) ||
-                hoveredCell?.column !== colId)
-        ) {
-            hoveredCell = { row: Number(rowId), column: colId };
+        if (rowId && colId) {
+            const hovered = domToCellId(rowId, colId);
+            if (
+                hoveredCell?.row !== hovered.row ||
+                hoveredCell?.col !== hovered.col
+            ) {
+                hoveredCell = hovered;
+            }
         }
 
         // if selecting, then extend selection range (while dragging)
@@ -594,8 +506,10 @@
         //if clicked on already focused cell, start editing it
         if (
             focusedCell &&
-            focusedCell.row === Number(rowId) &&
-            focusedCell.column === colId
+            rowId &&
+            colId &&
+            focusedCell.row === Number(rowId) - 1 &&
+            focusedCell.col === columnLetterToIndex(colId)
         ) {
             isEditing = true;
             moveFocusToInlineEditor(focusedCell);
@@ -654,27 +568,64 @@
         // fill cells on release
         if (isFilling && focusedRangeStart && focusedRangeBounds) {
             const bounds = focusedRangeBounds;
-            const srcR = focusedRangeStart.row;
-            const srcC = toColumnIndex(focusedRangeStart.column);
+            const orig = fillOriginalBounds ?? bounds;
 
-            // collect destination cells and send to backend
-            const destinations: UICell[] = [];
-            for (let r = bounds.minR; r <= bounds.maxR; r++) {
-                for (let c = bounds.minC; c <= bounds.maxC; c++) {
-                    if (r === srcR && c === srcC) continue;
-                    destinations.push(toUICell({ row: r - 1, col: c - 1 }));
+            // Step 1: fill horizontally (within overlapping row range)
+            const hMinR = Math.max(orig.minR, bounds.minR);
+            const hMaxR = Math.min(orig.maxR, bounds.maxR);
+            if (bounds.maxC > orig.maxC) {
+                for (let r = hMinR; r <= hMaxR; r++) {
+                    for (let c = orig.maxC + 1; c <= bounds.maxC; c++) {
+                        const src: CellId = { row: r, col: c - 1 };
+                        const before: CellId | undefined =
+                            c - 2 >= orig.minC
+                                ? { row: r, col: c - 2 }
+                                : undefined;
+                        commitCellFill(src, { row: r, col: c }, before);
+                    }
+                }
+            } else if (bounds.minC < orig.minC) {
+                for (let r = hMinR; r <= hMaxR; r++) {
+                    for (let c = orig.minC - 1; c >= bounds.minC; c--) {
+                        const src: CellId = { row: r, col: c + 1 };
+                        const before: CellId | undefined =
+                            c + 2 <= orig.maxC
+                                ? { row: r, col: c + 2 }
+                                : undefined;
+                        commitCellFill(src, { row: r, col: c }, before);
+                    }
                 }
             }
-            if (destinations.length > 0) {
-                commitCellFill(focusedRangeStart, destinations);
+
+            // Step 2: fill vertically (full column range including new columns)
+            if (bounds.maxR > orig.maxR) {
+                for (let c = bounds.minC; c <= bounds.maxC; c++) {
+                    for (let r = orig.maxR + 1; r <= bounds.maxR; r++) {
+                        const src: CellId = { row: r - 1, col: c };
+                        const before: CellId | undefined =
+                            r - 2 >= orig.minR
+                                ? { row: r - 2, col: c }
+                                : undefined;
+                        commitCellFill(src, { row: r, col: c }, before);
+                    }
+                }
+            } else if (bounds.minR < orig.minR) {
+                for (let c = bounds.minC; c <= bounds.maxC; c++) {
+                    for (let r = orig.minR - 1; r >= bounds.minR; r--) {
+                        const src: CellId = { row: r + 1, col: c };
+                        const before: CellId | undefined =
+                            r + 2 <= orig.maxR
+                                ? { row: r + 2, col: c }
+                                : undefined;
+                        commitCellFill(src, { row: r, col: c }, before);
+                    }
+                }
             }
 
             // delete cells that were in original bounds but not in final bounds (shrinking)
-            const orig = fillOriginalBounds;
-            if (orig) {
+            if (fillOriginalBounds) {
                 for (let r = orig.minR; r <= orig.maxR; r++) {
                     for (let c = orig.minC; c <= orig.maxC; c++) {
-                        if (r === srcR && c === srcC) continue;
                         if (
                             r >= bounds.minR &&
                             r <= bounds.maxR &&
@@ -682,10 +633,7 @@
                             c <= bounds.maxC
                         )
                             continue;
-                        commitCellUpdate(
-                            toUICell({ row: r - 1, col: c - 1 }),
-                            "",
-                        );
+                        commitCellUpdate({ row: r, col: c }, "");
                     }
                 }
             }
@@ -762,7 +710,7 @@
             if (ev.key === "ArrowRight") colDelta = 1;
 
             let nextRow = focusedCell.row + rowDelta;
-            let nextCol = toColumnIndex(focusedCell.column) + colDelta;
+            let nextCol = focusedCell.col + colDelta;
 
             // if pressing ctrl + arrow key in edit mode ...
             if (isEditing && ev.ctrlKey) {
@@ -779,46 +727,30 @@
                 focusedRangeStart &&
                 focusedRangeBounds &&
                 (focusedRangeStart.row !== focusedCell.row ||
-                    focusedRangeStart.column !== focusedCell.column);
+                    focusedRangeStart.col !== focusedCell.col);
 
             if (hasMultiCellRange && focusedRangeStart && !isSelecting) {
                 let nextAnchorRow = focusedRangeStart.row + rowDelta;
-                let nextAnchorCol =
-                    toColumnIndex(focusedRangeStart.column) + colDelta;
+                let nextAnchorCol = focusedRangeStart.col + colDelta;
 
                 if (!isInBounds(nextAnchorRow, nextAnchorCol)) {
                     return;
                 }
-                focusedCell = {
-                    row: nextRow,
-                    column: toColumnId(nextCol),
-                };
-                focusedRangeStart = {
-                    row: nextAnchorRow,
-                    column: gridColumns[nextAnchorCol].id as string,
-                };
+                focusedCell = { row: nextRow, col: nextCol };
+                focusedRangeStart = { row: nextAnchorRow, col: nextAnchorCol };
                 return;
             }
 
             // shift+arrow: extend selection by moving focusedCell, keep selectionAnchor anchored
             if (isInBounds(nextRow, nextCol) && isSelecting) {
-                focusedCell = {
-                    row: nextRow,
-                    column: toColumnId(nextCol),
-                };
+                focusedCell = { row: nextRow, col: nextCol };
                 return;
             }
 
             // normal single-cell navigation (no multi-cell range, not selecting)
             if (isInBounds(nextRow, nextCol) && !isSelecting) {
-                focusedCell = {
-                    row: nextRow,
-                    column: toColumnId(nextCol),
-                };
-                focusedRangeStart = {
-                    row: nextRow,
-                    column: gridColumns[nextCol].id as string,
-                };
+                focusedCell = { row: nextRow, col: nextCol };
+                focusedRangeStart = { row: nextRow, col: nextCol };
                 return;
             }
         }
@@ -834,16 +766,13 @@
                     return;
                 }
 
-                if (focusedCell.row < gridRows.length) {
+                if (focusedCell.row + 1 < gridRows.length) {
                     const nextRow = focusedCell.row + 1;
                     commitEdit();
                     isEditing = false;
-                    focusedCell = { row: nextRow, column: focusedCell.column };
-                    focusedRangeStart = {
-                        row: nextRow,
-                        column: focusedCell.column,
-                    };
-                    gridApi?.exec("scroll", { row: nextRow });
+                    focusedCell = { row: nextRow, col: focusedCell.col };
+                    focusedRangeStart = { row: nextRow, col: focusedCell.col };
+                    gridApi?.exec("scroll", { row: nextRow + 1 }); // SVAR expects 1-indexed
                 }
             }
             // on delete, clear value in focus or in selected range
@@ -854,10 +783,7 @@
                 if (bounds) {
                     for (let r = bounds.minR; r <= bounds.maxR; r++) {
                         for (let c = bounds.minC; c <= bounds.maxC; c++) {
-                            commitDelete({
-                                row: r,
-                                column: gridColumns[c].id as string,
-                            });
+                            commitDelete({ row: r, col: c });
                         }
                     }
                 } else {
@@ -933,13 +859,13 @@
 
         if (!fetchThrottleId) {
             fetchThrottleId = setTimeout(() => {
-                fetchSpreadsheetWindow();
+                emitRenderWindowChanged();
                 fetchThrottleId = null;
             }, 100);
         }
     }
 
-    // compute pixel rect for a cell range from logical coordinates (no DOM cell queries)
+    // compute pixel rect for a cell range from logical coordinates
     // positions are relative to the current scroll position at time of positionOverlays()
     function getOverlayRect(bounds: {
         minR: number;
@@ -954,15 +880,15 @@
         const headerHeight = state._sizes.headerHeight ?? 37;
 
         // compute column left offsets by summing widths
-        const minColId = toColumnId(bounds.minC);
-        const maxColId = toColumnId(bounds.maxC);
+        const minColLetter = columnIndexToLetter(bounds.minC);
+        const maxColLetter = columnIndexToLetter(bounds.maxC);
         let colLeft = 0;
         let minColLeft = -1;
         let maxColRight = -1;
         for (const col of columns) {
             const w = col.width ?? 100;
-            if (col.id === minColId) minColLeft = colLeft;
-            if (col.id === maxColId) maxColRight = colLeft + w;
+            if (col.id === minColLetter) minColLeft = colLeft;
+            if (col.id === maxColLetter) maxColRight = colLeft + w;
             colLeft += w;
         }
         if (minColLeft < 0 || maxColRight < 0) return null;
@@ -970,9 +896,9 @@
         const left = minColLeft - overlayBaseScrollLeft;
         const right = maxColRight - overlayBaseScrollLeft;
         const top =
-            headerHeight + (bounds.minR - 1) * rowHeight - overlayBaseScrollTop;
+            headerHeight + bounds.minR * rowHeight - overlayBaseScrollTop;
         const bottom =
-            headerHeight + bounds.maxR * rowHeight - overlayBaseScrollTop;
+            headerHeight + (bounds.maxR + 1) * rowHeight - overlayBaseScrollTop;
 
         return { left, top, width: right - left, height: bottom - top };
     }
@@ -1003,18 +929,15 @@
         for (const col of wrapper.querySelectorAll<HTMLElement>(
             "[data-header-id]",
         )) {
-            const idx = toColumnIndex(col.dataset.headerId!);
+            const colIdx = columnLetterToIndex(col.dataset.headerId!);
             if (focusedRangeBounds) {
                 col.classList.toggle(
                     "highlight-col",
-                    idx >= focusedRangeBounds.minC &&
-                        idx <= focusedRangeBounds.maxC,
+                    colIdx >= focusedRangeBounds.minC &&
+                        colIdx <= focusedRangeBounds.maxC,
                 );
             } else if (focused) {
-                col.classList.toggle(
-                    "highlight-col",
-                    idx === toColumnIndex(focused.column),
-                );
+                col.classList.toggle("highlight-col", colIdx === focused.col);
             } else {
                 col.classList.remove("highlight-col");
             }
@@ -1023,14 +946,14 @@
         for (const cell of wrapper.querySelectorAll<HTMLElement>(
             '.wx-cell[data-col-id="rowNumber"]',
         )) {
-            const rowId = Number(cell.dataset.rowId);
+            const rowIdx = Number(cell.dataset.rowId) - 1; // convert to 0-indexed
             if (
                 focusedRangeBounds &&
-                rowId >= focusedRangeBounds.minR &&
-                rowId <= focusedRangeBounds.maxR
+                rowIdx >= focusedRangeBounds.minR &&
+                rowIdx <= focusedRangeBounds.maxR
             ) {
                 cell.classList.add("highlight-row");
-            } else if (focused && rowId === focused.row) {
+            } else if (focused && rowIdx === focused.row) {
                 cell.classList.add("highlight-row");
             } else {
                 cell.classList.remove("highlight-row");
@@ -1152,7 +1075,24 @@
     });
 
     onMount(() => {
-        fetchSpreadsheetWindow();
+        let unlisten: (() => void) | undefined;
+
+        listen<RenderCellEvent>("render-cell", (event) => {
+            endTimer("render-cell");
+            const { cellId, display, enteredText } = event.payload;
+            const cell = getCell(cellId);
+            if (!cell) return;
+            cell.computedValue = display;
+            cell.enteredText = enteredText;
+            // todo: handle isError for styling
+        }).then((fn) => {
+            unlisten = fn;
+            emitRenderWindowChanged();
+        });
+
+        return () => {
+            unlisten?.();
+        };
     });
 </script>
 

@@ -3,6 +3,7 @@
     import type { IApi } from "@svar-ui/svelte-grid";
     import InputCell from "./InputCell.svelte";
     import {
+        columnLetterToIndex,
         getSheetSharedState,
         isCellData,
         type CellData,
@@ -21,8 +22,8 @@
     const shared = getSheetSharedState();
 
     let focusedThisCell = $derived(
-        shared.focusedCell?.row === row.id &&
-            shared.focusedCell?.column === column.id,
+        shared.focusedCell?.row === (row.id as number) - 1 &&
+            shared.focusedCell?.col === columnLetterToIndex(column.id),
     );
 
     const displayContent = $derived.by(() => {
