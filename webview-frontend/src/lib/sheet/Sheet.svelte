@@ -19,7 +19,7 @@
 
     // -- backend (tauri) communication setup --
 
-    type RenderCellEvent = {
+    type DisplayCellEvent = {
         cellId: CellId;
         display: string;
         enteredText: string;
@@ -304,7 +304,7 @@
         if (!cell) return;
         if (editorInput == cell.enteredText) return;
         cell.enteredText = editorInput;
-        startTimer("render-cell");
+        startTimer("display-cell");
         invoke("enter_input", {
             cellId: focusedCell,
             userInput: cell.enteredText,
@@ -316,7 +316,7 @@
         if (!cell) return;
         cell.enteredText = "";
         editorInput = "";
-        startTimer("render-cell");
+        startTimer("display-cell");
         invoke("enter_input", { cellId, userInput: "" });
     }
 
@@ -324,7 +324,7 @@
         const cell = getCell(cellId);
         if (!cell) return;
         cell.enteredText = value;
-        startTimer("render-cell");
+        startTimer("display-cell");
         invoke("enter_input", { cellId, userInput: value });
     }
 
@@ -333,7 +333,7 @@
         dest: CellId,
         beforeSource?: CellId,
     ) {
-        startTimer("render-cell");
+        startTimer("display-cell");
         invoke("fill_cell", {
             source,
             dest,
@@ -341,7 +341,7 @@
         });
     }
 
-    function emitRenderWindowChanged() {
+    function emitSpreadsheetViewportChanged(fullRefresh = false) {
         const firstVisibleCell = document.querySelector<HTMLElement>(
             ".wx-cell[data-row-id][data-col-id]:not([data-col-id='rowNumber'])",
         );
@@ -358,12 +358,13 @@
             firstVisibleCell.dataset.colId!,
         );
 
-        emit("render-window-changed", {
+        emit("spreadsheet-viewport-changed", {
             start: windowStart,
             end: {
                 row: windowStart.row + gridRows.length - 1,
                 col: windowStart.col + gridColumns.length - 2,
             },
+            fullRefresh,
         });
     }
 
@@ -826,7 +827,7 @@
     let overlayBaseScrollTop = 0;
     let overlayBaseScrollLeft = 0;
     let fetchThrottleId: ReturnType<typeof setTimeout> | null = null;
-    let highlightDebounceId: ReturnType<typeof setTimeout> | null = null;
+    let overlayDebounceId: ReturnType<typeof setTimeout> | null = null;
 
     // get the grid's scroll container element
     function getScrollContainer(): HTMLElement | null {
@@ -839,8 +840,7 @@
 
     function handleScroll(ev: Event) {
         if ((ev.target as HTMLElement).closest(".formula-input")) return;
-
-        // move overlays via transform (no layout reflow)
+        // // move overlays via transform (no layout reflow)
         const scroller = ev.target as HTMLElement;
         const dx = overlayBaseScrollLeft - scroller.scrollLeft;
         const dy = overlayBaseScrollTop - scroller.scrollTop;
@@ -850,18 +850,18 @@
         if (container) {
             container.style.transform = `translate(${dx}px, ${dy}px)`;
         }
-
-        if (highlightDebounceId) clearTimeout(highlightDebounceId);
-        highlightDebounceId = setTimeout(() => {
-            applyHeaderHighlights();
-            highlightDebounceId = null;
-        }, 50);
-
-        if (!fetchThrottleId) {
-            fetchThrottleId = setTimeout(() => {
-                emitRenderWindowChanged();
-                fetchThrottleId = null;
-            }, 100);
+        if (fetchThrottleId) clearTimeout(fetchThrottleId);
+        fetchThrottleId = setTimeout(() => {
+            emitSpreadsheetViewportChanged();
+            fetchThrottleId = null;
+        }, 100);
+        // apply header highlights after scroll
+        if (isFocusedRowVisible()) {
+            if (overlayDebounceId) clearTimeout(overlayDebounceId);
+            overlayDebounceId = setTimeout(() => {
+                applyHeaderHighlights();
+                overlayDebounceId = null;
+            }, 10);
         }
     }
 
@@ -921,16 +921,38 @@
         overlay.style.color = color;
     }
 
+    /** Check if the focused cell/range rows are within the visible scroll area. */
+    function isFocusedRowVisible(): boolean {
+        const focused = focusedCell;
+        if (!focused && !focusedRangeBounds) return false;
+        const scroller = getScrollContainer();
+        const rowHeight = gridApi?.getState()?._sizes?.rowHeight ?? 37;
+        const headerHeight = gridApi?.getState()?._sizes?.headerHeight ?? 37;
+        const scrollTop = scroller?.scrollTop ?? 0;
+        const viewHeight = scroller?.clientHeight ?? 0;
+        const firstVisibleRow = Math.floor(scrollTop / rowHeight);
+        const lastVisibleRow = Math.floor(
+            (scrollTop + viewHeight - headerHeight) / rowHeight,
+        );
+        const minR = focusedRangeBounds?.minR ?? focused?.row ?? -1;
+        const maxR = focusedRangeBounds?.maxR ?? focused?.row ?? -1;
+        return maxR >= firstVisibleRow && minR <= lastVisibleRow;
+    }
+
     function applyHeaderHighlights() {
+        if (!focusedCell && !focusedRangeBounds) return;
         const wrapper = document.querySelector(".grid-wrapper");
         if (!wrapper) return;
         const focused = focusedCell;
+        const rowsOnScreen = isFocusedRowVisible();
 
         for (const col of wrapper.querySelectorAll<HTMLElement>(
             "[data-header-id]",
         )) {
             const colIdx = columnLetterToIndex(col.dataset.headerId!);
-            if (focusedRangeBounds) {
+            if (!rowsOnScreen) {
+                col.classList.remove("highlight-col");
+            } else if (focusedRangeBounds) {
                 col.classList.toggle(
                     "highlight-col",
                     colIdx >= focusedRangeBounds.minC &&
@@ -942,6 +964,8 @@
                 col.classList.remove("highlight-col");
             }
         }
+
+        if (!rowsOnScreen) return;
 
         for (const cell of wrapper.querySelectorAll<HTMLElement>(
             '.wx-cell[data-col-id="rowNumber"]',
@@ -1077,17 +1101,18 @@
     onMount(() => {
         let unlisten: (() => void) | undefined;
 
-        listen<RenderCellEvent>("render-cell", (event) => {
-            endTimer("render-cell");
-            const { cellId, display, enteredText } = event.payload;
-            const cell = getCell(cellId);
-            if (!cell) return;
-            cell.computedValue = display;
-            cell.enteredText = enteredText;
-            // todo: handle isError for styling
+        listen<DisplayCellEvent[]>("display-cells", (event) => {
+            endTimer("display-cells");
+            for (const { cellId, display, enteredText } of event.payload) {
+                const cell = getCell(cellId);
+                if (!cell) continue;
+                cell.computedValue = display;
+                cell.enteredText = enteredText;
+                // todo: handle isError for styling
+            }
         }).then((fn) => {
             unlisten = fn;
-            emitRenderWindowChanged();
+            emitSpreadsheetViewportChanged(true);
         });
 
         return () => {
