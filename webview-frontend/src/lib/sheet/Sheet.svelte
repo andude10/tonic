@@ -16,6 +16,19 @@
     import Cell from "./Cell.svelte";
     import { onMount, untrack } from "svelte";
     import { endTimer, startTimer } from "$lib/stats.svelte";
+    import {
+        createState,
+        createObject,
+        destroyObject,
+        syncScroll,
+        reposition,
+        applyRect,
+        cellsInBounds,
+        cellsOutside,
+        type CellBounds,
+        type SheetObject,
+        type SheetObjectsState,
+    } from "./overlays";
 
     // -- backend (tauri) communication setup --
 
@@ -85,12 +98,7 @@
     let isSelecting = $state(false); // is true during mouse drag or while shift is held
     let shiftClickedOnce = $state(false); // true after first shift-click (waiting for second to complete range)
     let isFilling = $state(false);
-    let fillOriginalBounds: {
-        minR: number;
-        maxR: number;
-        minC: number;
-        maxC: number;
-    } | null = null;
+    let fillOriginalBounds: CellBounds | null = null;
     let isEditing = $state(false);
     let editorInput = $state("");
     let caretPosition = $state(0);
@@ -334,14 +342,6 @@
         invoke("delete_cells", { cells: cellIds });
     }
 
-    function commitCellUpdate(cellId: CellId, value: string) {
-        const cell = getCell(cellId);
-        if (!cell) return;
-        cell.enteredText = value;
-        startTimer("display-cell");
-        invoke("enter_input", { cellId, userInput: value });
-    }
-
     function commitCellFill(
         sources: CellId[],
         dests: CellId[],
@@ -555,99 +555,118 @@
         }
     }
 
+    /** Generate fill source/dest pairs for one expanded edge of a range.
+     *  axis="col" fills horizontally, axis="row" fills vertically.
+     *  dir=1 fills forward (right/down), dir=-1 fills backward (left/up). */
+    function generateFillEdge(
+        orig: CellBounds,
+        bounds: CellBounds,
+        axis: "row" | "col",
+        dir: 1 | -1,
+    ) {
+        const sources: CellId[] = [];
+        const dests: CellId[] = [];
+        const beforeSources: (CellId | undefined)[] = [];
+
+        // cross-axis range: for col fills, iterate rows; for row fills, iterate cols
+        const crossMin =
+            axis === "col" ? Math.max(orig.minR, bounds.minR) : bounds.minC;
+        const crossMax =
+            axis === "col" ? Math.min(orig.maxR, bounds.maxR) : bounds.maxC;
+
+        // main-axis range: the expanded edge beyond the original
+        const mainStart =
+            dir === 1
+                ? axis === "col"
+                    ? orig.maxC + 1
+                    : orig.maxR + 1
+                : axis === "col"
+                  ? orig.minC - 1
+                  : orig.minR - 1;
+        const mainEnd =
+            dir === 1
+                ? axis === "col"
+                    ? bounds.maxC
+                    : bounds.maxR
+                : axis === "col"
+                  ? bounds.minC
+                  : bounds.minR;
+
+        // limit for "before source" existence check
+        const beforeLimit =
+            dir === 1
+                ? axis === "col"
+                    ? orig.minC
+                    : orig.minR
+                : axis === "col"
+                  ? orig.maxC
+                  : orig.maxR;
+
+        for (let cross = crossMin; cross <= crossMax; cross++) {
+            const start = dir === 1 ? mainStart : mainStart;
+            const end = dir === 1 ? mainEnd : mainEnd;
+            for (let m = start; dir === 1 ? m <= end : m >= end; m += dir) {
+                const makeCell = (v: number) =>
+                    axis === "col"
+                        ? { row: cross, col: v }
+                        : { row: v, col: cross };
+                sources.push(makeCell(m - dir));
+                dests.push(makeCell(m));
+                const beforeVal = m - 2 * dir;
+                const hasBefore =
+                    dir === 1
+                        ? beforeVal >= beforeLimit
+                        : beforeVal <= beforeLimit;
+                beforeSources.push(hasBefore ? makeCell(beforeVal) : undefined);
+            }
+        }
+        return { sources, dests, beforeSources };
+    }
+
     function handleMouseUp(ev: MouseEvent) {
         // fill cells on release
         if (isFilling && focusedRangeStart && focusedRangeBounds) {
             const bounds = focusedRangeBounds;
             const orig = fillOriginalBounds ?? bounds;
 
-            const fillSources: CellId[] = [];
-            const fillDests: CellId[] = [];
-            const fillBeforeSources: (CellId | undefined)[] = [];
+            const allSources: CellId[] = [];
+            const allDests: CellId[] = [];
+            const allBeforeSources: (CellId | undefined)[] = [];
 
-            // Step 1: fill horizontally (within overlapping row range)
-            const hMinR = Math.max(orig.minR, bounds.minR);
-            const hMaxR = Math.min(orig.maxR, bounds.maxR);
-            if (bounds.maxC > orig.maxC) {
-                for (let r = hMinR; r <= hMaxR; r++) {
-                    for (let c = orig.maxC + 1; c <= bounds.maxC; c++) {
-                        fillSources.push({ row: r, col: c - 1 });
-                        fillDests.push({ row: r, col: c });
-                        fillBeforeSources.push(
-                            c - 2 >= orig.minC
-                                ? { row: r, col: c - 2 }
-                                : undefined,
-                        );
-                    }
-                }
-            } else if (bounds.minC < orig.minC) {
-                for (let r = hMinR; r <= hMaxR; r++) {
-                    for (let c = orig.minC - 1; c >= bounds.minC; c--) {
-                        fillSources.push({ row: r, col: c + 1 });
-                        fillDests.push({ row: r, col: c });
-                        fillBeforeSources.push(
-                            c + 2 <= orig.maxC
-                                ? { row: r, col: c + 2 }
-                                : undefined,
-                        );
-                    }
-                }
-            }
+            const pushEdge = (axis: "row" | "col", dir: 1 | -1) => {
+                const { sources, dests, beforeSources } = generateFillEdge(
+                    orig,
+                    bounds,
+                    axis,
+                    dir,
+                );
+                allSources.push(...sources);
+                allDests.push(...dests);
+                allBeforeSources.push(...beforeSources);
+            };
 
-            // Step 2: fill vertically (full column range including new columns)
-            if (bounds.maxR > orig.maxR) {
-                for (let c = bounds.minC; c <= bounds.maxC; c++) {
-                    for (let r = orig.maxR + 1; r <= bounds.maxR; r++) {
-                        fillSources.push({ row: r - 1, col: c });
-                        fillDests.push({ row: r, col: c });
-                        fillBeforeSources.push(
-                            r - 2 >= orig.minR
-                                ? { row: r - 2, col: c }
-                                : undefined,
-                        );
-                    }
-                }
-            } else if (bounds.minR < orig.minR) {
-                for (let c = bounds.minC; c <= bounds.maxC; c++) {
-                    for (let r = orig.minR - 1; r >= bounds.minR; r--) {
-                        fillSources.push({ row: r + 1, col: c });
-                        fillDests.push({ row: r, col: c });
-                        fillBeforeSources.push(
-                            r + 2 <= orig.maxR
-                                ? { row: r + 2, col: c }
-                                : undefined,
-                        );
-                    }
-                }
-            }
+            // horizontal fill (within overlapping row range)
+            if (bounds.maxC > orig.maxC) pushEdge("col", 1);
+            else if (bounds.minC < orig.minC) pushEdge("col", -1);
 
-            if (fillSources.length) {
-                commitCellFill(fillSources, fillDests, fillBeforeSources);
+            // vertical fill (full column range including new columns)
+            if (bounds.maxR > orig.maxR) pushEdge("row", 1);
+            else if (bounds.minR < orig.minR) pushEdge("row", -1);
+
+            if (allSources.length) {
+                commitCellFill(allSources, allDests, allBeforeSources);
             }
 
             // delete cells that were in original bounds but not in final bounds (shrinking)
             if (fillOriginalBounds) {
-                const deleteCells: CellId[] = [];
-                for (let r = orig.minR; r <= orig.maxR; r++) {
-                    for (let c = orig.minC; c <= orig.maxC; c++) {
-                        if (
-                            r >= bounds.minR &&
-                            r <= bounds.maxR &&
-                            c >= bounds.minC &&
-                            c <= bounds.maxC
-                        )
-                            continue;
-                        deleteCells.push({ row: r, col: c });
-                    }
-                }
-                if (deleteCells.length) {
-                    commitDelete(deleteCells);
-                }
+                const deleteCells = cellsOutside(orig, bounds);
+                if (deleteCells.length) commitDelete(deleteCells);
             }
 
             isFilling = false;
             fillOriginalBounds = null;
         }
+
         // stop selecting and inserting on mouse button release
         isSelecting = false;
         editorInsertReference = false;
@@ -787,14 +806,7 @@
                 ev.preventDefault();
 
                 if (focusedRangeBounds) {
-                    const bounds = focusedRangeBounds;
-                    const cells: CellId[] = [];
-                    for (let r = bounds.minR; r <= bounds.maxR; r++) {
-                        for (let c = bounds.minC; c <= bounds.maxC; c++) {
-                            cells.push({ row: r, col: c });
-                        }
-                    }
-                    commitDelete(cells);
+                    commitDelete(cellsInBounds(focusedRangeBounds));
                 } else {
                     commitDelete([focusedCell]);
                 }
@@ -832,14 +844,14 @@
 
     // --- scroll handling & selection overlays ---
 
-    let overlayBaseScrollTop = 0;
-    let overlayBaseScrollLeft = 0;
+    let sos: SheetObjectsState;
+    let focusObj: SheetObject;
+    let fillOriginObj: SheetObject;
+    let refObjs: SheetObject[] = [];
     let overlayDebounceId: ReturnType<typeof setTimeout> | null = null;
-    let overlaysEl: HTMLElement | null = null;
-    let focusOverlayEl: HTMLElement | null = null;
-    let fillOriginOverlayEl: HTMLElement | null = null;
-    let refsContainerEl: HTMLElement | null = null;
     let gridWrapperEl: HTMLElement | null = null;
+    let clipWrapperEl: HTMLElement | null = null;
+    let overlaysEl: HTMLElement | null = null;
     let scrollContainerEl: HTMLElement | null = null;
 
     // get the grid's scroll container element
@@ -853,125 +865,25 @@
         return scrollContainerEl;
     }
 
+    function initOverlays() {
+        sos = createState(clipWrapperEl!, overlaysEl!);
+        fillOriginObj = createObject(sos, "selection-overlay-fill-origin");
+        focusObj = createObject(sos, "selection-overlay-focus");
+        const fillHandle = document.createElement("div");
+        fillHandle.className = "fill-handle";
+        fillHandle.onmousedown = handleFillStart;
+        focusObj.el.appendChild(fillHandle);
+    }
+
     function handleScroll(ev: Event) {
         if ((ev.target as HTMLElement).closest(".formula-input")) return;
-        // move overlays via transform (no layout reflow)
         const scroller = ev.target as HTMLElement;
-        const dx = overlayBaseScrollLeft - scroller.scrollLeft;
-        const dy = overlayBaseScrollTop - scroller.scrollTop;
-        overlaysEl ??= document.querySelector<HTMLElement>(
-            ".selection-overlays",
-        );
-        if (overlaysEl) {
-            overlaysEl.style.transform = `translate(${dx}px, ${dy}px)`;
-        }
-        // apply header highlights after scroll
-        if (focusIsVisible()) {
-            if (overlayDebounceId) clearTimeout(overlayDebounceId);
-            overlayDebounceId = setTimeout(() => {
-                applyHeaderHighlights();
-                overlayDebounceId = null;
-            }, 10);
-        }
-    }
-
-    // compute pixel rect for a cell range from logical coordinates
-    // positions are relative to the current scroll position at time of positionOverlays()
-    function getOverlayRect(bounds: {
-        minR: number;
-        maxR: number;
-        minC: number;
-        maxC: number;
-    }) {
-        if (!gridApi) return null;
-        const state = gridApi.getState();
-        const columns = state._columns;
-        const rowHeight = state._sizes.rowHeight ?? 37;
-        const headerHeight = state._sizes.headerHeight ?? 37;
-
-        // compute column left offsets by summing widths
-        const minColLetter = columnIndexToLetter(bounds.minC);
-        const maxColLetter = columnIndexToLetter(bounds.maxC);
-        let colLeft = 0;
-        let minColLeft = -1;
-        let maxColRight = -1;
-        for (const col of columns) {
-            const w = col.width ?? 100;
-            if (col.id === minColLetter) minColLeft = colLeft;
-            if (col.id === maxColLetter) maxColRight = colLeft + w;
-            colLeft += w;
-        }
-        if (minColLeft < 0 || maxColRight < 0) return null;
-
-        const left = minColLeft - overlayBaseScrollLeft;
-        const right = maxColRight - overlayBaseScrollLeft;
-        const top =
-            headerHeight + bounds.minR * rowHeight - overlayBaseScrollTop;
-        const bottom =
-            headerHeight + (bounds.maxR + 1) * rowHeight - overlayBaseScrollTop;
-
-        return { left, top, width: right - left, height: bottom - top };
-    }
-
-    function positionSelectionOverlay(
-        overlay: HTMLElement,
-        bounds: { minR: number; maxR: number; minC: number; maxC: number },
-        color: string,
-    ) {
-        const rect = getOverlayRect(bounds);
-        if (!rect) {
-            overlay.style.display = "none";
-            return;
-        }
-        overlay.style.display = "block";
-        overlay.style.left = `${rect.left}px`;
-        overlay.style.top = `${rect.top}px`;
-        overlay.style.width = `${rect.width}px`;
-        overlay.style.height = `${rect.height}px`;
-        overlay.style.color = color;
-    }
-
-    /** Check if the focused cell/range is within the visible scroll area. */
-    function focusIsVisible(): boolean {
-        const b = focusedRangeBounds;
-        const f = focusedCell;
-        if (!f && !b) return false;
-        const scroller = getScrollContainer();
-        if (!scroller) return false;
-        const state = gridApi?.getState();
-        const rowH = state?._sizes?.rowHeight ?? 37;
-        const hdrH = state?._sizes?.headerHeight ?? 37;
-
-        const minR = b?.minR ?? f!.row,
-            maxR = b?.maxR ?? f!.row;
-        const minC = b?.minC ?? f!.col,
-            maxC = b?.maxC ?? f!.col;
-
-        const firstRow = Math.floor(scroller.scrollTop / rowH);
-        const lastRow = Math.floor(
-            (scroller.scrollTop + scroller.clientHeight - hdrH) / rowH,
-        );
-        if (maxR < firstRow || minR > lastRow) return false;
-
-        // sum actual column widths to find pixel bounds of focused columns
-        const cols = state?._columns ?? [];
-        let x = 0,
-            minColLeft = 0,
-            maxColRight = 0;
-        for (let i = 0; i < cols.length; i++) {
-            const w = cols[i].width ?? 100;
-            const ci = i - 1; // data col index (cols[0] is rowNumber)
-            if (ci === minC) minColLeft = x;
-            if (ci === maxC) {
-                maxColRight = x + w;
-                break;
-            }
-            x += w;
-        }
-        return (
-            maxColRight > scroller.scrollLeft &&
-            minColLeft < scroller.scrollLeft + scroller.clientWidth
-        );
+        syncScroll(sos, scroller.scrollLeft, scroller.scrollTop);
+        if (overlayDebounceId) clearTimeout(overlayDebounceId);
+        overlayDebounceId = setTimeout(() => {
+            applyHeaderHighlights();
+            overlayDebounceId = null;
+        }, 10);
     }
 
     function applyHeaderHighlights() {
@@ -979,15 +891,12 @@
         const wrapper = document.querySelector(".grid-wrapper");
         if (!wrapper) return;
         const focused = focusedCell;
-        const focusVisible = focusIsVisible();
 
         for (const col of wrapper.querySelectorAll<HTMLElement>(
             "[data-header-id]",
         )) {
             const colIdx = columnLetterToIndex(col.dataset.headerId!);
-            if (!focusVisible) {
-                col.classList.remove("highlight-col");
-            } else if (focusedRangeBounds) {
+            if (focusedRangeBounds) {
                 col.classList.toggle(
                     "highlight-col",
                     colIdx >= focusedRangeBounds.minC &&
@@ -1000,12 +909,10 @@
             }
         }
 
-        if (!focusVisible) return;
-
         for (const cell of wrapper.querySelectorAll<HTMLElement>(
             '.wx-cell[data-col-id="rowNumber"]',
         )) {
-            const rowIdx = Number(cell.dataset.rowId) - 1; // convert to 0-indexed
+            const rowIdx = Number(cell.dataset.rowId) - 1;
             if (
                 focusedRangeBounds &&
                 rowIdx >= focusedRangeBounds.minR &&
@@ -1021,88 +928,34 @@
     }
 
     function positionOverlays() {
-        if (!gridApi) return;
-        const state = gridApi.getState();
-        const headerHeight = state._sizes.headerHeight ?? 37;
-        const rowNumCol = state._columns.find((c) => c.id === "rowNumber");
-        const rowNumWidth = rowNumCol ? (rowNumCol.width ?? 50) : 50;
-
-        // record scroll baseline and reset transform
+        if (!gridApi || !sos) return;
         const scroller = getScrollContainer();
-        overlayBaseScrollTop = scroller?.scrollTop ?? 0;
-        overlayBaseScrollLeft = scroller?.scrollLeft ?? 0;
-        overlaysEl ??= document.querySelector<HTMLElement>(
-            ".selection-overlays",
+        reposition(
+            sos,
+            gridApi.getState(),
+            scroller?.scrollLeft ?? 0,
+            scroller?.scrollTop ?? 0,
         );
-        if (overlaysEl) {
-            overlaysEl.style.transform = "translate(0px, 0px)";
-        }
 
-        // clip overlays so they don't render above headers or left of row-number column
-        const clipWrapper = document.querySelector<HTMLElement>(
-            ".selection-overlays-clip",
-        );
-        if (clipWrapper) {
-            clipWrapper.style.clipPath = `inset(${headerHeight}px 0 0 ${rowNumWidth}px)`;
-        }
+        focusObj.visible = !!focusedRangeBounds;
+        if (focusedRangeBounds) focusObj.bounds = focusedRangeBounds;
+        applyRect(sos, focusObj);
 
-        // focus overlay
-        if (focusOverlayEl) {
-            if (focusedRangeBounds) {
-                positionSelectionOverlay(
-                    focusOverlayEl,
-                    focusedRangeBounds,
-                    "var(--wx-color-primary)",
-                );
-            } else {
-                focusOverlayEl.style.display = "none";
-            }
-        }
+        fillOriginObj.visible = isFilling && !!fillOriginalBounds;
+        if (fillOriginalBounds) fillOriginObj.bounds = fillOriginalBounds;
+        applyRect(sos, fillOriginObj);
 
-        // fill origin overlay (shows original selection during fill)
-        if (fillOriginOverlayEl) {
-            if (isFilling && fillOriginalBounds) {
-                positionSelectionOverlay(
-                    fillOriginOverlayEl,
-                    fillOriginalBounds,
-                    "var(--wx-color-primary)",
-                );
-            } else {
-                fillOriginOverlayEl.style.display = "none";
-            }
-        }
-
-        // formula reference overlays
-        if (refsContainerEl) {
-            const existing = refsContainerEl.querySelectorAll<HTMLElement>(
-                ".selection-overlay-ref",
-            );
-            const refs = parsedFormulaReferencesHighlights ?? [];
-
-            // reuse or create ref overlay elements
-            refs.forEach((ref, i) => {
-                let el: HTMLElement;
-                if (i < existing.length) {
-                    el = existing[i];
-                } else {
-                    el = document.createElement("div");
-                    el.className = "selection-overlay-ref";
-                    refsContainerEl?.appendChild(el);
-                }
-                el.className =
-                    "selection-overlay-ref" +
-                    (i === activeRefIndex ? " active" : "");
-                positionSelectionOverlay(
-                    el,
-                    ref.bounds,
-                    REF_COLORS[ref.colorIndex],
-                );
-            });
-
-            // remove excess elements
-            for (let i = existing.length - 1; i >= refs.length; i--) {
-                existing[i].remove();
-            }
+        // sync ref SheetObjects with formula reference highlights
+        const refs = parsedFormulaReferencesHighlights ?? [];
+        while (refObjs.length < refs.length)
+            refObjs.push(createObject(sos, "selection-overlay-ref"));
+        while (refObjs.length > refs.length) destroyObject(refObjs.pop()!);
+        for (let i = 0; i < refs.length; i++) {
+            refObjs[i].bounds = refs[i].bounds;
+            refObjs[i].visible = true;
+            refObjs[i].el.style.color = REF_COLORS[refs[i].colorIndex];
+            refObjs[i].el.classList.toggle("active", i === activeRefIndex);
+            applyRect(sos, refObjs[i]);
         }
     }
 
@@ -1115,16 +968,16 @@
         positionOverlays();
     });
 
-    // update active ref highlight when caret moves (lightweight, no repositioning)
     $effect(() => {
         const idx = activeRefIndex;
-        const refs = document.querySelectorAll<HTMLElement>(
-            ".selection-overlay-ref",
-        );
-        refs.forEach((el, i) => el.classList.toggle("active", i === idx));
+        for (let i = 0; i < refObjs.length; i++) {
+            refObjs[i].el.classList.toggle("active", i === idx);
+        }
     });
 
     onMount(() => {
+        initOverlays();
+
         const unlistenPromise = listen<DisplayCellEvent[]>(
             "display-cells",
             (event) => {
@@ -1182,30 +1035,8 @@
         {select}
         undo
     />
-    <div class="selection-overlays-clip">
-        <div class="selection-overlays" bind:this={overlaysEl}>
-            <div
-                class="selection-overlay-fill-origin"
-                bind:this={fillOriginOverlayEl}
-                style="display:none"
-            ></div>
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div
-                class="selection-overlay-focus"
-                bind:this={focusOverlayEl}
-                style="display:none"
-            >
-                <div
-                    class="fill-handle"
-                    class:filling={isFilling}
-                    onmousedown={handleFillStart}
-                ></div>
-            </div>
-            <div
-                class="selection-overlays-refs"
-                bind:this={refsContainerEl}
-            ></div>
-        </div>
+    <div class="selection-overlays-clip" bind:this={clipWrapperEl}>
+        <div class="selection-overlays" bind:this={overlaysEl}></div>
     </div>
 </div>
 
@@ -1239,100 +1070,6 @@
         inset: 0;
         pointer-events: none;
         will-change: transform;
-    }
-
-    /* Original selection shown during fill drag */
-    .selection-overlay-fill-origin {
-        position: absolute;
-        background: color-mix(in srgb, var(--wx-color-primary) 8%, transparent);
-        border: 2px dashed
-            color-mix(in srgb, var(--wx-color-primary) 40%, transparent);
-        border-radius: 2px;
-        pointer-events: none;
-    }
-
-    /* Sketchy selection overlay (focus range) */
-    .selection-overlay-focus,
-    :global(.selection-overlay-ref) {
-        position: absolute;
-        border-style: solid;
-        border-width: 3px 1px 1.5px 2.5px;
-        border-radius: 3px 5px 4px 4px / 2px 3px 5px 3px;
-        will-change: left, top, width, height;
-        --selection-overlay-transition-base:
-            left 30ms cubic-bezier(0, 0, 0.2, 1),
-            top 30ms cubic-bezier(0, 0, 0.2, 1),
-            width 30ms cubic-bezier(0, 0, 0.2, 1),
-            height 30ms cubic-bezier(0, 0, 0.2, 1);
-        transition: var(--selection-overlay-transition-base);
-    }
-    .selection-overlay-focus {
-        border-color: var(--wx-color-primary);
-    }
-    .selection-overlay-focus::before {
-        content: "";
-        position: absolute;
-        inset: -2px;
-        border-style: solid;
-        border-color: var(--wx-color-primary);
-        border-width: 1px 3px 2.5px 1.5px;
-        border-radius: 4px 3px 5px 3px / 4px 5px 3px 4px;
-        opacity: 0.7;
-    }
-
-    .fill-handle {
-        position: absolute;
-        bottom: -4px;
-        right: -4px;
-        width: 9px;
-        height: 9px;
-        background: var(--wx-color-primary);
-        border: 1px solid var(--wx-background);
-        cursor: crosshair;
-        pointer-events: auto;
-        z-index: 10;
-    }
-
-    .fill-handle.filling {
-        width: 12px;
-        height: 12px;
-        bottom: -6px;
-        right: -6px;
-        animation: fill-spin 0.8s linear infinite;
-    }
-
-    @keyframes fill-spin {
-        from {
-            transform: rotate(0deg);
-        }
-        to {
-            transform: rotate(360deg);
-        }
-    }
-
-    /* Sketchy selection overlay (formula references) */
-    .selection-overlays-refs {
-        position: absolute;
-        inset: 0;
-    }
-    :global(.selection-overlay-ref) {
-        border-color: currentColor;
-        transition:
-            var(--selection-overlay-transition-base),
-            color 30ms cubic-bezier(0, 0, 0.2, 1);
-    }
-    :global(.selection-overlay-ref)::before {
-        content: "";
-        position: absolute;
-        inset: -2px;
-        border-style: solid;
-        border-color: currentColor;
-        border-width: 1px 3px 2.5px 1.5px;
-        border-radius: 4px 3px 5px 3px / 4px 5px 3px 4px;
-        opacity: 0.7;
-    }
-    :global(.selection-overlay-ref.active) {
-        background-color: color-mix(in srgb, currentColor 4%, transparent);
     }
 
     :global(.wx-cell[data-col-id="rowNumber"]) {

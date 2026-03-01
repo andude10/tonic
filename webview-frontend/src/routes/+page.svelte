@@ -45,6 +45,29 @@
         overflow: hidden;
     }
 
+    /* scroll bars */
+    :global(*) {
+        scrollbar-width: thin;
+        scrollbar-color: #3e4042 transparent;
+    }
+    :global(::-webkit-scrollbar) {
+        width: 0.5rem;
+        height: 0.5rem;
+    }
+    :global(::-webkit-scrollbar-track) {
+        background: transparent;
+    }
+    :global(::-webkit-scrollbar-thumb) {
+        background: #3e4042;
+        border-radius: 0.25rem;
+    }
+    :global(::-webkit-scrollbar-thumb:hover) {
+        background: var(--wx-color-primary, #7e5dab);
+    }
+    :global(::-webkit-scrollbar-corner) {
+        background: transparent;
+    }
+
     :global(.noselect) {
         user-select: none !important;
         -webkit-user-select: none !important;
