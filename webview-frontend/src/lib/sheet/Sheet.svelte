@@ -10,11 +10,11 @@
         type SheetRow,
         type UICell,
     } from "$lib/sheet/shared";
-    import { Channel, invoke } from "@tauri-apps/api/core";
-    import { emit } from "@tauri-apps/api/event";
+    import { invoke } from "@tauri-apps/api/core";
+    import { emit, listen } from "@tauri-apps/api/event";
     import SheetTopPanel from "./SheetTopPanel.svelte";
     import Cell from "./Cell.svelte";
-    import { untrack } from "svelte";
+    import { onMount, untrack } from "svelte";
     import { endTimer, startTimer } from "$lib/stats.svelte";
 
     // -- backend (tauri) communication setup --
@@ -316,13 +316,22 @@
         });
     }
 
-    function commitDelete(cellId: CellId) {
-        const cell = getCell(cellId);
-        if (!cell) return;
-        cell.enteredText = "";
-        editorInput = "";
+    function commitDelete(cellIds: CellId[]) {
+        if (!cellIds.length) return;
+        for (const cellId of cellIds) {
+            const cell = getCell(cellId);
+            if (!cell) continue;
+            cell.enteredText = "";
+            if (
+                focusedCell &&
+                focusedCell.row === cellId.row &&
+                focusedCell.col === cellId.col
+            ) {
+                editorInput = "";
+            }
+        }
         startTimer("display-cell");
-        invoke("enter_input", { cellId, userInput: "" });
+        invoke("delete_cells", { cells: cellIds });
     }
 
     function commitCellUpdate(cellId: CellId, value: string) {
@@ -334,15 +343,16 @@
     }
 
     function commitCellFill(
-        source: CellId,
-        dest: CellId,
-        beforeSource?: CellId,
+        sources: CellId[],
+        dests: CellId[],
+        beforeSources?: (CellId | undefined)[],
     ) {
+        if (!sources.length || sources.length !== dests.length) return;
         startTimer("display-cell");
-        invoke("fill_cell", {
-            source,
-            dest,
-            beforeSource,
+        invoke("fill_cells", {
+            sources,
+            dests,
+            beforeSources,
         });
     }
 
@@ -393,7 +403,9 @@
     function getCell(id: CellId | undefined): CellData | undefined {
         if (!id) return undefined;
         const ui = toUICell(id);
-        const cell = gridApi?.getRow(ui.row)[ui.column];
+        const row = gridApi?.getRow(ui.row);
+        if (!row) return undefined;
+        const cell = row[ui.column];
         if (isCellData(cell)) return cell;
     }
 
@@ -549,29 +561,35 @@
             const bounds = focusedRangeBounds;
             const orig = fillOriginalBounds ?? bounds;
 
+            const fillSources: CellId[] = [];
+            const fillDests: CellId[] = [];
+            const fillBeforeSources: (CellId | undefined)[] = [];
+
             // Step 1: fill horizontally (within overlapping row range)
             const hMinR = Math.max(orig.minR, bounds.minR);
             const hMaxR = Math.min(orig.maxR, bounds.maxR);
             if (bounds.maxC > orig.maxC) {
                 for (let r = hMinR; r <= hMaxR; r++) {
                     for (let c = orig.maxC + 1; c <= bounds.maxC; c++) {
-                        const src: CellId = { row: r, col: c - 1 };
-                        const before: CellId | undefined =
+                        fillSources.push({ row: r, col: c - 1 });
+                        fillDests.push({ row: r, col: c });
+                        fillBeforeSources.push(
                             c - 2 >= orig.minC
                                 ? { row: r, col: c - 2 }
-                                : undefined;
-                        commitCellFill(src, { row: r, col: c }, before);
+                                : undefined,
+                        );
                     }
                 }
             } else if (bounds.minC < orig.minC) {
                 for (let r = hMinR; r <= hMaxR; r++) {
                     for (let c = orig.minC - 1; c >= bounds.minC; c--) {
-                        const src: CellId = { row: r, col: c + 1 };
-                        const before: CellId | undefined =
+                        fillSources.push({ row: r, col: c + 1 });
+                        fillDests.push({ row: r, col: c });
+                        fillBeforeSources.push(
                             c + 2 <= orig.maxC
                                 ? { row: r, col: c + 2 }
-                                : undefined;
-                        commitCellFill(src, { row: r, col: c }, before);
+                                : undefined,
+                        );
                     }
                 }
             }
@@ -580,29 +598,36 @@
             if (bounds.maxR > orig.maxR) {
                 for (let c = bounds.minC; c <= bounds.maxC; c++) {
                     for (let r = orig.maxR + 1; r <= bounds.maxR; r++) {
-                        const src: CellId = { row: r - 1, col: c };
-                        const before: CellId | undefined =
+                        fillSources.push({ row: r - 1, col: c });
+                        fillDests.push({ row: r, col: c });
+                        fillBeforeSources.push(
                             r - 2 >= orig.minR
                                 ? { row: r - 2, col: c }
-                                : undefined;
-                        commitCellFill(src, { row: r, col: c }, before);
+                                : undefined,
+                        );
                     }
                 }
             } else if (bounds.minR < orig.minR) {
                 for (let c = bounds.minC; c <= bounds.maxC; c++) {
                     for (let r = orig.minR - 1; r >= bounds.minR; r--) {
-                        const src: CellId = { row: r + 1, col: c };
-                        const before: CellId | undefined =
+                        fillSources.push({ row: r + 1, col: c });
+                        fillDests.push({ row: r, col: c });
+                        fillBeforeSources.push(
                             r + 2 <= orig.maxR
                                 ? { row: r + 2, col: c }
-                                : undefined;
-                        commitCellFill(src, { row: r, col: c }, before);
+                                : undefined,
+                        );
                     }
                 }
             }
 
+            if (fillSources.length) {
+                commitCellFill(fillSources, fillDests, fillBeforeSources);
+            }
+
             // delete cells that were in original bounds but not in final bounds (shrinking)
             if (fillOriginalBounds) {
+                const deleteCells: CellId[] = [];
                 for (let r = orig.minR; r <= orig.maxR; r++) {
                     for (let c = orig.minC; c <= orig.maxC; c++) {
                         if (
@@ -612,8 +637,11 @@
                             c <= bounds.maxC
                         )
                             continue;
-                        commitCellUpdate({ row: r, col: c }, "");
+                        deleteCells.push({ row: r, col: c });
                     }
+                }
+                if (deleteCells.length) {
+                    commitDelete(deleteCells);
                 }
             }
 
@@ -758,15 +786,17 @@
             else if (ev.key === "Delete") {
                 ev.preventDefault();
 
-                const bounds = focusedRangeBounds;
-                if (bounds) {
+                if (focusedRangeBounds) {
+                    const bounds = focusedRangeBounds;
+                    const cells: CellId[] = [];
                     for (let r = bounds.minR; r <= bounds.maxR; r++) {
                         for (let c = bounds.minC; c <= bounds.maxC; c++) {
-                            commitDelete({ row: r, col: c });
+                            cells.push({ row: r, col: c });
                         }
                     }
+                    commitDelete(cells);
                 } else {
-                    commitDelete(focusedCell);
+                    commitDelete([focusedCell]);
                 }
             }
 
@@ -1094,20 +1124,24 @@
         refs.forEach((el, i) => el.classList.toggle("active", i === idx));
     });
 
-    const displayCellChannel = new Channel<DisplayCellEvent>();
-    displayCellChannel.onmessage = (message) => {
-        console.log(`display-cells event received`, message);
-        const { cellId, display, enteredText } = message;
-        const cell = getCell(cellId);
-        if (!cell) return;
-        cell.computedValue = display;
-        cell.enteredText = enteredText;
-        // todo: handle isError for styling
-    };
+    onMount(() => {
+        const unlistenPromise = listen<DisplayCellEvent[]>(
+            "display-cells",
+            (event) => {
+                for (const { cellId, display, enteredText } of event.payload) {
+                    const cell = getCell(cellId);
+                    if (!cell) continue;
+                    cell.computedValue = display;
+                    cell.enteredText = enteredText;
+                    // todo: handle isError for styling
+                }
+            },
+        );
 
-    invoke("register_cell_channel", { channel: displayCellChannel }).catch(
-        console.error,
-    );
+        return () => {
+            unlistenPromise.then((unlisten) => unlisten()).catch(console.error);
+        };
+    });
 
     function handleRequestData(
         ev: { row: { start: number; end: number } } & { [key: string]: any },
@@ -1180,6 +1214,8 @@
         flex: 1 1 auto;
         min-height: 0;
         min-width: 0;
+        margin-top: 0.25rem;
+        border-top: var(--wx-border, 1px solid #384047);
         position: relative;
         overflow: hidden;
     }

@@ -2,7 +2,7 @@ use std::{error::Error, sync::Mutex, time::Instant};
 
 use ::serde::{Deserialize, Serialize};
 use fastnum::D256;
-use tauri::{ipc::Channel, AppHandle, Emitter, Listener, Manager};
+use tauri::{AppHandle, Emitter, Listener, Manager};
 use tauri_plugin_log::log::{debug, error};
 
 use crate::{
@@ -29,7 +29,6 @@ struct SpreadsheetViewport {
 struct TonicState {
     spreadsheet: Spreadsheet,
     spreadsheet_viewport: SpreadsheetViewport,
-    display_cell_channel: Option<Channel<DisplayCellEvent>>,
 }
 
 impl TonicState {
@@ -40,7 +39,6 @@ impl TonicState {
                 row_start: 0,
                 row_end: 0,
             },
-            display_cell_channel: None,
         }
     }
 }
@@ -58,38 +56,42 @@ struct DisplayCellEvent {
     is_error: bool,
 }
 
-/// Send a render-cell event for a single cell, but only if the cell is within
+/// Build display data for a single cell, but only if the cell is within
 /// the current render window. Expects state to be already locked.
-fn send_display_cell(state: &TonicState, cell_id: CellId) {
+fn build_display_cell(state: &TonicState, cell_id: CellId) -> Option<DisplayCellEvent> {
     let vp = &state.spreadsheet_viewport;
     if cell_id.row < vp.row_start || cell_id.row > vp.row_end {
+        return None;
+    }
+
+    let (display, is_error) = match state.spreadsheet.sheets[0].get(&cell_id) {
+        Some(Cell::SingleValue(v)) => (v.to_string(), false),
+        Some(Cell::Formula { value, .. }) => (value.to_string(), false),
+        Some(Cell::FormulaError { error }) => (error.clone(), true),
+        None => (String::new(), false),
+    };
+    let entered_text = state
+        .spreadsheet
+        .user_input_raw_text
+        .get(&cell_id)
+        .cloned()
+        .unwrap_or_default();
+
+    Some(DisplayCellEvent {
+        cell_id,
+        display,
+        entered_text,
+        is_error,
+    })
+}
+
+/// Emit a batch of display-cell updates in a single IPC event.
+fn emit_display_cells(app: &AppHandle, cells: Vec<DisplayCellEvent>) {
+    if cells.is_empty() {
         return;
     }
-    if let Some(channel) = state.display_cell_channel.as_ref() {
-        let (display, is_error) = match state.spreadsheet.sheets[0].get(&cell_id) {
-            Some(Cell::SingleValue(v)) => (v.to_string(), false),
-            Some(Cell::Formula { value, .. }) => (value.to_string(), false),
-            Some(Cell::FormulaError { error }) => (error.clone(), true),
-            None => (String::new(), false),
-        };
-        let entered_text = state
-            .spreadsheet
-            .user_input_raw_text
-            .get(&cell_id)
-            .cloned()
-            .unwrap_or_default();
-
-        channel
-            .send(DisplayCellEvent {
-                cell_id,
-                display,
-                entered_text,
-                is_error,
-            })
-            .expect("to be able to send DisplayCellEvent");
-    } else {
-        error!("No display cell channel available, when calling send_display_cell");
-    }
+    app.emit("display-cells", cells)
+        .expect("to be able to emit display-cells");
 }
 
 #[tauri::command]
@@ -128,7 +130,10 @@ fn enter_input(app: AppHandle, cell_id: CellId, user_input: &str) {
                 cell_id
             );
         }
-        send_display_cell(&state, cell_id);
+        emit_display_cells(
+            &app,
+            build_display_cell(&state, cell_id).into_iter().collect(),
+        );
         return;
     }
 
@@ -143,7 +148,10 @@ fn enter_input(app: AppHandle, cell_id: CellId, user_input: &str) {
     if lex_output.has_errors() {
         let msg = lexer_errors_to_string(lex_output.errors());
         state.spreadsheet.sheets[0].insert(cell_id, Cell::FormulaError { error: msg });
-        send_display_cell(&state, cell_id);
+        emit_display_cells(
+            &app,
+            build_display_cell(&state, cell_id).into_iter().collect(),
+        );
         return;
     }
 
@@ -160,7 +168,10 @@ fn enter_input(app: AppHandle, cell_id: CellId, user_input: &str) {
     if !parse_errs.is_empty() {
         let msg = parse_formula_errors_to_string(&parse_errs);
         state.spreadsheet.sheets[0].insert(cell_id, Cell::FormulaError { error: msg });
-        send_display_cell(&state, cell_id);
+        emit_display_cells(
+            &app,
+            build_display_cell(&state, cell_id).into_iter().collect(),
+        );
         return;
     }
 
@@ -180,124 +191,173 @@ fn enter_input(app: AppHandle, cell_id: CellId, user_input: &str) {
         }
         debug!("Eval elapsed: {:?}", eval_time.elapsed());
 
-        send_display_cell(&state, cell_id);
+        emit_display_cells(
+            &app,
+            build_display_cell(&state, cell_id).into_iter().collect(),
+        );
     }
 }
 
 #[tauri::command]
-fn fill_cell(app: AppHandle, source: CellId, dest: CellId, before_source: Option<CellId>) {
+fn delete_cells(app: AppHandle, cells: Vec<CellId>) {
     let state = app.state::<Mutex<TonicState>>();
     let mut state = state
         .lock()
-        .expect("to able to lock spreadsheet in fill_cell");
+        .expect("to able to lock spreadsheet in delete_cells");
 
-    // numeric extrapolation: dest = source + (source - before_source)
-    if let Some(before) = before_source {
-        if let (
-            Some(Cell::SingleValue(CellValue::Number(src_val))),
-            Some(Cell::SingleValue(CellValue::Number(before_val))),
-        ) = (
-            state.spreadsheet.sheets[0].get(&source),
-            state.spreadsheet.sheets[0].get(&before),
-        ) {
-            let (src_val, before_val) = (*src_val, *before_val);
-            let dest_val = src_val + (src_val - before_val);
-            let display = dest_val.to_string();
-            state
-                .spreadsheet
-                .user_input_raw_text
-                .insert(dest, display.clone());
-            state.spreadsheet.sheets[0]
-                .insert(dest, Cell::SingleValue(CellValue::Number(dest_val)));
-            send_display_cell(&state, dest);
+    for cell_id in &cells {
+        state
+            .spreadsheet
+            .user_input_raw_text
+            .insert(*cell_id, String::new());
+        state.spreadsheet.sheets[0]
+            .insert(*cell_id, Cell::SingleValue(CellValue::Text(String::new())));
+    }
+    let updates: Vec<_> = cells
+        .iter()
+        .filter_map(|&id| build_display_cell(&state, id))
+        .collect();
+    emit_display_cells(&app, updates);
+}
+
+#[tauri::command]
+fn fill_cells(
+    app: AppHandle,
+    sources: Vec<CellId>,
+    dests: Vec<CellId>,
+    before_sources: Option<Vec<Option<CellId>>>,
+) {
+    if sources.len() != dests.len() {
+        return;
+    }
+    if let Some(ref bs) = before_sources {
+        if bs.len() != dests.len() {
             return;
         }
     }
 
-    let source_cell = state.spreadsheet.sheets[0].get(&source);
+    let state = app.state::<Mutex<TonicState>>();
+    let mut state = state
+        .lock()
+        .expect("to able to lock spreadsheet in fill_cells");
 
-    match source_cell {
-        Some(Cell::Formula { expr, value: _ }) => {
-            let row_off = dest.row as i32 - source.row as i32;
-            let col_off = dest.col as i32 - source.col as i32;
+    let mut updated_cells = Vec::with_capacity(dests.len());
 
-            // clone and offset relative refs in the AST
-            let mut new_exprs: Vec<Expr> = expr.clone();
-            for e in &mut new_exprs {
-                if let Expr::Atom(atom) = e {
-                    match atom {
-                        ExprAtom::RelativeCellRef(_, ref mut cell) => {
-                            cell.row = (cell.row as i32 + row_off).max(0) as u32;
-                            cell.col = (cell.col as i32 + col_off).max(0) as u32;
-                        }
-                        ExprAtom::RelativeCellRange(_, ref mut range) => {
-                            for cell in [&mut range.start, &mut range.end] {
+    for i in 0..dests.len() {
+        let source = sources[i];
+        let dest = dests[i];
+        let before_source = before_sources
+            .as_ref()
+            .and_then(|v| v.get(i))
+            .copied()
+            .flatten();
+
+        // numeric extrapolation: dest = source + (source - before_source)
+        if let Some(before) = before_source {
+            if let (
+                Some(Cell::SingleValue(CellValue::Number(src_val))),
+                Some(Cell::SingleValue(CellValue::Number(before_val))),
+            ) = (
+                state.spreadsheet.sheets[0].get(&source),
+                state.spreadsheet.sheets[0].get(&before),
+            ) {
+                let (src_val, before_val) = (*src_val, *before_val);
+                let dest_val = src_val + (src_val - before_val);
+                let display = dest_val.to_string();
+                state
+                    .spreadsheet
+                    .user_input_raw_text
+                    .insert(dest, display.clone());
+                state.spreadsheet.sheets[0]
+                    .insert(dest, Cell::SingleValue(CellValue::Number(dest_val)));
+                updated_cells.push(dest);
+                continue;
+            }
+        }
+
+        let source_cell = state.spreadsheet.sheets[0].get(&source);
+
+        match source_cell {
+            Some(Cell::Formula { expr, value: _ }) => {
+                let row_off = dest.row as i32 - source.row as i32;
+                let col_off = dest.col as i32 - source.col as i32;
+
+                // clone and offset relative refs in the AST
+                let mut new_exprs: Vec<Expr> = expr.clone();
+                for e in &mut new_exprs {
+                    if let Expr::Atom(atom) = e {
+                        match atom {
+                            ExprAtom::RelativeCellRef(_, ref mut cell) => {
                                 cell.row = (cell.row as i32 + row_off).max(0) as u32;
                                 cell.col = (cell.col as i32 + col_off).max(0) as u32;
                             }
+                            ExprAtom::RelativeCellRange(_, ref mut range) => {
+                                for cell in [&mut range.start, &mut range.end] {
+                                    cell.row = (cell.row as i32 + row_off).max(0) as u32;
+                                    cell.col = (cell.col as i32 + col_off).max(0) as u32;
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
-            }
 
-            // offset relative refs in the raw text for display
-            let raw = state
-                .spreadsheet
-                .user_input_raw_text
-                .get(&source)
-                .cloned()
-                .unwrap_or_default();
-            let adjusted_raw = if raw.starts_with('=') {
-                format!("={}", offset_relative_refs(&raw[1..], row_off, col_off))
-            } else {
-                raw
-            };
-            state
-                .spreadsheet
-                .user_input_raw_text
-                .insert(dest, adjusted_raw);
+                // offset relative refs in the raw text for display
+                let raw = state
+                    .spreadsheet
+                    .user_input_raw_text
+                    .get(&source)
+                    .cloned()
+                    .unwrap_or_default();
+                let adjusted_raw = if raw.starts_with('=') {
+                    format!("={}", offset_relative_refs(&raw[1..], row_off, col_off))
+                } else {
+                    raw
+                };
+                state
+                    .spreadsheet
+                    .user_input_raw_text
+                    .insert(dest, adjusted_raw);
 
-            // eval the offset AST
-            match eval_formula(&new_exprs, &state.spreadsheet) {
-                Ok(value) => {
-                    state.spreadsheet.sheets[0].insert(
-                        dest,
-                        Cell::Formula {
-                            expr: new_exprs,
-                            value,
-                        },
-                    );
+                // eval the offset AST
+                match eval_formula(&new_exprs, &state.spreadsheet) {
+                    Ok(value) => {
+                        state.spreadsheet.sheets[0].insert(
+                            dest,
+                            Cell::Formula {
+                                expr: new_exprs,
+                                value,
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        let msg = format!("Eval Error: {:?}", e);
+                        state.spreadsheet.sheets[0].insert(dest, Cell::FormulaError { error: msg });
+                    }
                 }
-                Err(e) => {
-                    let msg = format!("Eval Error: {:?}", e);
-                    state.spreadsheet.sheets[0].insert(dest, Cell::FormulaError { error: msg });
-                }
+                updated_cells.push(dest);
             }
-            send_display_cell(&state, dest);
+            Some(Cell::SingleValue(value)) => {
+                let value = value.clone();
+                let raw = state
+                    .spreadsheet
+                    .user_input_raw_text
+                    .get(&source)
+                    .cloned()
+                    .unwrap_or_default();
+                state.spreadsheet.user_input_raw_text.insert(dest, raw);
+                state.spreadsheet.sheets[0].insert(dest, Cell::SingleValue(value));
+                updated_cells.push(dest);
+            }
+            Some(Cell::FormulaError { .. }) | None => {}
         }
-        Some(Cell::SingleValue(value)) => {
-            let value = value.clone();
-            let raw = state
-                .spreadsheet
-                .user_input_raw_text
-                .get(&source)
-                .cloned()
-                .unwrap_or_default();
-            state.spreadsheet.user_input_raw_text.insert(dest, raw);
-            state.spreadsheet.sheets[0].insert(dest, Cell::SingleValue(value));
-            send_display_cell(&state, dest);
-        }
-        Some(Cell::FormulaError { .. }) | None => {}
     }
-}
 
-#[tauri::command]
-fn register_cell_channel(app: AppHandle, channel: Channel<DisplayCellEvent>) {
-    let state = app.state::<Mutex<TonicState>>();
-    let mut state = state.lock().expect("to able to lock state in fill_cell");
-    state.display_cell_channel = Some(channel);
-    println!("display_cell_channel registered!");
+    let updates: Vec<_> = updated_cells
+        .iter()
+        .filter_map(|&id| build_display_cell(&state, id))
+        .collect();
+    emit_display_cells(&app, updates);
 }
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn Error + 'static>> {
@@ -323,9 +383,11 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn Error + 'static>> {
             col: u32::MAX,
             row: viewport.row_end,
         };
-        for (&cell_id, _) in sheet.range(lo..=hi) {
-            send_display_cell(&state, cell_id);
-        }
+        let updates: Vec<_> = sheet
+            .range(lo..=hi)
+            .filter_map(|(&cell_id, _)| build_display_cell(&state, cell_id))
+            .collect();
+        emit_display_cells(&handle, updates);
     });
 
     Ok(())
@@ -344,8 +406,8 @@ pub fn run() {
         .setup(setup)
         .invoke_handler(tauri::generate_handler![
             enter_input,
-            fill_cell,
-            register_cell_channel
+            fill_cells,
+            delete_cells
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

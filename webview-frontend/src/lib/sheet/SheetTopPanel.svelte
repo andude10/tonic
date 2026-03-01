@@ -60,7 +60,6 @@
         align-items: center;
         height: 38px;
         padding: 0 10px;
-        border-bottom: var(--wx-border, 1px solid #384047);
         user-select: none;
     }
 
