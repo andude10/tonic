@@ -10,11 +10,11 @@
         type SheetRow,
         type UICell,
     } from "$lib/sheet/shared";
-    import { invoke } from "@tauri-apps/api/core";
-    import { emit, listen } from "@tauri-apps/api/event";
+    import { Channel, invoke } from "@tauri-apps/api/core";
+    import { emit } from "@tauri-apps/api/event";
     import SheetTopPanel from "./SheetTopPanel.svelte";
     import Cell from "./Cell.svelte";
-    import { onMount, untrack } from "svelte";
+    import { untrack } from "svelte";
     import { endTimer, startTimer } from "$lib/stats.svelte";
 
     // -- backend (tauri) communication setup --
@@ -40,16 +40,18 @@
 
     let focusedCell: CellId | undefined = $state();
 
-    const baseRows = Array.from({ length: 1000 }, (_, i) => {
-        const row: SheetRow = { id: i + 1, rowNumber: i + 1 };
-        for (let j = 0; j < 26; j++) {
-            row[String.fromCharCode(65 + j)] = {
-                computedValue: "",
-                enteredText: "",
-            };
-        }
-        return row;
-    });
+    const baseRows: SheetRow[] = $state(
+        Array.from({ length: 1000 }, (_, i) => {
+            const row: SheetRow = { id: i + 1, rowNumber: i + 1 };
+            for (let j = 0; j < 26; j++) {
+                row[String.fromCharCode(65 + j)] = {
+                    computedValue: "",
+                    enteredText: "",
+                };
+            }
+            return row;
+        }),
+    );
 
     const baseColumns: IColumnConfig[] = (() => {
         const columns: IColumnConfig[] = [
@@ -68,8 +70,11 @@
         return columns;
     })();
 
-    let gridRows = $state(baseRows);
-    let gridColumns = $state(baseColumns);
+    let rowCount = $state(1000);
+    let columnCount = $state(26);
+
+    let gridRows: SheetRow[] = $state([]);
+    let gridColumns: IColumnConfig[] = $state(baseColumns);
     let gridApi: IApi | undefined = $state();
 
     // --- selection state ---
@@ -341,33 +346,6 @@
         });
     }
 
-    function emitSpreadsheetViewportChanged(fullRefresh = false) {
-        const firstVisibleCell = document.querySelector<HTMLElement>(
-            ".wx-cell[data-row-id][data-col-id]:not([data-col-id='rowNumber'])",
-        );
-
-        if (!firstVisibleCell) {
-            console.error(
-                "No visible cell found when fetching spreadsheet window",
-            );
-            return;
-        }
-
-        const windowStart = domToCellId(
-            firstVisibleCell.dataset.rowId!,
-            firstVisibleCell.dataset.colId!,
-        );
-
-        emit("spreadsheet-viewport-changed", {
-            start: windowStart,
-            end: {
-                row: windowStart.row + gridRows.length - 1,
-                col: windowStart.col + gridColumns.length - 2,
-            },
-            fullRefresh,
-        });
-    }
-
     // set editor input to entered value of the focused cell
     $effect(() => {
         const cell = getCell(focusedCell)!;
@@ -386,8 +364,8 @@
             row >= 0 &&
             row < gridRows.length &&
             col >= 0 &&
-            col < gridColumns.length - 1 // -1 for rowNumber column
-        );
+            col < gridColumns.length - 1
+        ); // -1 for rowNumber column;
     }
 
     function clearFocus() {
@@ -826,37 +804,39 @@
 
     let overlayBaseScrollTop = 0;
     let overlayBaseScrollLeft = 0;
-    let fetchThrottleId: ReturnType<typeof setTimeout> | null = null;
     let overlayDebounceId: ReturnType<typeof setTimeout> | null = null;
+    let overlaysEl: HTMLElement | null = null;
+    let focusOverlayEl: HTMLElement | null = null;
+    let fillOriginOverlayEl: HTMLElement | null = null;
+    let refsContainerEl: HTMLElement | null = null;
+    let gridWrapperEl: HTMLElement | null = null;
+    let scrollContainerEl: HTMLElement | null = null;
 
     // get the grid's scroll container element
     function getScrollContainer(): HTMLElement | null {
-        const wrapper = document.querySelector<HTMLElement>(".grid-wrapper");
-        if (!wrapper) return null;
-        return (
-            wrapper.querySelector<HTMLElement>("[style*='overflow']") ?? wrapper
-        );
+        if (scrollContainerEl) return scrollContainerEl;
+        gridWrapperEl ??= document.querySelector<HTMLElement>(".grid-wrapper");
+        if (!gridWrapperEl) return null;
+        scrollContainerEl =
+            gridWrapperEl.querySelector<HTMLElement>("[style*='overflow']") ??
+            gridWrapperEl;
+        return scrollContainerEl;
     }
 
     function handleScroll(ev: Event) {
         if ((ev.target as HTMLElement).closest(".formula-input")) return;
-        // // move overlays via transform (no layout reflow)
+        // move overlays via transform (no layout reflow)
         const scroller = ev.target as HTMLElement;
         const dx = overlayBaseScrollLeft - scroller.scrollLeft;
         const dy = overlayBaseScrollTop - scroller.scrollTop;
-        const container = document.querySelector<HTMLElement>(
+        overlaysEl ??= document.querySelector<HTMLElement>(
             ".selection-overlays",
         );
-        if (container) {
-            container.style.transform = `translate(${dx}px, ${dy}px)`;
+        if (overlaysEl) {
+            overlaysEl.style.transform = `translate(${dx}px, ${dy}px)`;
         }
-        if (fetchThrottleId) clearTimeout(fetchThrottleId);
-        fetchThrottleId = setTimeout(() => {
-            emitSpreadsheetViewportChanged();
-            fetchThrottleId = null;
-        }, 100);
         // apply header highlights after scroll
-        if (isFocusedRowVisible()) {
+        if (focusIsVisible()) {
             if (overlayDebounceId) clearTimeout(overlayDebounceId);
             overlayDebounceId = setTimeout(() => {
                 applyHeaderHighlights();
@@ -921,22 +901,47 @@
         overlay.style.color = color;
     }
 
-    /** Check if the focused cell/range rows are within the visible scroll area. */
-    function isFocusedRowVisible(): boolean {
-        const focused = focusedCell;
-        if (!focused && !focusedRangeBounds) return false;
+    /** Check if the focused cell/range is within the visible scroll area. */
+    function focusIsVisible(): boolean {
+        const b = focusedRangeBounds;
+        const f = focusedCell;
+        if (!f && !b) return false;
         const scroller = getScrollContainer();
-        const rowHeight = gridApi?.getState()?._sizes?.rowHeight ?? 37;
-        const headerHeight = gridApi?.getState()?._sizes?.headerHeight ?? 37;
-        const scrollTop = scroller?.scrollTop ?? 0;
-        const viewHeight = scroller?.clientHeight ?? 0;
-        const firstVisibleRow = Math.floor(scrollTop / rowHeight);
-        const lastVisibleRow = Math.floor(
-            (scrollTop + viewHeight - headerHeight) / rowHeight,
+        if (!scroller) return false;
+        const state = gridApi?.getState();
+        const rowH = state?._sizes?.rowHeight ?? 37;
+        const hdrH = state?._sizes?.headerHeight ?? 37;
+
+        const minR = b?.minR ?? f!.row,
+            maxR = b?.maxR ?? f!.row;
+        const minC = b?.minC ?? f!.col,
+            maxC = b?.maxC ?? f!.col;
+
+        const firstRow = Math.floor(scroller.scrollTop / rowH);
+        const lastRow = Math.floor(
+            (scroller.scrollTop + scroller.clientHeight - hdrH) / rowH,
         );
-        const minR = focusedRangeBounds?.minR ?? focused?.row ?? -1;
-        const maxR = focusedRangeBounds?.maxR ?? focused?.row ?? -1;
-        return maxR >= firstVisibleRow && minR <= lastVisibleRow;
+        if (maxR < firstRow || minR > lastRow) return false;
+
+        // sum actual column widths to find pixel bounds of focused columns
+        const cols = state?._columns ?? [];
+        let x = 0,
+            minColLeft = 0,
+            maxColRight = 0;
+        for (let i = 0; i < cols.length; i++) {
+            const w = cols[i].width ?? 100;
+            const ci = i - 1; // data col index (cols[0] is rowNumber)
+            if (ci === minC) minColLeft = x;
+            if (ci === maxC) {
+                maxColRight = x + w;
+                break;
+            }
+            x += w;
+        }
+        return (
+            maxColRight > scroller.scrollLeft &&
+            minColLeft < scroller.scrollLeft + scroller.clientWidth
+        );
     }
 
     function applyHeaderHighlights() {
@@ -944,13 +949,13 @@
         const wrapper = document.querySelector(".grid-wrapper");
         if (!wrapper) return;
         const focused = focusedCell;
-        const rowsOnScreen = isFocusedRowVisible();
+        const focusVisible = focusIsVisible();
 
         for (const col of wrapper.querySelectorAll<HTMLElement>(
             "[data-header-id]",
         )) {
             const colIdx = columnLetterToIndex(col.dataset.headerId!);
-            if (!rowsOnScreen) {
+            if (!focusVisible) {
                 col.classList.remove("highlight-col");
             } else if (focusedRangeBounds) {
                 col.classList.toggle(
@@ -965,7 +970,7 @@
             }
         }
 
-        if (!rowsOnScreen) return;
+        if (!focusVisible) return;
 
         for (const cell of wrapper.querySelectorAll<HTMLElement>(
             '.wx-cell[data-col-id="rowNumber"]',
@@ -996,11 +1001,11 @@
         const scroller = getScrollContainer();
         overlayBaseScrollTop = scroller?.scrollTop ?? 0;
         overlayBaseScrollLeft = scroller?.scrollLeft ?? 0;
-        const container = document.querySelector<HTMLElement>(
+        overlaysEl ??= document.querySelector<HTMLElement>(
             ".selection-overlays",
         );
-        if (container) {
-            container.style.transform = "translate(0px, 0px)";
+        if (overlaysEl) {
+            overlaysEl.style.transform = "translate(0px, 0px)";
         }
 
         // clip overlays so they don't render above headers or left of row-number column
@@ -1012,43 +1017,34 @@
         }
 
         // focus overlay
-        const focusOverlay = document.querySelector<HTMLElement>(
-            ".selection-overlay-focus",
-        );
-        if (focusOverlay) {
+        if (focusOverlayEl) {
             if (focusedRangeBounds) {
                 positionSelectionOverlay(
-                    focusOverlay,
+                    focusOverlayEl,
                     focusedRangeBounds,
                     "var(--wx-color-primary)",
                 );
             } else {
-                focusOverlay.style.display = "none";
+                focusOverlayEl.style.display = "none";
             }
         }
 
         // fill origin overlay (shows original selection during fill)
-        const fillOriginOverlay = document.querySelector<HTMLElement>(
-            ".selection-overlay-fill-origin",
-        );
-        if (fillOriginOverlay) {
+        if (fillOriginOverlayEl) {
             if (isFilling && fillOriginalBounds) {
                 positionSelectionOverlay(
-                    fillOriginOverlay,
+                    fillOriginOverlayEl,
                     fillOriginalBounds,
                     "var(--wx-color-primary)",
                 );
             } else {
-                fillOriginOverlay.style.display = "none";
+                fillOriginOverlayEl.style.display = "none";
             }
         }
 
         // formula reference overlays
-        const refsContainer = document.querySelector<HTMLElement>(
-            ".selection-overlays-refs",
-        );
-        if (refsContainer) {
-            const existing = refsContainer.querySelectorAll<HTMLElement>(
+        if (refsContainerEl) {
+            const existing = refsContainerEl.querySelectorAll<HTMLElement>(
                 ".selection-overlay-ref",
             );
             const refs = parsedFormulaReferencesHighlights ?? [];
@@ -1061,7 +1057,7 @@
                 } else {
                     el = document.createElement("div");
                     el.className = "selection-overlay-ref";
-                    refsContainer.appendChild(el);
+                    refsContainerEl?.appendChild(el);
                 }
                 el.className =
                     "selection-overlay-ref" +
@@ -1080,7 +1076,7 @@
         }
     }
 
-    // reposition overlays when selection or formula bounds change (not on caret move)
+    // when selection or formula bounds change, reposition overlays and apply header highlight
     $effect(() => {
         focusedRangeBounds;
         focusedCell;
@@ -1098,33 +1094,40 @@
         refs.forEach((el, i) => el.classList.toggle("active", i === idx));
     });
 
-    onMount(() => {
-        let unlisten: (() => void) | undefined;
+    const displayCellChannel = new Channel<DisplayCellEvent>();
+    displayCellChannel.onmessage = (message) => {
+        console.log(`display-cells event received`, message);
+        const { cellId, display, enteredText } = message;
+        const cell = getCell(cellId);
+        if (!cell) return;
+        cell.computedValue = display;
+        cell.enteredText = enteredText;
+        // todo: handle isError for styling
+    };
 
-        listen<DisplayCellEvent[]>("display-cells", (event) => {
-            endTimer("display-cells");
-            for (const { cellId, display, enteredText } of event.payload) {
-                const cell = getCell(cellId);
-                if (!cell) continue;
-                cell.computedValue = display;
-                cell.enteredText = enteredText;
-                // todo: handle isError for styling
-            }
-        }).then((fn) => {
-            unlisten = fn;
-            emitSpreadsheetViewportChanged(true);
+    invoke("register_cell_channel", { channel: displayCellChannel }).catch(
+        console.error,
+    );
+
+    function handleRequestData(
+        ev: { row: { start: number; end: number } } & { [key: string]: any },
+    ): void {
+        const {
+            row: { start, end },
+        } = ev;
+        gridRows = baseRows.slice(start, end + 1);
+        emit("spreadsheet-viewport-changed", {
+            rowStart: start,
+            rowEnd: end,
         });
-
-        return () => {
-            unlisten?.();
-        };
-    });
+    }
 </script>
 
 <SheetTopPanel />
 
 <div
     class="grid-wrapper"
+    bind:this={gridWrapperEl}
     onmousemove={handleMouseMove}
     onmouseup={handleMouseUp}
     onmousedown={handleMouseDown}
@@ -1134,50 +1137,56 @@
     tabindex="-1"
     role="grid"
 >
-    <div class="grid-absolute-fill">
-        <Grid
-            bind:this={gridApi as any}
-            {init}
-            data={gridRows}
-            columns={gridColumns}
-            split={{ left }}
-            {select}
-            undo
-        />
-    </div>
+    <Grid
+        bind:this={gridApi as any}
+        {init}
+        data={gridRows}
+        columns={gridColumns}
+        dynamic={{ rowCount, columnCount }}
+        onrequestdata={handleRequestData}
+        split={{ left }}
+        {select}
+        undo
+    />
     <div class="selection-overlays-clip">
-        <div class="selection-overlays">
+        <div class="selection-overlays" bind:this={overlaysEl}>
             <div
                 class="selection-overlay-fill-origin"
+                bind:this={fillOriginOverlayEl}
                 style="display:none"
             ></div>
             <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div class="selection-overlay-focus" style="display:none">
+            <div
+                class="selection-overlay-focus"
+                bind:this={focusOverlayEl}
+                style="display:none"
+            >
                 <div
                     class="fill-handle"
                     class:filling={isFilling}
                     onmousedown={handleFillStart}
                 ></div>
             </div>
-            <div class="selection-overlays-refs"></div>
+            <div
+                class="selection-overlays-refs"
+                bind:this={refsContainerEl}
+            ></div>
         </div>
     </div>
 </div>
 
 <style>
     .grid-wrapper {
-        content-visibility: auto;
-        flex: 1;
-        position: relative;
+        flex: 1 1 auto;
         min-height: 0;
+        min-width: 0;
+        position: relative;
+        overflow: hidden;
     }
 
-    .grid-absolute-fill {
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
+    .grid-wrapper > :global(.wx-grid) {
+        width: 100%;
+        height: 100%;
     }
 
     /* Static clip wrapper — prevents overlays from rendering over headers/row numbers */
@@ -1207,18 +1216,22 @@
     }
 
     /* Sketchy selection overlay (focus range) */
-    .selection-overlay-focus {
+    .selection-overlay-focus,
+    :global(.selection-overlay-ref) {
         position: absolute;
         border-style: solid;
-        border-color: var(--wx-color-primary);
         border-width: 3px 1px 1.5px 2.5px;
         border-radius: 3px 5px 4px 4px / 2px 3px 5px 3px;
         will-change: left, top, width, height;
-        transition:
+        --selection-overlay-transition-base:
             left 30ms cubic-bezier(0, 0, 0.2, 1),
             top 30ms cubic-bezier(0, 0, 0.2, 1),
             width 30ms cubic-bezier(0, 0, 0.2, 1),
             height 30ms cubic-bezier(0, 0, 0.2, 1);
+        transition: var(--selection-overlay-transition-base);
+    }
+    .selection-overlay-focus {
+        border-color: var(--wx-color-primary);
     }
     .selection-overlay-focus::before {
         content: "";
@@ -1264,23 +1277,12 @@
     /* Sketchy selection overlay (formula references) */
     .selection-overlays-refs {
         position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
+        inset: 0;
     }
     :global(.selection-overlay-ref) {
-        position: absolute;
-        border-style: solid;
         border-color: currentColor;
-        border-width: 3px 1px 1.5px 2.5px;
-        border-radius: 3px 5px 4px 4px / 2px 3px 5px 3px;
-        will-change: left, top, width, height;
         transition:
-            left 30ms cubic-bezier(0, 0, 0.2, 1),
-            top 30ms cubic-bezier(0, 0, 0.2, 1),
-            width 30ms cubic-bezier(0, 0, 0.2, 1),
-            height 30ms cubic-bezier(0, 0, 0.2, 1),
+            var(--selection-overlay-transition-base),
             color 30ms cubic-bezier(0, 0, 0.2, 1);
     }
     :global(.selection-overlay-ref)::before {

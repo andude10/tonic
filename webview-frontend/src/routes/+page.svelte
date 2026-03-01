@@ -58,6 +58,7 @@
         flex-direction: column;
         height: 100vh;
         width: 100vw;
+        min-height: 0;
     }
 
     .layout-container {
@@ -65,6 +66,7 @@
         flex-direction: column;
         height: 100%;
         width: 100%;
+        min-height: 0;
         overflow: hidden;
         position: relative;
 
@@ -103,7 +105,7 @@
         /* Buttons */
         --wx-button-background: #363839;
         --wx-button-pressed: #2e3032;
-        --wx-button-primary-pressed: #5a4280;
+        --wx-button-primary-pressed: #4a3566;
 
         /* Input */
         --wx-input-background: var(--wx-background);
