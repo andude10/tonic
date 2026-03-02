@@ -18,17 +18,16 @@
     import { endTimer, startTimer } from "$lib/stats.svelte";
     import {
         createState,
-        createObject,
-        destroyObject,
         syncScroll,
         reposition,
-        applyRect,
         cellsInBounds,
         cellsOutside,
-        type CellBounds,
-        type SheetObject,
+        type CellRange,
         type SheetObjectsState,
-    } from "./overlays";
+    } from "./overlays/Overlays.svelte";
+    import FocusOverlay from "./overlays/FocusOverlay.svelte";
+    import FillOriginOverlay from "./overlays/FillOriginOverlay.svelte";
+    import RefOverlay from "./overlays/RefOverlay.svelte";
 
     // -- backend (tauri) communication setup --
 
@@ -98,7 +97,7 @@
     let isSelecting = $state(false); // is true during mouse drag or while shift is held
     let shiftClickedOnce = $state(false); // true after first shift-click (waiting for second to complete range)
     let isFilling = $state(false);
-    let fillOriginalBounds: CellBounds | null = null;
+    let fillOriginalBounds: CellRange | null = $state(null);
     let isEditing = $state(false);
     let editorInput = $state("");
     let caretPosition = $state(0);
@@ -425,6 +424,10 @@
                 return false;
             }
         });
+
+        api.on("resize-column", () => {
+            requestAnimationFrame(() => repositionOverlays());
+        });
     }
 
     function handleMouseMove(ev: MouseEvent) {
@@ -559,8 +562,8 @@
      *  axis="col" fills horizontally, axis="row" fills vertically.
      *  dir=1 fills forward (right/down), dir=-1 fills backward (left/up). */
     function generateFillEdge(
-        orig: CellBounds,
-        bounds: CellBounds,
+        orig: CellRange,
+        bounds: CellRange,
         axis: "row" | "col",
         dir: 1 | -1,
     ) {
@@ -844,10 +847,10 @@
 
     // --- scroll handling & selection overlays ---
 
-    let sos: SheetObjectsState;
-    let focusObj: SheetObject;
-    let fillOriginObj: SheetObject;
-    let refObjs: SheetObject[] = [];
+    let sos: SheetObjectsState = $state(undefined as any);
+    let focusOverlay = $state<FocusOverlay>(undefined as any);
+    let fillOriginOverlay = $state<FillOriginOverlay>(undefined as any);
+    let refOverlays: RefOverlay[] = $state([]);
     let overlayDebounceId: ReturnType<typeof setTimeout> | null = null;
     let gridWrapperEl: HTMLElement | null = null;
     let clipWrapperEl: HTMLElement | null = null;
@@ -866,13 +869,8 @@
     }
 
     function initOverlays() {
-        sos = createState(clipWrapperEl!, overlaysEl!);
-        fillOriginObj = createObject(sos, "selection-overlay-fill-origin");
-        focusObj = createObject(sos, "selection-overlay-focus");
-        const fillHandle = document.createElement("div");
-        fillHandle.className = "fill-handle";
-        fillHandle.onmousedown = handleFillStart;
-        focusObj.el.appendChild(fillHandle);
+        sos = createState(clipWrapperEl!, overlaysEl!, gridApi!);
+        repositionOverlays();
     }
 
     function handleScroll(ev: Event) {
@@ -884,6 +882,7 @@
             applyHeaderHighlights();
             overlayDebounceId = null;
         }, 10);
+        if (document.activeElement !== gridWrapperEl) gridWrapperEl?.focus();
     }
 
     function applyHeaderHighlights() {
@@ -927,36 +926,13 @@
         }
     }
 
-    function positionOverlays() {
+    function repositionOverlays() {
         if (!gridApi || !sos) return;
         const scroller = getScrollContainer();
-        reposition(
-            sos,
-            gridApi.getState(),
-            scroller?.scrollLeft ?? 0,
-            scroller?.scrollTop ?? 0,
-        );
-
-        focusObj.visible = !!focusedRangeBounds;
-        if (focusedRangeBounds) focusObj.bounds = focusedRangeBounds;
-        applyRect(sos, focusObj);
-
-        fillOriginObj.visible = isFilling && !!fillOriginalBounds;
-        if (fillOriginalBounds) fillOriginObj.bounds = fillOriginalBounds;
-        applyRect(sos, fillOriginObj);
-
-        // sync ref SheetObjects with formula reference highlights
-        const refs = parsedFormulaReferencesHighlights ?? [];
-        while (refObjs.length < refs.length)
-            refObjs.push(createObject(sos, "selection-overlay-ref"));
-        while (refObjs.length > refs.length) destroyObject(refObjs.pop()!);
-        for (let i = 0; i < refs.length; i++) {
-            refObjs[i].bounds = refs[i].bounds;
-            refObjs[i].visible = true;
-            refObjs[i].el.style.color = REF_COLORS[refs[i].colorIndex];
-            refObjs[i].el.classList.toggle("active", i === activeRefIndex);
-            applyRect(sos, refObjs[i]);
-        }
+        reposition(sos, scroller?.scrollLeft ?? 0, scroller?.scrollTop ?? 0);
+        focusOverlay?.reposition();
+        fillOriginOverlay?.reposition();
+        for (const ref of refOverlays) ref?.reposition();
     }
 
     // when selection or formula bounds change, reposition overlays and apply header highlight
@@ -965,14 +941,7 @@
         focusedCell;
         parsedFormulaReferencesHighlights;
         applyHeaderHighlights();
-        positionOverlays();
-    });
-
-    $effect(() => {
-        const idx = activeRefIndex;
-        for (let i = 0; i < refObjs.length; i++) {
-            refObjs[i].el.classList.toggle("active", i === idx);
-        }
+        repositionOverlays();
     });
 
     onMount(() => {
@@ -1003,9 +972,10 @@
             row: { start, end },
         } = ev;
         gridRows = baseRows.slice(start, end + 1);
+        const buffer = Math.ceil((end - start) / 2);
         emit("spreadsheet-viewport-changed", {
-            rowStart: start,
-            rowEnd: end,
+            rowStart: Math.max(0, start - buffer),
+            rowEnd: end + buffer,
         });
     }
 </script>
@@ -1036,7 +1006,33 @@
         undo
     />
     <div class="selection-overlays-clip" bind:this={clipWrapperEl}>
-        <div class="selection-overlays" bind:this={overlaysEl}></div>
+        <div class="selection-overlays" bind:this={overlaysEl}>
+            {#if sos}
+                <FillOriginOverlay
+                    bind:this={fillOriginOverlay}
+                    {sos}
+                    bounds={fillOriginalBounds}
+                    visible={isFilling && !!fillOriginalBounds}
+                />
+                <FocusOverlay
+                    bind:this={focusOverlay}
+                    {sos}
+                    bounds={focusedRangeBounds}
+                    visible={!!focusedRangeBounds}
+                    {isFilling}
+                    onfillstart={handleFillStart}
+                />
+                {#each parsedFormulaReferencesHighlights ?? [] as ref, i}
+                    <RefOverlay
+                        bind:this={refOverlays[i]}
+                        {sos}
+                        bounds={ref.bounds}
+                        color={REF_COLORS[ref.colorIndex]}
+                        active={i === activeRefIndex}
+                    />
+                {/each}
+            {/if}
+        </div>
     </div>
 </div>
 
@@ -1049,6 +1045,7 @@
         border-top: var(--wx-border, 1px solid #384047);
         position: relative;
         overflow: hidden;
+        outline: none;
     }
 
     .grid-wrapper > :global(.wx-grid) {
