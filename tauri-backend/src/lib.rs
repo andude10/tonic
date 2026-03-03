@@ -1,9 +1,8 @@
 use std::{error::Error, sync::Mutex, time::Instant};
 
-use ::serde::{Deserialize, Serialize};
 use fastnum::D256;
-use tauri::{AppHandle, Emitter, Listener, Manager};
-use tauri_plugin_log::log::{debug, error};
+use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_log::log::debug;
 
 use crate::{
     engine::eval_formula,
@@ -19,79 +18,107 @@ mod file_api;
 mod parser;
 mod sheet;
 
-#[derive(Deserialize, Debug, Copy, Clone)]
-#[serde(rename_all = "camelCase")]
-struct SpreadsheetViewport {
-    row_start: u32,
-    row_end: u32,
-}
-
 struct TonicState {
     spreadsheet: Spreadsheet,
-    spreadsheet_viewport: SpreadsheetViewport,
+    last_viewport_buf: Vec<u8>,
 }
 
 impl TonicState {
     fn new() -> Self {
         Self {
             spreadsheet: Spreadsheet::new(),
-            spreadsheet_viewport: SpreadsheetViewport {
-                row_start: 0,
-                row_end: 0,
-            },
+            last_viewport_buf: Vec::new(),
         }
     }
 }
 
-// todo: rename "RenderCellEvent", "render-window-changed", etc.
-// "RenderWindow" means part of the spreadsheet which is displayed by frontend
-// "SpreadsheetViewport" might be a better name
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DisplayCellEvent {
-    cell_id: CellId,
-    display: String,
-    entered_text: String,
-    is_error: bool,
+/// Emit a backend timing measurement to the frontend dev panel.
+fn emit_timing(app: &AppHandle, name: &str, start: Instant) {
+    let _ = app.emit(
+        "backend-timing",
+        (name, start.elapsed().as_secs_f64() * 1000.0),
+    );
 }
 
-/// Build display data for a single cell, but only if the cell is within
-/// the current render window. Expects state to be already locked.
-fn build_display_cell(state: &TonicState, cell_id: CellId) -> Option<DisplayCellEvent> {
-    let vp = &state.spreadsheet_viewport;
-    if cell_id.row < vp.row_start || cell_id.row > vp.row_end {
-        return None;
-    }
-
-    let (display, is_error) = match state.spreadsheet.sheets[0].get(&cell_id) {
+/// Encode a single cell into the binary buffer.
+/// Format: [row: u32 LE][col: u32 LE][is_error: u8][display_len: u32 LE][display][entered_len: u32 LE][entered]
+fn encode_cell(buf: &mut Vec<u8>, spreadsheet: &Spreadsheet, cell_id: CellId) {
+    let (display, is_error) = match spreadsheet.sheets[0].get(&cell_id) {
         Some(Cell::SingleValue(v)) => (v.to_string(), false),
         Some(Cell::Formula { value, .. }) => (value.to_string(), false),
         Some(Cell::FormulaError { error }) => (error.clone(), true),
         None => (String::new(), false),
     };
-    let entered_text = state
-        .spreadsheet
+    let entered_text = spreadsheet
         .user_input_raw_text
         .get(&cell_id)
-        .cloned()
-        .unwrap_or_default();
+        .map(|s| s.as_bytes())
+        .unwrap_or(b"");
 
-    Some(DisplayCellEvent {
-        cell_id,
-        display,
-        entered_text,
-        is_error,
-    })
+    let display_bytes = display.as_bytes();
+
+    buf.extend_from_slice(&cell_id.row.to_le_bytes());
+    buf.extend_from_slice(&cell_id.col.to_le_bytes());
+    buf.push(is_error as u8);
+    buf.extend_from_slice(&(display_bytes.len() as u32).to_le_bytes());
+    buf.extend_from_slice(display_bytes);
+    buf.extend_from_slice(&(entered_text.len() as u32).to_le_bytes());
+    buf.extend_from_slice(entered_text);
 }
 
-/// Emit a batch of display-cell updates in a single IPC event.
-fn emit_display_cells(app: &AppHandle, cells: Vec<DisplayCellEvent>) {
-    if cells.is_empty() {
-        return;
+#[tauri::command]
+fn get_cells_in_viewport(
+    app: AppHandle,
+    state: tauri::State<'_, Mutex<TonicState>>,
+    request: tauri::ipc::Request<'_>,
+) -> tauri::ipc::Response {
+    let get_cells_in_viewport_time = Instant::now();
+
+    let headers = request.headers();
+    let Some(row_start) = headers
+        .get("row-start")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u32>().ok())
+    else {
+        return tauri::ipc::Response::new(Vec::new());
+    };
+    let Some(row_end) = headers
+        .get("row-end")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u32>().ok())
+    else {
+        return tauri::ipc::Response::new(Vec::new());
+    };
+
+    let mut state = state.lock().unwrap();
+    let sheet = &state.spreadsheet.sheets[0];
+
+    let mut buf = Vec::new();
+    let lo = CellId {
+        col: 0,
+        row: row_start,
+    };
+    let hi = CellId {
+        col: u32::MAX,
+        row: row_end,
+    };
+    for (&cell_id, _) in sheet.range(lo..=hi) {
+        if cell_id.row < row_start || cell_id.row > row_end {
+            continue;
+        }
+        encode_cell(&mut buf, &state.spreadsheet, cell_id);
     }
-    app.emit("display-cells", cells)
-        .expect("to be able to emit display-cells");
+    emit_timing(
+        &app,
+        "rs_get_cells_in_viewport_time",
+        get_cells_in_viewport_time,
+    );
+
+    if buf == state.last_viewport_buf {
+        return tauri::ipc::Response::new(Vec::new());
+    }
+    state.last_viewport_buf = buf.clone();
+    tauri::ipc::Response::new(buf)
 }
 
 #[tauri::command]
@@ -130,10 +157,7 @@ fn enter_input(app: AppHandle, cell_id: CellId, user_input: &str) {
                 cell_id
             );
         }
-        emit_display_cells(
-            &app,
-            build_display_cell(&state, cell_id).into_iter().collect(),
-        );
+        emit_timing(&app, "rs_insert_time", insert_time);
         return;
     }
 
@@ -142,16 +166,13 @@ fn enter_input(app: AppHandle, cell_id: CellId, user_input: &str) {
 
     let lex_time = Instant::now();
     let lex_output = lex_formula(formula_text);
+    emit_timing(&app, "rs_lex_time", lex_time);
     debug!("Lexer elapsed: {:?}", lex_time.elapsed());
 
     // report any errors happened during lexing
     if lex_output.has_errors() {
         let msg = lexer_errors_to_string(lex_output.errors());
         state.spreadsheet.sheets[0].insert(cell_id, Cell::FormulaError { error: msg });
-        emit_display_cells(
-            &app,
-            build_display_cell(&state, cell_id).into_iter().collect(),
-        );
         return;
     }
 
@@ -162,16 +183,13 @@ fn enter_input(app: AppHandle, cell_id: CellId, user_input: &str) {
 
     let parse_time = Instant::now();
     let (parsed, parse_errs) = parse_formula(tokens, formula_text.len(), &mut state.spreadsheet);
+    emit_timing(&app, "rs_parse_time", parse_time);
     debug!("Parser elapsed: {:?}", parse_time.elapsed());
 
     // report any errors happened during parsing formula (syntax, not found name)
     if !parse_errs.is_empty() {
         let msg = parse_formula_errors_to_string(&parse_errs);
         state.spreadsheet.sheets[0].insert(cell_id, Cell::FormulaError { error: msg });
-        emit_display_cells(
-            &app,
-            build_display_cell(&state, cell_id).into_iter().collect(),
-        );
         return;
     }
 
@@ -189,18 +207,13 @@ fn enter_input(app: AppHandle, cell_id: CellId, user_input: &str) {
                 state.spreadsheet.sheets[0].insert(cell_id, Cell::FormulaError { error: msg });
             }
         }
+        emit_timing(&app, "rs_eval_time", eval_time);
         debug!("Eval elapsed: {:?}", eval_time.elapsed());
-
-        emit_display_cells(
-            &app,
-            build_display_cell(&state, cell_id).into_iter().collect(),
-        );
     }
 }
 
 #[tauri::command]
-fn delete_cells(app: AppHandle, cells: Vec<CellId>) {
-    let state = app.state::<Mutex<TonicState>>();
+fn delete_cells(state: tauri::State<'_, Mutex<TonicState>>, cells: Vec<CellId>) {
     let mut state = state
         .lock()
         .expect("to able to lock spreadsheet in delete_cells");
@@ -213,16 +226,11 @@ fn delete_cells(app: AppHandle, cells: Vec<CellId>) {
         state.spreadsheet.sheets[0]
             .insert(*cell_id, Cell::SingleValue(CellValue::Text(String::new())));
     }
-    let updates: Vec<_> = cells
-        .iter()
-        .filter_map(|&id| build_display_cell(&state, id))
-        .collect();
-    emit_display_cells(&app, updates);
 }
 
 #[tauri::command]
 fn fill_cells(
-    app: AppHandle,
+    state: tauri::State<'_, Mutex<TonicState>>,
     sources: Vec<CellId>,
     dests: Vec<CellId>,
     before_sources: Option<Vec<Option<CellId>>>,
@@ -236,12 +244,9 @@ fn fill_cells(
         }
     }
 
-    let state = app.state::<Mutex<TonicState>>();
     let mut state = state
         .lock()
         .expect("to able to lock spreadsheet in fill_cells");
-
-    let mut updated_cells = Vec::with_capacity(dests.len());
 
     for i in 0..dests.len() {
         let source = sources[i];
@@ -270,7 +275,6 @@ fn fill_cells(
                     .insert(dest, display.clone());
                 state.spreadsheet.sheets[0]
                     .insert(dest, Cell::SingleValue(CellValue::Number(dest_val)));
-                updated_cells.push(dest);
                 continue;
             }
         }
@@ -335,7 +339,6 @@ fn fill_cells(
                         state.spreadsheet.sheets[0].insert(dest, Cell::FormulaError { error: msg });
                     }
                 }
-                updated_cells.push(dest);
             }
             Some(Cell::SingleValue(value)) => {
                 let value = value.clone();
@@ -347,49 +350,14 @@ fn fill_cells(
                     .unwrap_or_default();
                 state.spreadsheet.user_input_raw_text.insert(dest, raw);
                 state.spreadsheet.sheets[0].insert(dest, Cell::SingleValue(value));
-                updated_cells.push(dest);
             }
             Some(Cell::FormulaError { .. }) | None => {}
         }
     }
-
-    let updates: Vec<_> = updated_cells
-        .iter()
-        .filter_map(|&id| build_display_cell(&state, id))
-        .collect();
-    emit_display_cells(&app, updates);
 }
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn Error + 'static>> {
     app.manage(Mutex::new(TonicState::new()));
-
-    let handle = app.handle().clone();
-    app.listen("spreadsheet-viewport-changed", move |event| {
-        let Ok(viewport) = serde_json::from_str::<SpreadsheetViewport>(event.payload()) else {
-            return;
-        };
-
-        let state = handle.state::<Mutex<TonicState>>();
-        let mut state = state.lock().unwrap();
-
-        state.spreadsheet_viewport = viewport;
-
-        let sheet = &state.spreadsheet.sheets[0];
-        let lo = CellId {
-            col: 0,
-            row: viewport.row_start,
-        };
-        let hi = CellId {
-            col: u32::MAX,
-            row: viewport.row_end,
-        };
-        let updates: Vec<_> = sheet
-            .range(lo..=hi)
-            .filter_map(|(&cell_id, _)| build_display_cell(&state, cell_id))
-            .collect();
-        emit_display_cells(&handle, updates);
-    });
-
     Ok(())
 }
 
@@ -407,7 +375,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             enter_input,
             fill_cells,
-            delete_cells
+            delete_cells,
+            get_cells_in_viewport
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

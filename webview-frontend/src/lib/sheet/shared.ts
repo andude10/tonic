@@ -35,6 +35,7 @@ export function columnLetterToIndex(id: string): number {
 
 /** 0 → "A", 1 → "B", 25 → "Z", 26 → "AA" */
 export function columnIndexToLetter(index: number): string {
+    if (index < 26) return String.fromCharCode(65 + index);
     let s = "";
     let n = index + 1;
     while (n > 0) {

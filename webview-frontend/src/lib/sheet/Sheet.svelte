@@ -11,7 +11,6 @@
         type UICell,
     } from "$lib/sheet/shared";
     import { invoke } from "@tauri-apps/api/core";
-    import { emit, listen } from "@tauri-apps/api/event";
     import SheetTopPanel from "./SheetTopPanel.svelte";
     import Cell from "./Cell.svelte";
     import { onMount, untrack } from "svelte";
@@ -31,12 +30,52 @@
 
     // -- backend (tauri) communication setup --
 
-    type DisplayCellEvent = {
-        cellId: CellId;
-        display: string;
-        enteredText: string;
-        isError: boolean;
-    };
+    let viewportStart = 0;
+    let viewportEnd = 0;
+
+    const textDecoder = new TextDecoder();
+    const EMPTY_BODY = new Uint8Array();
+
+    function decodeCells(bytes: Uint8Array, view: DataView) {
+        let offset = 0;
+        const len = bytes.byteLength;
+        while (offset < len) {
+            const row = view.getUint32(offset, true);
+            const col = view.getUint32(offset + 4, true);
+            // const isError = bytes[offset + 8];
+            offset += 9;
+
+            const displayLen = view.getUint32(offset, true);
+            offset += 4;
+            const displayStart = offset;
+            offset += displayLen;
+
+            const enteredLen = view.getUint32(offset, true);
+            offset += 4;
+            const enteredStart = offset;
+            offset += enteredLen;
+
+            const gridRow = gridApi?.getRow(row + 1);
+            if (!gridRow) continue;
+            const cell = gridRow[columnIndexToLetter(col)];
+            if (!cell || typeof cell !== "object") continue;
+
+            const display = displayLen
+                ? textDecoder.decode(
+                      bytes.subarray(displayStart, displayStart + displayLen),
+                  )
+                : "";
+            const enteredText = enteredLen
+                ? textDecoder.decode(
+                      bytes.subarray(enteredStart, enteredStart + enteredLen),
+                  )
+                : "";
+
+            if (cell.computedValue !== display) cell.computedValue = display;
+            if (cell.enteredText !== enteredText)
+                cell.enteredText = enteredText;
+        }
+    }
 
     // todo: it's gonna be non trivial refactor when introducing named cells
 
@@ -316,7 +355,6 @@
         if (!cell) return;
         if (editorInput == cell.enteredText) return;
         cell.enteredText = editorInput;
-        startTimer("display-cell");
         invoke("enter_input", {
             cellId: focusedCell,
             userInput: cell.enteredText,
@@ -337,7 +375,6 @@
                 editorInput = "";
             }
         }
-        startTimer("display-cell");
         invoke("delete_cells", { cells: cellIds });
     }
 
@@ -347,7 +384,6 @@
         beforeSources?: (CellId | undefined)[],
     ) {
         if (!sources.length || sources.length !== dests.length) return;
-        startTimer("display-cell");
         invoke("fill_cells", {
             sources,
             dests,
@@ -947,21 +983,37 @@
     onMount(() => {
         initOverlays();
 
-        const unlistenPromise = listen<DisplayCellEvent[]>(
-            "display-cells",
-            (event) => {
-                for (const { cellId, display, enteredText } of event.payload) {
-                    const cell = getCell(cellId);
-                    if (!cell) continue;
-                    cell.computedValue = display;
-                    cell.enteredText = enteredText;
-                    // todo: handle isError for styling
+        let lastRowStart = -1;
+        let lastRowEnd = -1;
+        let cachedHeaders: Record<string, string> = {
+            "row-start": "0",
+            "row-end": "0",
+        };
+        const pollInterval = setInterval(() => {
+            // only rebuild headers object when viewport changes
+            if (viewportStart !== lastRowStart || viewportEnd !== lastRowEnd) {
+                lastRowStart = viewportStart;
+                lastRowEnd = viewportEnd;
+                cachedHeaders = {
+                    "row-start": String(viewportStart),
+                    "row-end": String(viewportEnd),
+                };
+            }
+            startTimer("poll_cells", true);
+            invoke<ArrayBuffer>("get_cells_in_viewport", EMPTY_BODY, {
+                headers: cachedHeaders,
+            }).then((buf) => {
+                // buf length is 0 when the cells in the current viewport did not change,
+                // in which case we do nothing
+                if (buf.byteLength > 0) {
+                    decodeCells(new Uint8Array(buf), new DataView(buf));
                 }
-            },
-        );
+                endTimer("poll_cells");
+            });
+        }, 20);
 
         return () => {
-            unlistenPromise.then((unlisten) => unlisten()).catch(console.error);
+            clearInterval(pollInterval);
         };
     });
 
@@ -972,11 +1024,8 @@
             row: { start, end },
         } = ev;
         gridRows = baseRows.slice(start, end + 1);
-        const buffer = Math.ceil((end - start) / 2);
-        emit("spreadsheet-viewport-changed", {
-            rowStart: Math.max(0, start - buffer),
-            rowEnd: end + buffer,
-        });
+        viewportStart = start;
+        viewportEnd = end;
     }
 </script>
 

@@ -1,5 +1,11 @@
 <script lang="ts">
     import { devPanel, resetTimer } from "./stats.svelte";
+
+    function shortCount(n: number): string {
+        if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+        if (n >= 1_000) return (n / 1_000).toFixed(1) + "k";
+        return n.toString();
+    }
 </script>
 
 <div class="panel">
@@ -37,6 +43,11 @@
                 <span class="high">
                     H: {devPanel.highestTime[name]?.toFixed(2)}
                 </span>
+                {#if devPanel.counts[name] != null}
+                    <span class="count">
+                        #{shortCount(devPanel.counts[name])}
+                    </span>
+                {/if}
             </div>
         </div>
     {/each}
@@ -92,6 +103,11 @@
         font-size: 13px;
     }
     .high {
+        color: #888;
+        font-size: 0.85em;
+        align-self: center;
+    }
+    .count {
         color: #888;
         font-size: 0.85em;
         align-self: center;
