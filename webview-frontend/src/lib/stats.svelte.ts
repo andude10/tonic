@@ -1,4 +1,3 @@
-import { tick } from "svelte";
 import { listen } from "@tauri-apps/api/event";
 
 export const devPanel = $state({
@@ -6,6 +5,7 @@ export const devPanel = $state({
     stats: {} as Record<string, number>,
     highestTime: {} as Record<string, number>,
     counts: {} as Record<string, number>,
+    fps: 0,
 });
 
 export function startTimer(name: string, count?: boolean) {
@@ -36,20 +36,31 @@ export function resetTimer(name: string) {
     delete devPanel.counts[name];
 }
 
-export function timeRenders() {
-    startTimer("render");
-    tick().then(() => {
-        setTimeout(() => {
-            endTimer("render");
-            setTimeout(timeRenders, 500);
-        }, 1);
-    });
+export function trackFps() {
+    const times = new Float64Array(240);
+    let head = 0;
+    let tail = 0;
+
+    function loop() {
+        const now = performance.now();
+        // drop entries older than 1s
+        while (head !== tail && times[head] <= now - 1000) {
+            head = (head + 1) % 240;
+        }
+        times[tail] = now;
+        tail = (tail + 1) % 240;
+        devPanel.fps = tail >= head ? tail - head : 240 - head + tail;
+        requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
 }
 
-listen<[string, number]>("backend-timing", (event) => {
-    const [name, ms] = event.payload;
+listen<[string, number, boolean]>("backend-timing", (event) => {
+    const [name, ms, count] = event.payload;
     devPanel.stats[name] = ms;
-    devPanel.counts[name] = (devPanel.counts[name] ?? 0) + 1;
+    if (count) {
+        devPanel.counts[name] = (devPanel.counts[name] ?? 0) + 1;
+    }
     if (!(devPanel.highestTime[name] >= ms)) {
         devPanel.highestTime[name] = ms;
     }

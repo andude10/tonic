@@ -9,9 +9,14 @@
 </script>
 
 <div class="panel">
-    {#if Object.keys(devPanel.stats).length === 0}
-        <span class="empty">No stats recorded</span>
-    {/if}
+    <div class="stat-group">
+        <div class="header">
+            <strong>fps</strong>
+        </div>
+        <div class="values">
+            <span>{devPanel.fps}</span>
+        </div>
+    </div>
 
     {#each Object.entries(devPanel.stats) as [name, time]}
         <div class="stat-group">
@@ -115,10 +120,5 @@
     small {
         font-size: 0.7em;
         opacity: 0.6;
-    }
-    .empty {
-        color: #999;
-        font-style: italic;
-        padding: 4px;
     }
 </style>

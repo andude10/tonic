@@ -5,14 +5,14 @@
     import WindowBar from "$lib/WindowBar.svelte";
     import Sheet from "$lib/sheet/Sheet.svelte";
     import DevBottomPanel from "$lib/DevBottomPanel.svelte";
-    import { timeRenders } from "$lib/stats.svelte";
+    import { trackFps } from "$lib/stats.svelte";
     import type { IApi } from "@svar-ui/svelte-grid";
     import { attachConsole } from "@tauri-apps/plugin-log";
     import { getCurrentWindow } from "@tauri-apps/api/window";
     import { onMount } from "svelte";
 
     attachConsole();
-    timeRenders();
+    trackFps();
 
     // on start-up, window flashes white screen before rendering
     // it is known webview issue: https://github.com/tauri-apps/tauri/issues/1564

@@ -21,6 +21,7 @@ mod sheet;
 struct TonicState {
     spreadsheet: Spreadsheet,
     last_viewport_buf: Vec<u8>,
+    last_viewport_range: (u32, u32),
 }
 
 impl TonicState {
@@ -28,15 +29,16 @@ impl TonicState {
         Self {
             spreadsheet: Spreadsheet::new(),
             last_viewport_buf: Vec::new(),
+            last_viewport_range: (u32::MAX, u32::MAX),
         }
     }
 }
 
 /// Emit a backend timing measurement to the frontend dev panel.
-fn emit_timing(app: &AppHandle, name: &str, start: Instant) {
+fn emit_timing(app: &AppHandle, name: &str, start: Instant, count: bool) {
     let _ = app.emit(
         "backend-timing",
-        (name, start.elapsed().as_secs_f64() * 1000.0),
+        (name, start.elapsed().as_secs_f64() * 1000.0, count),
     );
 }
 
@@ -64,6 +66,13 @@ fn encode_cell(buf: &mut Vec<u8>, spreadsheet: &Spreadsheet, cell_id: CellId) {
     buf.extend_from_slice(display_bytes);
     buf.extend_from_slice(&(entered_text.len() as u32).to_le_bytes());
     buf.extend_from_slice(entered_text);
+}
+
+#[tauri::command]
+fn init_viewport(state: tauri::State<'_, Mutex<TonicState>>) {
+    let mut state = state.lock().unwrap();
+    state.last_viewport_buf.clear();
+    state.last_viewport_range = (u32::MAX, u32::MAX);
 }
 
 #[tauri::command]
@@ -108,13 +117,14 @@ fn get_cells_in_viewport(
         }
         encode_cell(&mut buf, &state.spreadsheet, cell_id);
     }
-    emit_timing(
-        &app,
-        "rs_get_cells_in_viewport_time",
-        get_cells_in_viewport_time,
-    );
 
-    if buf == state.last_viewport_buf {
+    let range = (row_start, row_end);
+    let viewport_changed = range != state.last_viewport_range;
+    state.last_viewport_range = range;
+
+    // return nothing if viewport range didn't change and
+    // buffer that was sent previously is the same as the new buffer (no cell was updated in the current viewport)
+    if !viewport_changed && buf == state.last_viewport_buf {
         return tauri::ipc::Response::new(Vec::new());
     }
     state.last_viewport_buf = buf.clone();
@@ -157,7 +167,7 @@ fn enter_input(app: AppHandle, cell_id: CellId, user_input: &str) {
                 cell_id
             );
         }
-        emit_timing(&app, "rs_insert_time", insert_time);
+        emit_timing(&app, "rs_insert_time", insert_time, false);
         return;
     }
 
@@ -166,7 +176,6 @@ fn enter_input(app: AppHandle, cell_id: CellId, user_input: &str) {
 
     let lex_time = Instant::now();
     let lex_output = lex_formula(formula_text);
-    emit_timing(&app, "rs_lex_time", lex_time);
     debug!("Lexer elapsed: {:?}", lex_time.elapsed());
 
     // report any errors happened during lexing
@@ -183,7 +192,6 @@ fn enter_input(app: AppHandle, cell_id: CellId, user_input: &str) {
 
     let parse_time = Instant::now();
     let (parsed, parse_errs) = parse_formula(tokens, formula_text.len(), &mut state.spreadsheet);
-    emit_timing(&app, "rs_parse_time", parse_time);
     debug!("Parser elapsed: {:?}", parse_time.elapsed());
 
     // report any errors happened during parsing formula (syntax, not found name)
@@ -207,7 +215,7 @@ fn enter_input(app: AppHandle, cell_id: CellId, user_input: &str) {
                 state.spreadsheet.sheets[0].insert(cell_id, Cell::FormulaError { error: msg });
             }
         }
-        emit_timing(&app, "rs_eval_time", eval_time);
+        emit_timing(&app, "rs_eval_time", eval_time, false);
         debug!("Eval elapsed: {:?}", eval_time.elapsed());
     }
 }
@@ -219,12 +227,8 @@ fn delete_cells(state: tauri::State<'_, Mutex<TonicState>>, cells: Vec<CellId>) 
         .expect("to able to lock spreadsheet in delete_cells");
 
     for cell_id in &cells {
-        state
-            .spreadsheet
-            .user_input_raw_text
-            .insert(*cell_id, String::new());
-        state.spreadsheet.sheets[0]
-            .insert(*cell_id, Cell::SingleValue(CellValue::Text(String::new())));
+        state.spreadsheet.user_input_raw_text.remove(cell_id);
+        state.spreadsheet.sheets[0].remove(cell_id);
     }
 }
 
@@ -356,6 +360,34 @@ fn fill_cells(
     }
 }
 
+#[tauri::command]
+fn paste_values(
+    _app: AppHandle,
+    state: tauri::State<'_, Mutex<TonicState>>,
+    cells: Vec<(CellId, String)>,
+) {
+    let mut state = state.lock().expect("to able to lock state in paste_values");
+
+    for (cell_id, text) in cells {
+        if text.is_empty() {
+            state.spreadsheet.user_input_raw_text.remove(&cell_id);
+            state.spreadsheet.sheets[0].remove(&cell_id);
+            continue;
+        }
+
+        state
+            .spreadsheet
+            .user_input_raw_text
+            .insert(cell_id, text.clone());
+
+        if let Ok(n) = text.parse::<D256>() {
+            state.spreadsheet.sheets[0].insert(cell_id, Cell::SingleValue(CellValue::Number(n)));
+        } else {
+            state.spreadsheet.sheets[0].insert(cell_id, Cell::SingleValue(CellValue::Text(text)));
+        }
+    }
+}
+
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn Error + 'static>> {
     app.manage(Mutex::new(TonicState::new()));
     Ok(())
@@ -373,9 +405,11 @@ pub fn run() {
         )
         .setup(setup)
         .invoke_handler(tauri::generate_handler![
+            init_viewport,
             enter_input,
             fill_cells,
             delete_cells,
+            paste_values,
             get_cells_in_viewport
         ])
         .run(tauri::generate_context!())

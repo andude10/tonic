@@ -26,7 +26,47 @@
     } from "./overlays/Overlays.svelte";
     import FocusOverlay from "./overlays/FocusOverlay.svelte";
     import FillOriginOverlay from "./overlays/FillOriginOverlay.svelte";
+    import CloneSourceOverlay from "./overlays/CloneSourceOverlay.svelte";
     import RefOverlay from "./overlays/RefOverlay.svelte";
+    import { ContextMenu, type IMenuOptionClick } from "@svar-ui/svelte-menu";
+
+    const contextMenuOptions = [
+        { id: "copy", text: "Copy", icon: "wxi wxi-content-copy" },
+        { id: "paste", text: "Paste", icon: "wxi wxi-content-paste" },
+    ];
+
+    function handleContextMenuClick(ev: IMenuOptionClick) {
+        if (ev.option.id === "copy") copySelection();
+        else if (ev.option.id === "paste") pasteFromClipboard();
+    }
+
+    function contextMenuResolver(_: any, event: MouseEvent) {
+        // before the grid's context menu opens, ...
+
+        const el = (event.target as HTMLElement).closest<HTMLElement>(
+            ".wx-cell",
+        );
+        if (!el) return null;
+
+        // ... ignore if clicked outside of grid (row or column headers)
+        const { rowId, colId } = el.dataset;
+        if (!rowId || !colId || colId === "rowNumber") return null;
+        const clicked = domToCellId(rowId, colId);
+
+        // if right-clicked cell is outside the current selection, move focus there
+        const b = focusedRangeBounds;
+        const inRange =
+            b &&
+            clicked.row >= b.minR &&
+            clicked.row <= b.maxR &&
+            clicked.col >= b.minC &&
+            clicked.col <= b.maxC;
+        if (!inRange) {
+            focusedCell = clicked;
+            focusedRangeStart = clicked;
+        }
+        return clicked;
+    }
 
     // -- backend (tauri) communication setup --
 
@@ -137,6 +177,7 @@
     let shiftClickedOnce = $state(false); // true after first shift-click (waiting for second to complete range)
     let isFilling = $state(false);
     let fillOriginalBounds: CellRange | null = $state(null);
+    let clonedFormulaBounds: CellRange | null = $state(null);
     let isEditing = $state(false);
     let editorInput = $state("");
     let caretPosition = $state(0);
@@ -367,6 +408,7 @@
             const cell = getCell(cellId);
             if (!cell) continue;
             cell.enteredText = "";
+            cell.computedValue = "";
             if (
                 focusedCell &&
                 focusedCell.row === cellId.row &&
@@ -397,6 +439,107 @@
         if (!cell) return;
         editorInput = cell.enteredText;
     });
+
+    // --- copy / paste ---
+
+    function copySelection() {
+        // if focused range, save range as .csv to the clipboard
+        if (focusedRangeBounds) {
+            const rows: string[] = [];
+            for (
+                let r = focusedRangeBounds.minR;
+                r <= focusedRangeBounds.maxR;
+                r++
+            ) {
+                const cols: string[] = [];
+                for (
+                    let c = focusedRangeBounds.minC;
+                    c <= focusedRangeBounds.maxC;
+                    c++
+                ) {
+                    const cell = getCell({ row: r, col: c });
+                    cols.push(cell?.computedValue ?? "");
+                }
+                rows.push(cols.join(","));
+            }
+            navigator.clipboard.writeText(rows.join("\n"));
+        } else if (focusedCell) {
+            // if focused single cell, save computedValue to clipboard
+            const cell = getCell(focusedCell);
+            navigator.clipboard.writeText(cell?.computedValue ?? "");
+        }
+    }
+
+    async function pasteFromClipboard() {
+        if (!focusedCell) return;
+        const text = await navigator.clipboard.readText();
+        if (!text) return;
+
+        // parse clipboard as .csv grid
+        const clipRows = text.split("\n").map((line) => line.split(","));
+        const isSingleClipValue =
+            clipRows.length === 1 && clipRows[0].length === 1;
+        const hasRange = !!focusedRangeBounds;
+        const pairs: [CellId, string][] = [];
+
+        // single value into single focused cell
+        if (isSingleClipValue && !hasRange) {
+            pairs.push([focusedCell, clipRows[0][0]]);
+        }
+
+        // single value into focused range: fill all cells
+        if (isSingleClipValue && hasRange) {
+            const val = clipRows[0][0];
+            for (
+                let r = focusedRangeBounds!.minR;
+                r <= focusedRangeBounds!.maxR;
+                r++
+            ) {
+                for (
+                    let c = focusedRangeBounds!.minC;
+                    c <= focusedRangeBounds!.maxC;
+                    c++
+                ) {
+                    pairs.push([{ row: r, col: c }, val]);
+                }
+            }
+        }
+
+        // range into single focused cell or focused range:
+        // start from focusedCell (or top-left of range), expand right and down
+        if (!isSingleClipValue) {
+            const startRow = hasRange
+                ? focusedRangeBounds!.minR
+                : focusedCell.row;
+            const startCol = hasRange
+                ? focusedRangeBounds!.minC
+                : focusedCell.col;
+            const clipWidth = Math.max(...clipRows.map((r) => r.length));
+            for (let r = 0; r < clipRows.length; r++) {
+                for (let c = 0; c < clipRows[r].length; c++) {
+                    const destRow = startRow + r;
+                    const destCol = startCol + c;
+                    if (!isInBounds(destRow, destCol)) continue;
+                    pairs.push([
+                        { row: destRow, col: destCol },
+                        clipRows[r][c],
+                    ]);
+                }
+            }
+            // select the pasted region
+            focusedRangeStart = { row: startRow, col: startCol };
+            focusedCell = {
+                row: Math.min(
+                    startRow + clipRows.length - 1,
+                    gridRows.length - 1,
+                ),
+                col: Math.min(startCol + clipWidth - 1, gridColumns.length - 2),
+            };
+        }
+
+        if (!pairs.length) return;
+        invoke("paste_values", { cells: pairs });
+    }
 
     // --- grid config ---
 
@@ -524,6 +667,19 @@
         fillOriginalBounds = focusedRangeBounds
             ? { ...focusedRangeBounds }
             : null;
+        // Pin focusedRangeStart to top-left and focusedCell to bottom-right
+        // of the current range so that dragging extends it correctly without
+        // jumping the selection box.
+        if (focusedRangeBounds) {
+            focusedRangeStart = {
+                row: focusedRangeBounds.minR,
+                col: focusedRangeBounds.minC,
+            };
+            focusedCell = {
+                row: focusedRangeBounds.maxR,
+                col: focusedRangeBounds.maxC,
+            };
+        }
     }
 
     function handleMouseDown(ev: MouseEvent) {
@@ -734,8 +890,86 @@
             return;
         }
 
+        if (ev.ctrlKey && ev.key === "c" && !isEditing) {
+            ev.preventDefault();
+            copySelection();
+            return;
+        }
+
+        if (ev.ctrlKey && ev.key === "v" && !isEditing) {
+            ev.preventDefault();
+            // if in cloning mode, clone formula into current selection
+            if (clonedFormulaBounds) {
+                const src = clonedFormulaBounds;
+                const srcHeight = src.maxR - src.minR + 1;
+                const srcWidth = src.maxC - src.minC + 1;
+
+                let destBounds: CellRange | null = null;
+                if (focusedRangeBounds) {
+                    destBounds = { ...focusedRangeBounds };
+                } else if (focusedCell) {
+                    destBounds = {
+                        minR: focusedCell.row,
+                        maxR: focusedCell.row,
+                        minC: focusedCell.col,
+                        maxC: focusedCell.col,
+                    };
+                }
+
+                if (destBounds) {
+                    const sources: CellId[] = [];
+                    const dests: CellId[] = [];
+                    for (let r = destBounds.minR; r <= destBounds.maxR; r++) {
+                        for (
+                            let c = destBounds.minC;
+                            c <= destBounds.maxC;
+                            c++
+                        ) {
+                            const srcRow =
+                                src.minR +
+                                ((((r - destBounds.minR) % srcHeight) +
+                                    srcHeight) %
+                                    srcHeight);
+                            const srcCol =
+                                src.minC +
+                                ((((c - destBounds.minC) % srcWidth) +
+                                    srcWidth) %
+                                    srcWidth);
+                            sources.push({ row: srcRow, col: srcCol });
+                            dests.push({ row: r, col: c });
+                        }
+                    }
+                    if (sources.length) {
+                        commitCellFill(sources, dests);
+                    }
+                }
+            }
+            // otherwise, paste from clipboard
+            else {
+                pasteFromClipboard();
+            }
+            return;
+        }
+
+        // Ctrl+X: capture current selection as clone source
+        if (ev.ctrlKey && ev.key === "x" && !isEditing) {
+            ev.preventDefault();
+            if (focusedRangeBounds) {
+                clonedFormulaBounds = { ...focusedRangeBounds };
+            } else if (focusedCell) {
+                clonedFormulaBounds = {
+                    minR: focusedCell.row,
+                    maxR: focusedCell.row,
+                    minC: focusedCell.col,
+                    maxC: focusedCell.col,
+                };
+            }
+            return;
+        }
+
         if (ev.key === "Escape") {
             isEditing = false;
+            clonedFormulaBounds = null;
             clearFocus();
             focusedRangeStart = undefined;
             isSelecting = false;
@@ -886,6 +1120,7 @@
     let sos: SheetObjectsState = $state(undefined as any);
     let focusOverlay = $state<FocusOverlay>(undefined as any);
     let fillOriginOverlay = $state<FillOriginOverlay>(undefined as any);
+    let cloneSourceOverlay = $state<CloneSourceOverlay>(undefined as any);
     let refOverlays: RefOverlay[] = $state([]);
     let overlayDebounceId: ReturnType<typeof setTimeout> | null = null;
     let gridWrapperEl: HTMLElement | null = null;
@@ -968,6 +1203,7 @@
         reposition(sos, scroller?.scrollLeft ?? 0, scroller?.scrollTop ?? 0);
         focusOverlay?.reposition();
         fillOriginOverlay?.reposition();
+        cloneSourceOverlay?.reposition();
         for (const ref of refOverlays) ref?.reposition();
     }
 
@@ -975,6 +1211,7 @@
     $effect(() => {
         focusedRangeBounds;
         focusedCell;
+        clonedFormulaBounds;
         parsedFormulaReferencesHighlights;
         applyHeaderHighlights();
         repositionOverlays();
@@ -983,34 +1220,25 @@
     onMount(() => {
         initOverlays();
 
-        let lastRowStart = -1;
-        let lastRowEnd = -1;
-        let cachedHeaders: Record<string, string> = {
-            "row-start": "0",
-            "row-end": "0",
-        };
-        const pollInterval = setInterval(() => {
-            // only rebuild headers object when viewport changes
-            if (viewportStart !== lastRowStart || viewportEnd !== lastRowEnd) {
-                lastRowStart = viewportStart;
-                lastRowEnd = viewportEnd;
-                cachedHeaders = {
-                    "row-start": String(viewportStart),
-                    "row-end": String(viewportEnd),
-                };
-            }
-            startTimer("poll_cells", true);
-            invoke<ArrayBuffer>("get_cells_in_viewport", EMPTY_BODY, {
-                headers: cachedHeaders,
-            }).then((buf) => {
-                // buf length is 0 when the cells in the current viewport did not change,
-                // in which case we do nothing
-                if (buf.byteLength > 0) {
-                    decodeCells(new Uint8Array(buf), new DataView(buf));
-                }
-                endTimer("poll_cells");
-            });
-        }, 20);
+        let pollInterval: ReturnType<typeof setInterval>;
+        invoke("init_viewport").then(() => {
+            pollInterval = setInterval(() => {
+                startTimer("poll_cells");
+                invoke<ArrayBuffer>("get_cells_in_viewport", EMPTY_BODY, {
+                    headers: {
+                        "row-start": String(viewportStart),
+                        "row-end": String(viewportEnd),
+                    },
+                }).then((buf) => {
+                    // "buf" length is 0 when the cells in the current viewport did not change,
+                    // in which case we do nothing
+                    if (buf.byteLength > 0) {
+                        decodeCells(new Uint8Array(buf), new DataView(buf));
+                    }
+                    endTimer("poll_cells");
+                });
+            }, 20);
+        });
 
         return () => {
             clearInterval(pollInterval);
@@ -1043,17 +1271,24 @@
     tabindex="-1"
     role="grid"
 >
-    <Grid
-        bind:this={gridApi as any}
-        {init}
-        data={gridRows}
-        columns={gridColumns}
-        dynamic={{ rowCount, columnCount }}
-        onrequestdata={handleRequestData}
-        split={{ left }}
-        {select}
-        undo
-    />
+    <ContextMenu
+        options={contextMenuOptions}
+        onclick={handleContextMenuClick}
+        at="point"
+        resolver={contextMenuResolver}
+    >
+        <Grid
+            bind:this={gridApi as any}
+            {init}
+            data={gridRows}
+            columns={gridColumns}
+            dynamic={{ rowCount, columnCount }}
+            onrequestdata={handleRequestData}
+            split={{ left }}
+            {select}
+            undo
+        />
+    </ContextMenu>
     <div class="selection-overlays-clip" bind:this={clipWrapperEl}>
         <div class="selection-overlays" bind:this={overlaysEl}>
             {#if sos}
@@ -1062,6 +1297,12 @@
                     {sos}
                     bounds={fillOriginalBounds}
                     visible={isFilling && !!fillOriginalBounds}
+                />
+                <CloneSourceOverlay
+                    bind:this={cloneSourceOverlay}
+                    {sos}
+                    bounds={clonedFormulaBounds}
+                    visible={!!clonedFormulaBounds}
                 />
                 <FocusOverlay
                     bind:this={focusOverlay}
