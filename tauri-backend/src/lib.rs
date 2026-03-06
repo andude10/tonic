@@ -1,16 +1,18 @@
-use std::{error::Error, sync::Mutex, time::Instant};
+use std::{
+    error::Error,
+    sync::{Mutex, MutexGuard},
+};
 
 use fastnum::D256;
-use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_log::log::debug;
+use tauri::Manager;
 
 use crate::{
     engine::eval_formula,
     parser::{
-        lex_formula, lexer_errors_to_string, offset_relative_refs, parse_formula,
-        parse_formula_errors_to_string,
+        lex_formula, lexer_errors_to_string, offset_refs, parse_formula,
+        parse_formula_errors_to_string, FormulaState,
     },
-    sheet::{Cell, CellId, CellValue, Expr, ExprAtom, Spreadsheet},
+    sheet::{Cell, CellId, CellValue, Spreadsheet},
 };
 
 mod engine;
@@ -35,12 +37,12 @@ impl TonicState {
 }
 
 /// Emit a backend timing measurement to the frontend dev panel.
-fn emit_timing(app: &AppHandle, name: &str, start: Instant, count: bool) {
-    let _ = app.emit(
-        "backend-timing",
-        (name, start.elapsed().as_secs_f64() * 1000.0, count),
-    );
-}
+// fn emit_timing(app: &AppHandle, name: &str, start: Instant, count: bool) {
+//     let _ = app.emit(
+//         "backend-timing",
+//         (name, start.elapsed().as_secs_f64() * 1000.0, count),
+//     );
+// }
 
 /// Encode a single cell into the binary buffer.
 /// Format: [row: u32 LE][col: u32 LE][is_error: u8][display_len: u32 LE][display][entered_len: u32 LE][entered]
@@ -68,6 +70,80 @@ fn encode_cell(buf: &mut Vec<u8>, spreadsheet: &Spreadsheet, cell_id: CellId) {
     buf.extend_from_slice(entered_text);
 }
 
+/// Parse user_input_raw_text for each given cell_id and insert the result into sheets[0].
+fn parse_and_insert_cells(state: &mut MutexGuard<'_, TonicState>, cell_ids: &[CellId]) {
+    let sp = &mut state.spreadsheet;
+
+    for &cell_id in cell_ids {
+        let Some(user_input) = sp.user_input_raw_text.get(&cell_id) else {
+            continue;
+        };
+
+        // if not entering formula, then just update value
+        if !user_input.starts_with('=') {
+            if let Ok(n) = user_input.parse::<D256>() {
+                sp.sheets[0].insert(cell_id, Cell::SingleValue(CellValue::Number(n)));
+            } else {
+                let text = user_input.clone();
+                sp.sheets[0].insert(cell_id, Cell::SingleValue(CellValue::Text(text)));
+            }
+            continue;
+        }
+
+        // start parsing formula
+        let formula_text = &user_input[1..];
+
+        let lex_output = lex_formula(formula_text);
+
+        // report any errors happened during lexing
+        if lex_output.has_errors() {
+            let msg = lexer_errors_to_string(lex_output.errors());
+            sp.sheets[0].insert(cell_id, Cell::FormulaError { error: msg });
+            continue;
+        }
+
+        // return if empty
+        let Some(tokens) = lex_output.output() else {
+            continue;
+        };
+
+        let mut formula_state = FormulaState {
+            sheet_names: &mut sp.sheet_names,
+            cell_names: &mut sp.cell_names,
+            user_function_names: &mut sp.user_function_names,
+            expr_arena: Vec::new(),
+        };
+        let (parsed, parse_errs) = parse_formula(tokens, formula_text.len(), &mut formula_state);
+
+        // report any errors happened during parsing formula (syntax, name not found)
+        if !parse_errs.is_empty() {
+            let msg = parse_formula_errors_to_string(&parse_errs);
+            sp.sheets[0].insert(cell_id, Cell::FormulaError { error: msg });
+            continue;
+        }
+
+        if let Some((expr, _root)) = parsed {
+            // report any evaluation errors
+            match eval_formula(&expr, sp) {
+                Ok(value) => {
+                    sp.sheets[0].insert(cell_id, Cell::Formula { expr, value });
+                }
+                Err(e) => {
+                    let msg = format!("Eval Error: {:?}", e);
+                    sp.sheets[0].insert(cell_id, Cell::FormulaError { error: msg });
+                }
+            }
+        }
+    }
+}
+
+/// Remove cells from sheets[0].
+fn remove_cells(state: &mut MutexGuard<'_, TonicState>, cell_ids: &[CellId]) {
+    for cell_id in cell_ids {
+        state.spreadsheet.sheets[0].remove(cell_id);
+    }
+}
+
 #[tauri::command]
 fn init_viewport(state: tauri::State<'_, Mutex<TonicState>>) {
     let mut state = state.lock().unwrap();
@@ -77,12 +153,9 @@ fn init_viewport(state: tauri::State<'_, Mutex<TonicState>>) {
 
 #[tauri::command]
 fn get_cells_in_viewport(
-    app: AppHandle,
     state: tauri::State<'_, Mutex<TonicState>>,
     request: tauri::ipc::Request<'_>,
 ) -> tauri::ipc::Response {
-    let get_cells_in_viewport_time = Instant::now();
-
     let headers = request.headers();
     let Some(row_start) = headers
         .get("row-start")
@@ -132,8 +205,7 @@ fn get_cells_in_viewport(
 }
 
 #[tauri::command]
-fn enter_input(app: AppHandle, cell_id: CellId, user_input: &str) {
-    let state = app.state::<Mutex<TonicState>>();
+fn enter_input(cell_id: CellId, user_input: &str, state: tauri::State<'_, Mutex<TonicState>>) {
     let mut state = state
         .lock()
         .expect("to able to lock spreadsheet in enter_input");
@@ -144,80 +216,7 @@ fn enter_input(app: AppHandle, cell_id: CellId, user_input: &str) {
         .user_input_raw_text
         .insert(cell_id, user_input.to_string());
 
-    // if not entering formula, then just update value
-    if !user_input.starts_with('=') {
-        let insert_time = Instant::now();
-        if let Ok(n) = user_input.parse::<D256>() {
-            state.spreadsheet.sheets[0].insert(cell_id, Cell::SingleValue(CellValue::Number(n)));
-            debug!(
-                "User entered number ({:?}): \"{}\", to {}",
-                insert_time.elapsed(),
-                n,
-                cell_id
-            );
-        } else {
-            state.spreadsheet.sheets[0].insert(
-                cell_id,
-                Cell::SingleValue(CellValue::Text(user_input.to_string())),
-            );
-            debug!(
-                "User entered text ({:?}): \"{}\", to {}",
-                insert_time.elapsed(),
-                user_input,
-                cell_id
-            );
-        }
-        emit_timing(&app, "rs_insert_time", insert_time, false);
-        return;
-    }
-
-    // start parsing formula
-    let formula_text = &user_input[1..];
-
-    let lex_time = Instant::now();
-    let lex_output = lex_formula(formula_text);
-    debug!("Lexer elapsed: {:?}", lex_time.elapsed());
-
-    // report any errors happened during lexing
-    if lex_output.has_errors() {
-        let msg = lexer_errors_to_string(lex_output.errors());
-        state.spreadsheet.sheets[0].insert(cell_id, Cell::FormulaError { error: msg });
-        return;
-    }
-
-    // return if empty
-    let Some(tokens) = lex_output.output() else {
-        return;
-    };
-
-    let parse_time = Instant::now();
-    let (parsed, parse_errs) = parse_formula(tokens, formula_text.len(), &mut state.spreadsheet);
-    debug!("Parser elapsed: {:?}", parse_time.elapsed());
-
-    // report any errors happened during parsing formula (syntax, not found name)
-    if !parse_errs.is_empty() {
-        let msg = parse_formula_errors_to_string(&parse_errs);
-        state.spreadsheet.sheets[0].insert(cell_id, Cell::FormulaError { error: msg });
-        return;
-    }
-
-    debug!("parsed formula: {:?}", parsed);
-
-    if let Some((exprs, _root)) = parsed {
-        // report any evaluation errors
-        let eval_time = Instant::now();
-        match eval_formula(&exprs, &state.spreadsheet) {
-            Ok(value) => {
-                state.spreadsheet.sheets[0].insert(cell_id, Cell::Formula { expr: exprs, value });
-            }
-            Err(e) => {
-                let msg = format!("Eval Error: {:?}", e);
-                state.spreadsheet.sheets[0].insert(cell_id, Cell::FormulaError { error: msg });
-            }
-        }
-        emit_timing(&app, "rs_eval_time", eval_time, false);
-        debug!("Eval elapsed: {:?}", eval_time.elapsed());
-    }
+    parse_and_insert_cells(&mut state, &[cell_id]);
 }
 
 #[tauri::command]
@@ -228,8 +227,8 @@ fn delete_cells(state: tauri::State<'_, Mutex<TonicState>>, cells: Vec<CellId>) 
 
     for cell_id in &cells {
         state.spreadsheet.user_input_raw_text.remove(cell_id);
-        state.spreadsheet.sheets[0].remove(cell_id);
     }
+    remove_cells(&mut state, &cells);
 }
 
 #[tauri::command]
@@ -237,155 +236,144 @@ fn fill_cells(
     state: tauri::State<'_, Mutex<TonicState>>,
     sources: Vec<CellId>,
     dests: Vec<CellId>,
-    before_sources: Option<Vec<Option<CellId>>>,
+    orig_min_row: u32,
+    orig_max_row: u32,
+    orig_min_col: u32,
+    orig_max_col: u32,
 ) {
     if sources.len() != dests.len() {
         return;
-    }
-    if let Some(ref bs) = before_sources {
-        if bs.len() != dests.len() {
-            return;
-        }
     }
 
     let mut state = state
         .lock()
         .expect("to able to lock spreadsheet in fill_cells");
 
+    let mut cells_to_parse: Vec<CellId> = Vec::with_capacity(dests.len());
+
+    let sheet = &state.spreadsheet.sheets[0];
+    let get_num = |cell: &CellId| -> Option<D256> {
+        match sheet.get(cell)? {
+            Cell::SingleValue(CellValue::Number(n)) => Some(*n),
+            Cell::Formula {
+                value: CellValue::Number(n),
+                ..
+            } => Some(*n),
+            _ => None,
+        }
+    };
+
+    // perform numerical extrapolation
+    // todo: double check math here
+
+    // compute global steps from the first cells of the original range
+    // dest(r,c) = first + row_step*dr + col_step*dc + cross_step*dr*dc
+    let first = CellId {
+        col: orig_min_col,
+        row: orig_min_row,
+    };
+    let first_val = get_num(&first);
+    let row_step = if orig_max_row > orig_min_row {
+        let second = CellId {
+            col: orig_min_col,
+            row: orig_min_row + 1,
+        };
+        match (first_val, get_num(&second)) {
+            (Some(a), Some(b)) => Some(b - a),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let col_step = if orig_max_col > orig_min_col {
+        let second = CellId {
+            col: orig_min_col + 1,
+            row: orig_min_row,
+        };
+        match (first_val, get_num(&second)) {
+            (Some(a), Some(b)) => Some(b - a),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let cross_step = match (first_val, row_step, col_step) {
+        (Some(fv), Some(rs), Some(cs)) => {
+            let diag = CellId {
+                col: orig_min_col + 1,
+                row: orig_min_row + 1,
+            };
+            get_num(&diag).map(|d| d - fv - rs - cs)
+        }
+        _ => None,
+    };
+
+    let can_extrapolate = first_val.is_some() && (row_step.is_some() || col_step.is_some());
+
     for i in 0..dests.len() {
         let source = sources[i];
         let dest = dests[i];
-        let before_source = before_sources
-            .as_ref()
-            .and_then(|v| v.get(i))
-            .copied()
-            .flatten();
 
-        // numeric extrapolation: dest = source + (source - before_source)
-        if let Some(before) = before_source {
-            if let (
-                Some(Cell::SingleValue(CellValue::Number(src_val))),
-                Some(Cell::SingleValue(CellValue::Number(before_val))),
-            ) = (
-                state.spreadsheet.sheets[0].get(&source),
-                state.spreadsheet.sheets[0].get(&before),
-            ) {
-                let (src_val, before_val) = (*src_val, *before_val);
-                let dest_val = src_val + (src_val - before_val);
-                let display = dest_val.to_string();
-                state
-                    .spreadsheet
-                    .user_input_raw_text
-                    .insert(dest, display.clone());
-                state.spreadsheet.sheets[0]
-                    .insert(dest, Cell::SingleValue(CellValue::Number(dest_val)));
-                continue;
-            }
+        if can_extrapolate {
+            let fv = first_val.unwrap();
+            let dr = D256::from(dest.row.abs_diff(orig_min_row));
+            let dc = D256::from(dest.col.abs_diff(orig_min_col));
+            let dest_val = fv
+                + row_step.unwrap_or(D256::ZERO) * dr
+                + col_step.unwrap_or(D256::ZERO) * dc
+                + cross_step.unwrap_or(D256::ZERO) * dr * dc;
+            state
+                .spreadsheet
+                .user_input_raw_text
+                .insert(dest, dest_val.to_string());
+            cells_to_parse.push(dest);
+            continue;
         }
 
-        let source_cell = state.spreadsheet.sheets[0].get(&source);
+        let row_off = dest.row as i32 - source.row as i32;
+        let col_off = dest.col as i32 - source.col as i32;
 
-        match source_cell {
-            Some(Cell::Formula { expr, value: _ }) => {
-                let row_off = dest.row as i32 - source.row as i32;
-                let col_off = dest.col as i32 - source.col as i32;
-
-                // clone and offset relative refs in the AST
-                let mut new_exprs: Vec<Expr> = expr.clone();
-                for e in &mut new_exprs {
-                    if let Expr::Atom(atom) = e {
-                        match atom {
-                            ExprAtom::RelativeCellRef(_, ref mut cell) => {
-                                cell.row = (cell.row as i32 + row_off).max(0) as u32;
-                                cell.col = (cell.col as i32 + col_off).max(0) as u32;
-                            }
-                            ExprAtom::RelativeCellRange(_, ref mut range) => {
-                                for cell in [&mut range.start, &mut range.end] {
-                                    cell.row = (cell.row as i32 + row_off).max(0) as u32;
-                                    cell.col = (cell.col as i32 + col_off).max(0) as u32;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-
-                // offset relative refs in the raw text for display
-                let raw = state
-                    .spreadsheet
-                    .user_input_raw_text
-                    .get(&source)
-                    .cloned()
-                    .unwrap_or_default();
-                let adjusted_raw = if raw.starts_with('=') {
-                    format!("={}", offset_relative_refs(&raw[1..], row_off, col_off))
-                } else {
-                    raw
-                };
-                state
-                    .spreadsheet
-                    .user_input_raw_text
-                    .insert(dest, adjusted_raw);
-
-                // eval the offset AST
-                match eval_formula(&new_exprs, &state.spreadsheet) {
-                    Ok(value) => {
-                        state.spreadsheet.sheets[0].insert(
-                            dest,
-                            Cell::Formula {
-                                expr: new_exprs,
-                                value,
-                            },
-                        );
-                    }
-                    Err(e) => {
-                        let msg = format!("Eval Error: {:?}", e);
-                        state.spreadsheet.sheets[0].insert(dest, Cell::FormulaError { error: msg });
-                    }
-                }
-            }
-            Some(Cell::SingleValue(value)) => {
-                let value = value.clone();
-                let raw = state
-                    .spreadsheet
-                    .user_input_raw_text
-                    .get(&source)
-                    .cloned()
-                    .unwrap_or_default();
-                state.spreadsheet.user_input_raw_text.insert(dest, raw);
-                state.spreadsheet.sheets[0].insert(dest, Cell::SingleValue(value));
-            }
-            Some(Cell::FormulaError { .. }) | None => {}
-        }
+        // offset all refs in the raw text
+        let raw = state
+            .spreadsheet
+            .user_input_raw_text
+            .get(&source)
+            .cloned()
+            .unwrap_or_default();
+        let adjusted_raw = if raw.starts_with('=') {
+            format!("={}", offset_refs(&raw[1..], row_off, col_off))
+        } else {
+            raw.clone()
+        };
+        state
+            .spreadsheet
+            .user_input_raw_text
+            .insert(dest, adjusted_raw);
+        cells_to_parse.push(dest);
     }
+
+    parse_and_insert_cells(&mut state, &cells_to_parse);
 }
 
 #[tauri::command]
-fn paste_values(
-    _app: AppHandle,
-    state: tauri::State<'_, Mutex<TonicState>>,
-    cells: Vec<(CellId, String)>,
-) {
+fn paste_values(state: tauri::State<'_, Mutex<TonicState>>, cells: Vec<(CellId, String)>) {
     let mut state = state.lock().expect("to able to lock state in paste_values");
+
+    let mut to_remove: Vec<CellId> = Vec::new();
+    let mut to_parse: Vec<CellId> = Vec::new();
 
     for (cell_id, text) in cells {
         if text.is_empty() {
             state.spreadsheet.user_input_raw_text.remove(&cell_id);
-            state.spreadsheet.sheets[0].remove(&cell_id);
-            continue;
-        }
-
-        state
-            .spreadsheet
-            .user_input_raw_text
-            .insert(cell_id, text.clone());
-
-        if let Ok(n) = text.parse::<D256>() {
-            state.spreadsheet.sheets[0].insert(cell_id, Cell::SingleValue(CellValue::Number(n)));
+            to_remove.push(cell_id);
         } else {
-            state.spreadsheet.sheets[0].insert(cell_id, Cell::SingleValue(CellValue::Text(text)));
+            state.spreadsheet.user_input_raw_text.insert(cell_id, text);
+            to_parse.push(cell_id);
         }
     }
+
+    remove_cells(&mut state, &to_remove);
+    parse_and_insert_cells(&mut state, &to_parse);
 }
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn Error + 'static>> {

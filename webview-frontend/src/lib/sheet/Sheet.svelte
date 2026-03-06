@@ -129,7 +129,7 @@
         return { row: Number(rowId) - 1, col: columnLetterToIndex(colId) };
     }
 
-    let focusedCell: CellId | undefined = $state();
+    let focusedCell: CellId | null = $state(null);
 
     const baseRows: SheetRow[] = $state(
         Array.from({ length: 1000 }, (_, i) => {
@@ -166,13 +166,13 @@
 
     let gridRows: SheetRow[] = $state([]);
     let gridColumns: IColumnConfig[] = $state(baseColumns);
-    let gridApi: IApi | undefined = $state();
+    let gridApi: IApi | null = $state(null);
 
     // --- selection state ---
 
     // tracks which cell the mouse is currently over (ignoring row number column)
-    let hoveredCell: CellId | undefined = $state();
-    let focusedRangeStart: CellId | undefined = $state();
+    let hoveredCell: CellId | null = $state(null);
+    let focusedRangeStart: CellId | null = $state(null);
     let isSelecting = $state(false); // is true during mouse drag or while shift is held
     let shiftClickedOnce = $state(false); // true after first shift-click (waiting for second to complete range)
     let isFilling = $state(false);
@@ -183,9 +183,9 @@
     let caretPosition = $state(0);
 
     // the start of reference that user is trying to insert into formula they edit
-    let editorInsertReferenceStart: CellId | undefined = $state();
+    let editorInsertReferenceStart: CellId | null = $state(null);
     // the end of reference (similar to editorInsertReferenceStart)
-    let editorInsertReferenceEnd: CellId | undefined = $state();
+    let editorInsertReferenceEnd: CellId | null = $state(null);
     let editorInsertReference = $state(false);
 
     let editorInputIsFormula = $derived(editorInput.startsWith("="));
@@ -211,12 +211,12 @@
     // like inserting cell/range reference only when need (after the binary op, inside function args, etc)
 
     const function_names_regex = /\b(sum|avg)\b/gi;
-    // matches "A1", "~A1", "A1:B3", "~A1:B3", and incomplete "A1:", "~A1:B"
+    // matches "A1", "A1:B3", and incomplete "A1:", "A1:B"
     const cell_incomplete_references_regex =
-        /~?(?<!\w)([A-Z]+)(\d+)(?::(?:([A-Z]+)(\d+)?)?)?(?![a-z0-9])/gi;
-    // matches "A1", "~A1", "A1:B3", "~A1:B3"
+        /(?<!\w)([A-Z]+)(\d+)(?::(?:([A-Z]+)(\d+)?)?)?(?![a-z0-9])/gi;
+    // matches "A1", "A1:B3"
     const cell_references_regex =
-        /~?(?<!\w)([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?(?!\w)/gi;
+        /(?<!\w)([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?(?!\w)/gi;
 
     let editorInputHtml = $derived.by(() => {
         if (!editorInputIsFormula) return "";
@@ -237,8 +237,7 @@
 
     // parse references from formula — only depends on editorInput
     let parsedFormulaReferencesHighlights = $derived.by(() => {
-        if (!editorInputIsFormula || !isEditing || !editorInput)
-            return undefined;
+        if (!editorInputIsFormula || !isEditing || !editorInput) return null;
 
         let match;
         let reference_index = 0;
@@ -357,33 +356,30 @@
         const isSameCell = start.row === end.row && start.col === end.col;
         const startStr = `${columnIndexToLetter(start.col)}${start.row + 1}`;
         const endStr = `${columnIndexToLetter(end.col)}${end.row + 1}`;
-        const nonRelativeRef = isSameCell ? startStr : `${startStr}:${endStr}`;
+        const cellRef = isSameCell ? startStr : `${startStr}:${endStr}`;
 
         untrack(() => {
             const activeRef =
                 activeRefIndex >= 0
                     ? parsedFormulaReferencesHighlights?.[activeRefIndex]
-                    : undefined;
+                    : null;
             if (activeRef) {
                 // replace existing reference under cursor
-                const relative_prefix =
-                    editorInput[activeRef.matchIndex] === "~" ? "~" : "";
-                const ref = relative_prefix + nonRelativeRef;
                 editorInput =
                     editorInput.slice(0, activeRef.matchIndex) +
-                    ref +
+                    cellRef +
                     editorInput.slice(
                         activeRef.matchIndex + activeRef.matchLength,
                     );
-                caretPosition = activeRef.matchIndex + ref.length;
+                caretPosition = activeRef.matchIndex + cellRef.length;
             } else {
                 // otherwise, insert new reference at cursor (but after '=')
                 const insertPos = Math.max(caretPosition, 1);
                 editorInput =
                     editorInput.slice(0, insertPos) +
-                    nonRelativeRef +
+                    cellRef +
                     editorInput.slice(insertPos);
-                caretPosition = insertPos + nonRelativeRef.length;
+                caretPosition = insertPos + cellRef.length;
             }
         });
     });
@@ -423,13 +419,16 @@
     function commitCellFill(
         sources: CellId[],
         dests: CellId[],
-        beforeSources?: (CellId | undefined)[],
+        orig: CellRange,
     ) {
         if (!sources.length || sources.length !== dests.length) return;
         invoke("fill_cells", {
             sources,
             dests,
-            beforeSources,
+            origMinRow: orig.minR,
+            origMaxRow: orig.maxR,
+            origMinCol: orig.minC,
+            origMaxCol: orig.maxC,
         });
     }
 
@@ -443,7 +442,7 @@
     // --- copy / paste ---
 
     function copySelection() {
-        // if focused range, save range as .csv to the clipboard
+        // if focused range, save range as TSV to the clipboard
         if (focusedRangeBounds) {
             const rows: string[] = [];
             for (
@@ -458,15 +457,15 @@
                     c++
                 ) {
                     const cell = getCell({ row: r, col: c });
-                    cols.push(cell?.computedValue ?? "");
+                    cols.push(cell?.enteredText ?? "");
                 }
-                rows.push(cols.join(","));
+                rows.push(cols.join("\t"));
             }
             navigator.clipboard.writeText(rows.join("\n"));
         } else if (focusedCell) {
-            // if focused single cell, save computedValue to clipboard
+            // if focused single cell, save enteredText to clipboard
             const cell = getCell(focusedCell);
-            navigator.clipboard.writeText(cell?.computedValue ?? "");
+            navigator.clipboard.writeText(cell?.enteredText ?? "");
         }
     }
 
@@ -475,8 +474,8 @@
         const text = await navigator.clipboard.readText();
         if (!text) return;
 
-        // parse clipboard as .csv grid
-        const clipRows = text.split("\n").map((line) => line.split(","));
+        // parse clipboard as TSV grid
+        const clipRows = text.split("\n").map((line) => line.split("\t"));
         const isSingleClipValue =
             clipRows.length === 1 && clipRows[0].length === 1;
         const hasRange = !!focusedRangeBounds;
@@ -558,12 +557,12 @@
 
     function clearFocus() {
         commitEdit();
-        focusedCell = undefined;
+        focusedCell = null;
         editorInput = "";
         isEditing = false;
         gridApi?.exec("focus-cell", {
-            row: undefined,
-            column: undefined,
+            row: null,
+            column: null,
         });
     }
 
@@ -578,13 +577,14 @@
         });
     }
 
-    function getCell(id: CellId | undefined): CellData | undefined {
-        if (!id) return undefined;
+    function getCell(id: CellId | null): CellData | null {
+        if (!id) return null;
         const ui = toUICell(id);
         const row = gridApi?.getRow(ui.row);
-        if (!row) return undefined;
+        if (!row) return null;
         const cell = row[ui.column];
         if (isCellData(cell)) return cell;
+        return null;
     }
 
     function init(api: IApi) {
@@ -623,7 +623,7 @@
         const clickedCell = target.closest<HTMLElement>(".wx-cell");
 
         if (!clickedCell) {
-            hoveredCell = undefined;
+            hoveredCell = null;
             return;
         }
 
@@ -631,7 +631,7 @@
 
         // ignore row number column for hover tracking
         if (colId == "rowNumber") {
-            hoveredCell = undefined;
+            hoveredCell = null;
             return;
         }
 
@@ -750,106 +750,33 @@
         }
     }
 
-    /** Generate fill source/dest pairs for one expanded edge of a range.
-     *  axis="col" fills horizontally, axis="row" fills vertically.
-     *  dir=1 fills forward (right/down), dir=-1 fills backward (left/up). */
-    function generateFillEdge(
-        orig: CellRange,
-        bounds: CellRange,
-        axis: "row" | "col",
-        dir: 1 | -1,
-    ) {
-        const sources: CellId[] = [];
-        const dests: CellId[] = [];
-        const beforeSources: (CellId | undefined)[] = [];
-
-        // cross-axis range: for col fills, iterate rows; for row fills, iterate cols
-        const crossMin =
-            axis === "col" ? Math.max(orig.minR, bounds.minR) : bounds.minC;
-        const crossMax =
-            axis === "col" ? Math.min(orig.maxR, bounds.maxR) : bounds.maxC;
-
-        // main-axis range: the expanded edge beyond the original
-        const mainStart =
-            dir === 1
-                ? axis === "col"
-                    ? orig.maxC + 1
-                    : orig.maxR + 1
-                : axis === "col"
-                  ? orig.minC - 1
-                  : orig.minR - 1;
-        const mainEnd =
-            dir === 1
-                ? axis === "col"
-                    ? bounds.maxC
-                    : bounds.maxR
-                : axis === "col"
-                  ? bounds.minC
-                  : bounds.minR;
-
-        // limit for "before source" existence check
-        const beforeLimit =
-            dir === 1
-                ? axis === "col"
-                    ? orig.minC
-                    : orig.minR
-                : axis === "col"
-                  ? orig.maxC
-                  : orig.maxR;
-
-        for (let cross = crossMin; cross <= crossMax; cross++) {
-            const start = dir === 1 ? mainStart : mainStart;
-            const end = dir === 1 ? mainEnd : mainEnd;
-            for (let m = start; dir === 1 ? m <= end : m >= end; m += dir) {
-                const makeCell = (v: number) =>
-                    axis === "col"
-                        ? { row: cross, col: v }
-                        : { row: v, col: cross };
-                sources.push(makeCell(m - dir));
-                dests.push(makeCell(m));
-                const beforeVal = m - 2 * dir;
-                const hasBefore =
-                    dir === 1
-                        ? beforeVal >= beforeLimit
-                        : beforeVal <= beforeLimit;
-                beforeSources.push(hasBefore ? makeCell(beforeVal) : undefined);
-            }
-        }
-        return { sources, dests, beforeSources };
-    }
-
     function handleMouseUp(ev: MouseEvent) {
         // fill cells on release
         if (isFilling && focusedRangeStart && focusedRangeBounds) {
             const bounds = focusedRangeBounds;
             const orig = fillOriginalBounds ?? bounds;
 
-            const allSources: CellId[] = [];
-            const allDests: CellId[] = [];
-            const allBeforeSources: (CellId | undefined)[] = [];
+            const sources: CellId[] = [];
+            const dests: CellId[] = [];
 
-            const pushEdge = (axis: "row" | "col", dir: 1 | -1) => {
-                const { sources, dests, beforeSources } = generateFillEdge(
-                    orig,
-                    bounds,
-                    axis,
-                    dir,
-                );
-                allSources.push(...sources);
-                allDests.push(...dests);
-                allBeforeSources.push(...beforeSources);
-            };
+            for (let r = bounds.minR; r <= bounds.maxR; r++) {
+                for (let c = bounds.minC; c <= bounds.maxC; c++) {
+                    if (
+                        r >= orig.minR &&
+                        r <= orig.maxR &&
+                        c >= orig.minC &&
+                        c <= orig.maxC
+                    )
+                        continue;
+                    const srcRow = Math.min(Math.max(r, orig.minR), orig.maxR);
+                    const srcCol = Math.min(Math.max(c, orig.minC), orig.maxC);
+                    sources.push({ row: srcRow, col: srcCol });
+                    dests.push({ row: r, col: c });
+                }
+            }
 
-            // horizontal fill (within overlapping row range)
-            if (bounds.maxC > orig.maxC) pushEdge("col", 1);
-            else if (bounds.minC < orig.minC) pushEdge("col", -1);
-
-            // vertical fill (full column range including new columns)
-            if (bounds.maxR > orig.maxR) pushEdge("row", 1);
-            else if (bounds.minR < orig.minR) pushEdge("row", -1);
-
-            if (allSources.length) {
-                commitCellFill(allSources, allDests, allBeforeSources);
+            if (sources.length) {
+                commitCellFill(sources, dests, orig);
             }
 
             // delete cells that were in original bounds but not in final bounds (shrinking)
@@ -870,7 +797,7 @@
         const clickedCell = target.closest<HTMLElement>(".wx-cell");
 
         if (!clickedCell) {
-            if (hoveredCell) hoveredCell = undefined;
+            if (hoveredCell) hoveredCell = null;
             return;
         }
 
@@ -891,6 +818,9 @@
         }
 
         if (ev.ctrlKey && ev.key === "c" && !isEditing) {
+            // exit clone mode if pressed ctrl+c
+            clonedFormulaBounds = null;
+
             ev.preventDefault();
             copySelection();
             return;
@@ -940,7 +870,7 @@
                         }
                     }
                     if (sources.length) {
-                        commitCellFill(sources, dests);
+                        commitCellFill(sources, dests, src);
                     }
                 }
             }
@@ -951,9 +881,16 @@
             return;
         }
 
-        // Ctrl+X: capture current selection as clone source
-        if (ev.ctrlKey && ev.key === "x" && !isEditing) {
+        if (ev.ctrlKey && ev.key === "d" && !isEditing) {
             ev.preventDefault();
+
+            // if already cloning, exit clone mode
+            if (clonedFormulaBounds) {
+                clonedFormulaBounds = null;
+                return;
+            }
+
+            // otherwise, capture current selection as clone source (enter clone mode)
             if (focusedRangeBounds) {
                 clonedFormulaBounds = { ...focusedRangeBounds };
             } else if (focusedCell) {
@@ -971,7 +908,7 @@
             isEditing = false;
             clonedFormulaBounds = null;
             clearFocus();
-            focusedRangeStart = undefined;
+            focusedRangeStart = null;
             isSelecting = false;
             return;
         }
@@ -1117,10 +1054,10 @@
 
     // --- scroll handling & selection overlays ---
 
-    let sos: SheetObjectsState = $state(undefined as any);
-    let focusOverlay = $state<FocusOverlay>(undefined as any);
-    let fillOriginOverlay = $state<FillOriginOverlay>(undefined as any);
-    let cloneSourceOverlay = $state<CloneSourceOverlay>(undefined as any);
+    let sos: SheetObjectsState = $state(null as any);
+    let focusOverlay = $state<FocusOverlay>(null as any);
+    let fillOriginOverlay = $state<FillOriginOverlay>(null as any);
+    let cloneSourceOverlay = $state<CloneSourceOverlay>(null as any);
     let refOverlays: RefOverlay[] = $state([]);
     let overlayDebounceId: ReturnType<typeof setTimeout> | null = null;
     let gridWrapperEl: HTMLElement | null = null;
@@ -1139,6 +1076,10 @@
         return scrollContainerEl;
     }
 
+    function moveFocusBackToSpreadsheet() {
+        if (document.activeElement !== gridWrapperEl) gridWrapperEl?.focus();
+    }
+
     function initOverlays() {
         sos = createState(clipWrapperEl!, overlaysEl!, gridApi!);
         repositionOverlays();
@@ -1153,7 +1094,7 @@
             applyHeaderHighlights();
             overlayDebounceId = null;
         }, 10);
-        if (document.activeElement !== gridWrapperEl) gridWrapperEl?.focus();
+        moveFocusBackToSpreadsheet();
     }
 
     function applyHeaderHighlights() {

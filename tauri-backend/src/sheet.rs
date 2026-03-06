@@ -100,9 +100,7 @@ pub enum ExprAtom {
     Text(String),
     Function(UserFuncId),
     CellRef(SheetId, CellId),
-    RelativeCellRef(SheetId, CellId),
     CellRange(SheetId, CellRange),
-    RelativeCellRange(SheetId, CellRange),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -112,9 +110,7 @@ pub enum AtomType {
     Text,
     Function,
     CellRef,
-    RelativeCellRef,
     CellRange,
-    RelativeCellRange,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

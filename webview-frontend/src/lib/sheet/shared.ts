@@ -7,7 +7,7 @@ export type CellId = { row: number; col: number };
 export type CellData = { computedValue: string; enteredText: string };
 
 export type SheetSharedState = {
-    focusedCell: CellId | undefined;
+    focusedCell: CellId | null;
     isEditing: boolean;
     readonly editorInputIsFormula: boolean;
     editorInput: string;

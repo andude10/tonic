@@ -14,9 +14,9 @@ use chumsky::{
 };
 use fastnum::D256;
 
-use crate::sheet::{
-    CellId, CellRange, Expr, ExprAtom, ExprId, NameRef, SheetId, Spreadsheet, UserFunction,
-};
+use std::collections::HashMap;
+
+use crate::sheet::{CellId, CellRange, Expr, ExprAtom, ExprId, NameRef, SheetId, UserFuncId};
 
 // --- Tokens ---
 
@@ -33,7 +33,6 @@ pub enum Token<'src> {
     Star,
     Slash,
     Dot,
-    Tilde,
     Colon,
     Comma,
     LParen,
@@ -55,7 +54,6 @@ impl fmt::Display for Token<'_> {
             Token::Star => write!(f, "*"),
             Token::Slash => write!(f, "/"),
             Token::Dot => write!(f, "."),
-            Token::Tilde => write!(f, "~"),
             Token::Colon => write!(f, ":"),
             Token::Comma => write!(f, ","),
             Token::LParen => write!(f, "("),
@@ -121,7 +119,6 @@ pub fn create_lexer<'src>(
         just('*').to(Token::Star),
         just('/').to(Token::Slash),
         just('.').to(Token::Dot),
-        just('~').to(Token::Tilde),
         just(':').to(Token::Colon),
         just(',').to(Token::Comma),
         just('(').to(Token::LParen),
@@ -177,15 +174,17 @@ type FormulaInput<'tokens, 'src> = MappedInput<
 /// Id of expression in AST (stored in FormulaState)
 type FormulaOutput = ExprId;
 /// Expression arena (flat AST)
-struct FormulaState<'tokens> {
-    spreadsheet: &'tokens mut Spreadsheet,
-    expr_arena: Vec<Expr>,
+pub struct FormulaState<'a> {
+    pub sheet_names: &'a mut HashMap<String, SheetId>,
+    pub cell_names: &'a mut HashMap<NameRef, CellId>,
+    pub user_function_names: &'a mut HashMap<NameRef, UserFuncId>,
+    pub expr_arena: Vec<Expr>,
 }
 
 type FormulaExtra<'tokens, 'src> =
     extra::Full<Rich<'tokens, Token<'src>>, FormulaState<'tokens>, ()>;
 
-// todo: remove this, needed to resolve some big type error in get_spreadsheet
+// todo: remove this, needed to resolve some big type error
 impl<'src, I: Input<'src>> Inspector<'src, I> for FormulaState<'_> {
     type Checkpoint = ();
     fn on_token(&mut self, _: &I::Token) {}
@@ -197,10 +196,6 @@ fn push_expr(state: &mut FormulaState, expr: Expr) -> ExprId {
     let id = state.expr_arena.len() as ExprId;
     state.expr_arena.push(expr);
     id
-}
-
-fn get_spreadsheet<'a>(state: &'a mut FormulaState) -> &'a mut Spreadsheet {
-    state.spreadsheet
 }
 
 /// Parser for formula language. Resolves all references (named cells, functions, sheets)
@@ -216,10 +211,10 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
             .then(just(Token::Dot).ignore_then(ident).or_not())
             .try_map_with(|(first, second), extra| {
                 let span = extra.span();
-                let sp = get_spreadsheet(extra.state());
+                let st: &mut FormulaState = extra.state();
                 match second {
                     Some(name) => {
-                        let &sheet_id = sp.sheet_names.get(first).ok_or_else(|| {
+                        let &sheet_id = st.sheet_names.get(first).ok_or_else(|| {
                             Rich::custom(span, format!("unknown sheet '{first}'"))
                         })?;
                         Ok((sheet_id, name))
@@ -242,7 +237,7 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
         let cell_name_or_function_call = qualified_name.then(call_args.or_not()).try_map_with(
             |((sheet_id, name), args), extra| {
                 let span = extra.span();
-                let sp = get_spreadsheet(extra.state());
+                let st: &mut FormulaState = extra.state();
                 let expr = if let Some(args) = args {
                     // function call: name(...)
                     match name {
@@ -266,7 +261,7 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
                             }
                         }
                         _ => {
-                            let func_id = sp
+                            let func_id = st
                                 .user_function_names
                                 .get(&NameRef {
                                     sheet_id,
@@ -281,7 +276,7 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
                     }
                 } else {
                     // cell ref: bare name
-                    let cell_id = sp
+                    let cell_id = st
                         .cell_names
                         .get(&NameRef {
                             sheet_id,
@@ -304,24 +299,12 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
                 None => ExprAtom::CellRef(0, start),
             });
 
-        // ~A1 or ~A1:B2 == produces ExprValue::RelativeCellRef or ExprValue::RelativeCellRange
-        let relative = just(Token::Tilde).ignore_then(
-            cell_id
-                .clone()
-                .then(just(Token::Colon).ignore_then(cell_id).or_not())
-                .map(|(start, end)| match end {
-                    Some(end) => ExprAtom::RelativeCellRange(0, CellRange { start, end }),
-                    None => ExprAtom::RelativeCellRef(0, start),
-                }),
-        );
-
-        // atom_value == self-contained value (3, false, A1, ~A1, A1:A5, 3.14, "text", etc)
+        // atom_value == self-contained value (3, false, A1, A1:A5, 3.14, "text", etc)
         let atom_value = choice((
             select_ref! { Token::True => ExprAtom::Boolean(true) },
             select_ref! { Token::False => ExprAtom::Boolean(false) },
             select_ref! { Token::Number(x) => ExprAtom::Number(*x) },
             select_ref! { Token::Text(s) => ExprAtom::Text(s.to_string()) },
-            relative,
             cell_or_range,
         ))
         .map_with(|val, extra| push_expr(extra.state(), Expr::Atom(val)));
@@ -358,18 +341,16 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
 pub fn parse_formula<'tokens, 'src: 'tokens>(
     tokens: &'tokens [Spanned<Token<'src>>],
     src_len: usize,
-    spreadsheet: &'tokens mut Spreadsheet,
+    state: &mut FormulaState<'tokens>,
 ) -> (Option<(Vec<Expr>, ExprId)>, Vec<Rich<'tokens, Token<'src>>>) {
     let eoi = SimpleSpan::new((), src_len..src_len);
-    let mut state = FormulaState {
-        spreadsheet,
-        expr_arena: Vec::new(),
-    };
     let result = create_formula_praser()
         .boxed()
-        .parse_with_state(tokens.split_spanned(eoi), &mut state);
+        .parse_with_state(tokens.split_spanned(eoi), state);
     let errs: Vec<_> = result.errors().cloned().collect();
-    let output = result.into_output().map(|root| (state.expr_arena, root));
+    let output = result
+        .into_output()
+        .map(|root| (std::mem::take(&mut state.expr_arena), root));
     (output, errs)
 }
 
@@ -415,29 +396,41 @@ fn parse_cell_at(s: &[u8], pos: usize) -> Option<(u32, u32, usize)> {
     Some((col, row, i))
 }
 
-/// Offset relative references (~A1, ~A1:B2) in a formula string.
-/// Only scans for '~' characters, skipping everything else.
+/// Offset all cell references (A1, A1:B2) in a formula string.
 /// Returns a new string with adjusted references, or the original if nothing changed.
-pub fn offset_relative_refs(formula: &str, row_off: i32, col_off: i32) -> String {
-    let bytes = formula.as_bytes();
-    // quick check: no tilde → return as-is
-    if !bytes.contains(&b'~') || (row_off == 0 && col_off == 0) {
+pub fn offset_refs(formula: &str, row_off: i32, col_off: i32) -> String {
+    if row_off == 0 && col_off == 0 {
         return formula.to_string();
     }
 
+    let bytes = formula.as_bytes();
     let mut result = String::with_capacity(formula.len());
     let mut pos = 0;
 
     while pos < bytes.len() {
-        if bytes[pos] == b'~' {
-            if let Some((col, row, end)) = parse_cell_at(bytes, pos + 1) {
+        // skip quoted strings
+        if bytes[pos] == b'"' {
+            result.push('"');
+            pos += 1;
+            while pos < bytes.len() && bytes[pos] != b'"' {
+                result.push(bytes[pos] as char);
+                pos += 1;
+            }
+            if pos < bytes.len() {
+                result.push('"');
+                pos += 1;
+            }
+            continue;
+        }
+
+        if bytes[pos].is_ascii_alphabetic() {
+            if let Some((col, row, end)) = parse_cell_at(bytes, pos) {
                 let new_col = (col as i32 + col_off).max(0) as u32;
                 let new_row = (row as i32 + row_off).max(0) as u32;
-                result.push('~');
                 col_to_letters(&mut result, new_col);
                 result.push_str(&(new_row + 1).to_string());
 
-                // check for range: ~A1:B2
+                // check for range: A1:B2
                 if end < bytes.len() && bytes[end] == b':' {
                     if let Some((col2, row2, end2)) = parse_cell_at(bytes, end + 1) {
                         let new_col2 = (col2 as i32 + col_off).max(0) as u32;
@@ -462,12 +455,19 @@ pub fn offset_relative_refs(formula: &str, row_off: i32, col_off: i32) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sheet::Spreadsheet;
     use fastnum::dec256;
 
     /// Lex + parse a formula string, return (arena, root_id) or panic with errors.
     fn parse(src: &str, spreadsheet: &mut Spreadsheet) -> (Vec<Expr>, ExprId) {
         let tokens = lex_formula(src).into_output().expect("lexer failed");
-        let (parsed, errs) = parse_formula(&tokens, src.len(), spreadsheet);
+        let mut state = FormulaState {
+            sheet_names: &mut spreadsheet.sheet_names,
+            cell_names: &mut spreadsheet.cell_names,
+            user_function_names: &mut spreadsheet.user_function_names,
+            expr_arena: Vec::new(),
+        };
+        let (parsed, errs) = parse_formula(&tokens, src.len(), &mut state);
         assert!(
             errs.is_empty(),
             "parse errors: {}",
@@ -525,28 +525,6 @@ mod tests {
         assert_parses(&[(
             "A1:B2",
             vec![Expr::Atom(ExprAtom::CellRange(
-                0,
-                CellRange {
-                    start: c(0, 0),
-                    end: c(1, 1),
-                },
-            ))],
-        )]);
-    }
-
-    #[test]
-    fn test_relative_cell_ref() {
-        assert_parses(&[(
-            "~A1",
-            vec![Expr::Atom(ExprAtom::RelativeCellRef(0, c(0, 0)))],
-        )]);
-    }
-
-    #[test]
-    fn test_relative_cell_range() {
-        assert_parses(&[(
-            "~A1:B2",
-            vec![Expr::Atom(ExprAtom::RelativeCellRange(
                 0,
                 CellRange {
                     start: c(0, 0),

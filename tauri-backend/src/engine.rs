@@ -15,16 +15,14 @@ impl ExprAtom {
             ExprAtom::Text(_) => AtomType::Text,
             ExprAtom::Function(_) => AtomType::Function,
             ExprAtom::CellRef(_, _) => AtomType::CellRef,
-            ExprAtom::RelativeCellRef(_, _) => AtomType::RelativeCellRef,
             ExprAtom::CellRange(_, _) => AtomType::CellRange,
-            ExprAtom::RelativeCellRange(_, _) => AtomType::RelativeCellRange,
         }
     }
 
     fn as_number(&self, spreadsheet: &Spreadsheet) -> Result<D256, EvalError> {
         match self {
             ExprAtom::Number(n) => Ok(*n),
-            ExprAtom::CellRef(sheet_id, cell_id) | ExprAtom::RelativeCellRef(sheet_id, cell_id) => {
+            ExprAtom::CellRef(sheet_id, cell_id) => {
                 match spreadsheet.get_cell_value(cell_id, *sheet_id) {
                     Some(CellValue::Number(n)) => Ok(*n),
                     _ => Ok(D256::ZERO),
@@ -39,9 +37,7 @@ impl ExprAtom {
 
     fn as_range(&self) -> Result<(u32, CellRange), EvalError> {
         match self {
-            ExprAtom::CellRange(sheet_id, range) | ExprAtom::RelativeCellRange(sheet_id, range) => {
-                Ok((*sheet_id, *range))
-            }
+            ExprAtom::CellRange(sheet_id, range) => Ok((*sheet_id, *range)),
             other => Err(EvalError::TypeError {
                 expected: AtomType::CellRange,
                 got: other.atom_type(),
@@ -99,14 +95,22 @@ pub fn eval_formula(
             }
             Expr::Sum { range_id, mut sum } => {
                 let (sheet_id, start, end) = store[*range_id as usize].as_range_normalized()?;
-                for (_, cell) in spreadsheet.sheets[sheet_id as usize].range(start..=end) {
-                    // todo: remove branching?
-                    if let Cell::SingleValue(CellValue::Number(n)) = cell {
-                        sum += *n;
-                    }
-                    if let Cell::Formula { value, .. } = cell {
-                        if let CellValue::Number(n) = value {
+                let sheet = &spreadsheet.sheets[sheet_id as usize];
+                // todo: remove branching?
+                for col in start.col..=end.col {
+                    let col_start = CellId {
+                        col,
+                        row: start.row,
+                    };
+                    let col_end = CellId { col, row: end.row };
+                    for (_, cell) in sheet.range(col_start..=col_end) {
+                        if let Cell::SingleValue(CellValue::Number(n)) = cell {
                             sum += *n;
+                        }
+                        if let Cell::Formula { value, .. } = cell {
+                            if let CellValue::Number(n) = value {
+                                sum += *n;
+                            }
                         }
                     }
                 }
@@ -118,14 +122,22 @@ pub fn eval_formula(
                 mut count,
             } => {
                 let (sheet_id, start, end) = store[*range_id as usize].as_range_normalized()?;
-                for (_, cell) in spreadsheet.sheets[sheet_id as usize].range(start..=end) {
-                    count += 1;
-                    if let Cell::SingleValue(CellValue::Number(n)) = cell {
-                        sum += *n;
-                    }
-                    if let Cell::Formula { value, .. } = cell {
-                        if let CellValue::Number(n) = value {
+                let sheet = &spreadsheet.sheets[sheet_id as usize];
+                for col in start.col..=end.col {
+                    let col_start = CellId {
+                        col,
+                        row: start.row,
+                    };
+                    let col_end = CellId { col, row: end.row };
+                    for (_, cell) in sheet.range(col_start..=col_end) {
+                        count += 1;
+                        if let Cell::SingleValue(CellValue::Number(n)) = cell {
                             sum += *n;
+                        }
+                        if let Cell::Formula { value, .. } = cell {
+                            if let CellValue::Number(n) = value {
+                                sum += *n;
+                            }
                         }
                     }
                 }
