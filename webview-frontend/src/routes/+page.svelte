@@ -85,6 +85,8 @@
     }
 
     .layout-container {
+        --wx-font-size: 12px;
+        font-size: 12px;
         display: flex;
         flex-direction: column;
         height: 100%;
@@ -92,6 +94,9 @@
         min-height: 0;
         overflow: hidden;
         position: relative;
+
+        /* Font size */
+        --wx-font-size: 12px;
 
         /* Vibrant Summer color palette overrides */
 

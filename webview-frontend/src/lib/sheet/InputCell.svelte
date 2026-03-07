@@ -69,8 +69,8 @@
 
     .formula-input {
         position: relative;
+        background: var(--wx-background);
         width: 100%;
-        height: 100%;
     }
 
     .backdrop {
@@ -78,7 +78,6 @@
         inset: 0;
         pointer-events: none;
         white-space: pre;
-        overflow: hidden;
         font: inherit;
         color: inherit;
     }
@@ -89,14 +88,12 @@
     }
 
     .editor {
-        position: relative;
         width: 100%;
-        height: 100%;
         box-sizing: border-box;
         border: none;
         outline: none;
-        padding: inherit;
-        margin: inherit;
+        padding: 0;
+        margin: 0;
         font: inherit;
         background: transparent;
         color: inherit;

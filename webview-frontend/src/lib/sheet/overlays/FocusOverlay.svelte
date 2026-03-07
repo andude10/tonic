@@ -11,12 +11,16 @@
         bounds,
         visible,
         isFilling,
+        isEditing = false,
+        editorInputWidth = 0,
         onfillstart,
     }: {
         sos: SheetObjectsState;
         bounds: CellRange | null;
         visible: boolean;
         isFilling: boolean;
+        isEditing?: boolean;
+        editorInputWidth?: number;
         onfillstart: (ev: MouseEvent) => void;
     } = $props();
 
@@ -34,7 +38,10 @@
         class="focus-overlay"
         style:left="{rect!.left}px"
         style:top="{rect!.top}px"
-        style:width="{rect!.width}px"
+        style:width="{Math.max(
+            rect!.width,
+            isEditing ? editorInputWidth : 0,
+        )}px"
         style:height="{rect!.height}px"
     >
         <!-- svelte-ignore a11y_no_static_element_interactions -->

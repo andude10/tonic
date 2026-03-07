@@ -13,6 +13,7 @@ export type SheetSharedState = {
     editorInput: string;
     readonly editorInputHtml: string;
     caretPosition: number;
+    editorInputWidth: number;
     commitEdit(): void;
 };
 

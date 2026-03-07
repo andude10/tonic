@@ -133,7 +133,10 @@
 
     const baseRows: SheetRow[] = $state(
         Array.from({ length: 1000 }, (_, i) => {
-            const row: SheetRow = { id: i + 1, rowNumber: i + 1 };
+            const row: SheetRow = {
+                id: i + 1,
+                rowNumber: i + 1,
+            };
             for (let j = 0; j < 26; j++) {
                 row[String.fromCharCode(65 + j)] = {
                     computedValue: "",
@@ -154,7 +157,7 @@
                 id,
                 header: id,
                 cell: Cell,
-                width: 100,
+                width: 90,
                 resize: true,
             });
         }
@@ -188,6 +191,7 @@
     let editorInsertReferenceEnd: CellId | null = $state(null);
     let editorInsertReference = $state(false);
 
+    let editorInputWidth = $state(0);
     let editorInputIsFormula = $derived(editorInput.startsWith("="));
 
     const REF_COLORS = [
@@ -309,6 +313,12 @@
         },
         set caretPosition(v) {
             caretPosition = v;
+        },
+        get editorInputWidth() {
+            return editorInputWidth;
+        },
+        set editorInputWidth(v) {
+            editorInputWidth = v;
         },
         commitEdit,
     });
@@ -542,8 +552,14 @@
 
     // --- grid config ---
 
+    // todo: refactor all hardcoded values (like rowHeight, headerHeight, etc) into constants
+
     let left = 1; // pin first column (row numbers) to the left
     let select = false; // disable Grid's built-in selection, we handle it ourselves
+    let sizes = {
+        headerHeight: 28,
+        rowHeight: 28,
+    };
 
     /** Check if 0-indexed row/col is within the grid. */
     function isInBounds(row: number, col: number): boolean {
@@ -704,8 +720,8 @@
 
         // if clicked on different cell ...
         if (hoveredCell) {
-            // if clicked while holding control, move focus
-            if (ev.ctrlKey) {
+            // if clicked while holding alt, move focus
+            if (ev.altKey) {
                 if (isEditing) {
                     commitEdit();
                 }
@@ -927,8 +943,8 @@
             ev.key === "ArrowRight";
 
         if (pressedArrowButton && focusedCell) {
-            // if pressing arrow key without ctrl in edit mode ...
-            if (isEditing && !ev.ctrlKey) {
+            // if pressing arrow key without alt in edit mode ...
+            if (isEditing && !ev.altKey) {
                 // .. then use arrow key to navigate inside editor
                 // (propagate keyDown event further)
                 return;
@@ -948,8 +964,8 @@
             let nextRow = focusedCell.row + rowDelta;
             let nextCol = focusedCell.col + colDelta;
 
-            // if pressing ctrl + arrow key in edit mode ...
-            if (isEditing && ev.ctrlKey) {
+            // if pressing alt + arrow key in edit mode ...
+            if (isEditing && ev.altKey) {
                 // ... then exit edit mode and move to cell in arrow direction
                 commitEdit();
                 isEditing = false;
@@ -1226,6 +1242,7 @@
             dynamic={{ rowCount, columnCount }}
             onrequestdata={handleRequestData}
             split={{ left }}
+            {sizes}
             {select}
             undo
         />
@@ -1245,14 +1262,6 @@
                     bounds={clonedFormulaBounds}
                     visible={!!clonedFormulaBounds}
                 />
-                <FocusOverlay
-                    bind:this={focusOverlay}
-                    {sos}
-                    bounds={focusedRangeBounds}
-                    visible={!!focusedRangeBounds}
-                    {isFilling}
-                    onfillstart={handleFillStart}
-                />
                 {#each parsedFormulaReferencesHighlights ?? [] as ref, i}
                     <RefOverlay
                         bind:this={refOverlays[i]}
@@ -1262,6 +1271,16 @@
                         active={i === activeRefIndex}
                     />
                 {/each}
+                <FocusOverlay
+                    bind:this={focusOverlay}
+                    {sos}
+                    bounds={focusedRangeBounds}
+                    visible={!!focusedRangeBounds}
+                    {isFilling}
+                    {isEditing}
+                    {editorInputWidth}
+                    onfillstart={handleFillStart}
+                />
             {/if}
         </div>
     </div>
@@ -1304,6 +1323,9 @@
         background: var(--wx-table-header-background) !important;
         font-weight: var(--wx-header-font-weight) !important;
         text-align: center;
+        display: flex !important;
+        align-items: center;
+        justify-content: center;
         user-select: none;
         transition:
             background-color 30ms cubic-bezier(0, 0, 0.2, 1),
