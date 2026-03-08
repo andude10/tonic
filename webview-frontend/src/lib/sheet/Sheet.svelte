@@ -131,44 +131,87 @@
 
     let focusedCell: CellId | null = $state(null);
 
-    const baseRows: SheetRow[] = $state(
-        Array.from({ length: 1000 }, (_, i) => {
-            const row: SheetRow = {
-                id: i + 1,
-                rowNumber: i + 1,
+    const INITIAL_ROWS = 1000;
+    const INITIAL_COLS = 26;
+    const COL_WIDTH = 90;
+
+    let rowCount = $state(INITIAL_ROWS);
+    let columnCount = $state(INITIAL_COLS);
+
+    function makeRow(i: number, colCount: number): SheetRow {
+        const row: SheetRow = { id: i + 1, rowNumber: i + 1 };
+        for (let j = 0; j < colCount; j++) {
+            row[columnIndexToLetter(j)] = {
+                computedValue: "",
+                enteredText: "",
             };
-            for (let j = 0; j < 26; j++) {
-                row[String.fromCharCode(65 + j)] = {
-                    computedValue: "",
-                    enteredText: "",
-                };
-            }
-            return row;
-        }),
+        }
+        return row;
+    }
+
+    const baseRows: SheetRow[] = $state(
+        Array.from({ length: INITIAL_ROWS }, (_, i) =>
+            makeRow(i, INITIAL_COLS),
+        ),
     );
 
-    const baseColumns: IColumnConfig[] = (() => {
-        const columns: IColumnConfig[] = [
-            { id: "rowNumber", width: 50, resize: true },
-        ];
-        for (let i = 0; i < 26; i++) {
-            const id = String.fromCharCode(65 + i);
-            columns.push({
+    let gridColumns: IColumnConfig[] = $state(
+        (() => {
+            const cols: IColumnConfig[] = [
+                { id: "rowNumber", width: 50, resize: true },
+            ];
+            for (let i = 0; i < INITIAL_COLS; i++) {
+                const id = columnIndexToLetter(i);
+                cols.push({
+                    id,
+                    header: id,
+                    cell: Cell,
+                    width: COL_WIDTH,
+                    resize: true,
+                });
+            }
+            return cols;
+        })(),
+    );
+
+    let gridRows: SheetRow[] = $state([]);
+
+    function expandRows(newCount: number) {
+        if (newCount <= rowCount) return;
+        for (let i = rowCount; i < newCount; i++) {
+            baseRows.push(makeRow(i, columnCount));
+        }
+        rowCount = newCount;
+    }
+
+    function expandColumns(newCount: number) {
+        if (newCount <= columnCount) return;
+        const newCols: IColumnConfig[] = [];
+        for (let i = columnCount; i < newCount; i++) {
+            const id = columnIndexToLetter(i);
+            newCols.push({
                 id,
                 header: id,
                 cell: Cell,
-                width: 90,
+                width: COL_WIDTH,
                 resize: true,
             });
+            for (const row of baseRows) {
+                row[id] = { computedValue: "", enteredText: "" };
+            }
         }
-        return columns;
-    })();
+        gridColumns = [...gridColumns, ...newCols];
+        columnCount = newCount;
+    }
 
-    let rowCount = $state(1000);
-    let columnCount = $state(26);
+    /** Ensure columns fill the visible width plus a buffer. */
+    function ensureColumnsFillWidth() {
+        gridWrapperEl ??= document.querySelector<HTMLElement>(".grid-wrapper");
+        if (!gridWrapperEl) return;
+        const needed = Math.ceil(gridWrapperEl.clientWidth / COL_WIDTH) + 5;
+        if (needed > columnCount) expandColumns(needed);
+    }
 
-    let gridRows: SheetRow[] = $state([]);
-    let gridColumns: IColumnConfig[] = $state(baseColumns);
     let gridApi: IApi | null = $state(null);
 
     // --- selection state ---
@@ -538,11 +581,8 @@
             // select the pasted region
             focusedRangeStart = { row: startRow, col: startCol };
             focusedCell = {
-                row: Math.min(
-                    startRow + clipRows.length - 1,
-                    gridRows.length - 1,
-                ),
-                col: Math.min(startCol + clipWidth - 1, gridColumns.length - 2),
+                row: Math.min(startRow + clipRows.length - 1, rowCount - 1),
+                col: Math.min(startCol + clipWidth - 1, columnCount - 1),
             };
         }
 
@@ -561,14 +601,12 @@
         rowHeight: 28,
     };
 
-    /** Check if 0-indexed row/col is within the grid. */
+    /** Check if 0-indexed row/col is within the grid, expanding if needed. */
     function isInBounds(row: number, col: number): boolean {
-        return (
-            row >= 0 &&
-            row < gridRows.length &&
-            col >= 0 &&
-            col < gridColumns.length - 1
-        ); // -1 for rowNumber column;
+        if (row < 0 || col < 0) return false;
+        if (row >= rowCount) expandRows(row + 200);
+        if (col >= columnCount) expandColumns(col + 10);
+        return true;
     }
 
     function clearFocus() {
@@ -1018,7 +1056,7 @@
                     return;
                 }
 
-                if (focusedCell.row + 1 < gridRows.length) {
+                if (focusedCell.row + 1 < rowCount) {
                     const nextRow = focusedCell.row + 1;
                     commitEdit();
                     isEditing = false;
@@ -1105,6 +1143,12 @@
         if ((ev.target as HTMLElement).closest(".formula-input")) return;
         const scroller = ev.target as HTMLElement;
         syncScroll(sos, scroller.scrollLeft, scroller.scrollTop);
+        if (
+            scroller.scrollLeft + scroller.clientWidth >
+            scroller.scrollWidth - 200
+        ) {
+            expandColumns(columnCount + 10);
+        }
         if (overlayDebounceId) clearTimeout(overlayDebounceId);
         overlayDebounceId = setTimeout(() => {
             applyHeaderHighlights();
@@ -1177,6 +1221,11 @@
     onMount(() => {
         initOverlays();
 
+        // add more columns if window can fit more
+        ensureColumnsFillWidth();
+        const resizeObs = new ResizeObserver(() => ensureColumnsFillWidth());
+        if (gridWrapperEl) resizeObs.observe(gridWrapperEl);
+
         let pollInterval: ReturnType<typeof setInterval>;
         invoke("init_viewport").then(() => {
             pollInterval = setInterval(() => {
@@ -1198,6 +1247,7 @@
         });
 
         return () => {
+            resizeObs.disconnect();
             clearInterval(pollInterval);
         };
     });
@@ -1208,6 +1258,7 @@
         const {
             row: { start, end },
         } = ev;
+        if (end > rowCount - 100) expandRows(rowCount + 200);
         gridRows = baseRows.slice(start, end + 1);
         viewportStart = start;
         viewportEnd = end;
