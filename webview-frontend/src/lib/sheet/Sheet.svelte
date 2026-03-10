@@ -1243,7 +1243,7 @@
                     }
                     endTimer("poll_cells");
                 });
-            }, 20);
+            }, 16);
         });
 
         return () => {
