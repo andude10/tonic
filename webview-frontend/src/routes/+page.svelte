@@ -11,6 +11,7 @@
     import { getCurrentWindow } from "@tauri-apps/api/window";
     import { invoke } from "@tauri-apps/api/core";
     import { open, save } from "@tauri-apps/plugin-dialog";
+    import { listen } from "@tauri-apps/api/event";
     import { onMount } from "svelte";
 
     attachConsole();
@@ -20,6 +21,8 @@
     let currentFilePath: string | null = $state(null);
     let fileTitle: string | null = $state(null);
     let dialogOpen = $state(false);
+    let isSaved = $state(true);
+    let isSaving = $state(false);
 
     const DIALOG_FILTER = { name: "Tonic Spreadsheet", extensions: ["tcs"] };
 
@@ -28,6 +31,23 @@
             await invoke<[string | null, string | null]>("get_file_info");
         currentFilePath = path;
         fileTitle = name;
+    }
+
+    async function commitSave() {
+        if (currentFilePath) {
+            isSaving = true;
+            await invoke("save_file", { path: currentFilePath });
+            isSaving = false;
+        } else {
+            dialogOpen = true;
+            const path = await save({ filters: [DIALOG_FILTER] });
+            dialogOpen = false;
+            if (!path) return;
+            isSaving = true;
+            await invoke("save_file", { path });
+            isSaving = false;
+        }
+        await syncFileInfo();
     }
 
     async function onMenuClick(ev: any) {
@@ -54,30 +74,34 @@
                 break;
             }
             case "file-save":
-                if (currentFilePath) {
-                    await invoke("save_file", { path: currentFilePath });
-                } else {
-                    dialogOpen = true;
-                    const path = await save({ filters: [DIALOG_FILTER] });
-                    dialogOpen = false;
-                    if (!path) return;
-                    await invoke("save_file", { path });
-                }
-                await syncFileInfo();
+                await commitSave();
                 break;
             case "file-save-as": {
                 dialogOpen = true;
                 const path = await save({ filters: [DIALOG_FILTER] });
                 dialogOpen = false;
                 if (!path) return;
+                isSaving = true;
                 await invoke("save_file", { path });
+                isSaving = false;
                 await syncFileInfo();
                 break;
             }
         }
     }
 
+    function handleKeyDown(e: KeyboardEvent) {
+        if (e.ctrlKey && e.key === "s") {
+            e.preventDefault();
+            commitSave();
+        }
+    }
+
     onMount(async () => {
+        listen<boolean>("save-status", (ev) => {
+            isSaved = ev.payload;
+        });
+
         // create new file if none is open
         await syncFileInfo();
         if (!currentFilePath) {
@@ -92,11 +116,60 @@
     });
 </script>
 
-<div class="root noselect">
+<div class="root noselect" onkeydowncapture={handleKeyDown}>
     <WillowDark>
         <div class="layout-container">
             <WindowBar>
-                <span class="file-title">{fileTitle}</span>
+                <span class="file-title">
+                    {fileTitle}
+                    {#if isSaving}
+                        <svg
+                            class="file-status save-icon spinning"
+                            viewBox="0 0 16 16"
+                            xmlns="http://www.w3.org/2000/svg"
+                            fill="none"
+                        >
+                            <g
+                                fill="#aaa"
+                                fill-rule="evenodd"
+                                clip-rule="evenodd"
+                            >
+                                <path
+                                    d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM0 8a8 8 0 1116 0A8 8 0 010 8z"
+                                    opacity=".2"
+                                />
+                                <path
+                                    d="M7.25.75A.75.75 0 018 0a8 8 0 018 8 .75.75 0 01-1.5 0A6.5 6.5 0 008 1.5a.75.75 0 01-.75-.75z"
+                                />
+                            </g>
+                        </svg>
+                    {:else if isSaved}
+                        <svg
+                            class="file-status save-icon"
+                            viewBox="0 0 60 60"
+                            xmlns="http://www.w3.org/2000/svg"
+                        >
+                            <path
+                                fill="#699f4c"
+                                fill-rule="evenodd"
+                                d="M30 0a30 30 0 110 60 30 30 0 010-60zm-16.986 36.765a3.484 3.484 0 010-4.9l1.766-1.756a3.185 3.185 0 014.574.051l3.12 3.237a1.592 1.592 0 002.311 0l15.9-16.39a3.187 3.187 0 014.6-.027L47 18.714a3.482 3.482 0 010 4.846l-21.109 21.451a3.185 3.185 0 01-4.552.03z"
+                            />
+                        </svg>
+                    {:else}
+                        <svg
+                            class="file-status save-icon"
+                            viewBox="0 0 60 60"
+                            xmlns="http://www.w3.org/2000/svg"
+                        >
+                            <path
+                                fill="#9f4c4c"
+                                fill-rule="evenodd"
+                                d="M940,510a30,30,0,1,1,30-30A30,30,0,0,1,940,510Zm15-20.047A3.408,3.408,0,0,1,955,494.77l-0.221.22a3.42,3.42,0,0,1-4.833,0l-8.764-8.755a1.71,1.71,0,0,0-2.417,0l-8.741,8.747a3.419,3.419,0,0,1-4.836,0l-0.194-.193a3.408,3.408,0,0,1,.017-4.842l8.834-8.735a1.7,1.7,0,0,0,0-2.43l-8.831-8.725a3.409,3.409,0,0,1-.018-4.844l0.193-.193a3.413,3.413,0,0,1,2.418-1c0.944,0,3.255,1.835,3.872,2.455l7.286,7.287a1.708,1.708,0,0,0,2.417,0l8.764-8.748a3.419,3.419,0,0,1,4.832,0L955,465.243a3.408,3.408,0,0,1,0,4.818l-8.727,8.737a1.7,1.7,0,0,0,0,2.407Z"
+                                transform="translate(-910 -450)"
+                            />
+                        </svg>
+                    {/if}
+                </span>
                 <MenuBar options={menu_options} onclick={onMenuClick}></MenuBar>
             </WindowBar>
 
@@ -133,15 +206,38 @@
     }
 
     .file-title {
-        min-width: 7em;
+        min-width: 10em;
         display: flex;
         align-items: center;
         justify-content: center;
+        gap: 0.5em;
         margin-left: 1em;
         margin-right: 1em;
         font-weight: 500;
         color: rgba(255, 255, 255, 0.7);
         white-space: nowrap;
+    }
+
+    .file-status {
+        width: 0.85em;
+        height: 0.85em;
+    }
+
+    .save-icon {
+        flex-shrink: 0;
+    }
+
+    .spinning {
+        animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+        from {
+            transform: rotate(0deg);
+        }
+        to {
+            transform: rotate(360deg);
+        }
     }
 
     :global(html, body) {

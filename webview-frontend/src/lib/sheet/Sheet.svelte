@@ -485,6 +485,30 @@
         });
     }
 
+    async function commitUndo() {
+        const cellIds: CellId[] = await invoke("undo_input");
+        if (cellIds.length === 0) return;
+        const minR = Math.min(...cellIds.map((c) => c.row));
+        const maxR = Math.max(...cellIds.map((c) => c.row));
+        const minC = Math.min(...cellIds.map((c) => c.col));
+        const maxC = Math.max(...cellIds.map((c) => c.col));
+        focusedRangeStart = { row: minR, col: minC };
+        focusedCell = { row: maxR, col: maxC };
+        scrollToRow(minR);
+    }
+
+    async function commitRedo() {
+        const cellIds: CellId[] = await invoke("redo_input");
+        if (cellIds.length === 0) return;
+        const minR = Math.min(...cellIds.map((c) => c.row));
+        const maxR = Math.max(...cellIds.map((c) => c.row));
+        const minC = Math.min(...cellIds.map((c) => c.col));
+        const maxC = Math.max(...cellIds.map((c) => c.col));
+        focusedRangeStart = { row: minR, col: minC };
+        focusedCell = { row: maxR, col: maxC };
+        scrollToRow(minR);
+    }
+
     // set editor input to entered value of the focused cell
     $effect(() => {
         const cell = getCell(focusedCell)!;
@@ -867,7 +891,12 @@
 
     function handleKeyDown(ev: KeyboardEvent) {
         if (ev.ctrlKey && ev.shiftKey && ev.key === "Z") {
-            gridApi?.exec("redo");
+            commitRedo();
+            return;
+        }
+
+        if (ev.ctrlKey && !ev.shiftKey && ev.key === "z") {
+            commitUndo();
             return;
         }
 
@@ -1062,7 +1091,6 @@
                     isEditing = false;
                     focusedCell = { row: nextRow, col: focusedCell.col };
                     focusedRangeStart = { row: nextRow, col: focusedCell.col };
-                    gridApi?.exec("scroll", { row: nextRow + 1 }); // SVAR expects 1-indexed
                 }
             }
             // on delete, clear value in focus or in selected range
@@ -1118,6 +1146,18 @@
     let clipWrapperEl: HTMLElement | null = null;
     let overlaysEl: HTMLElement | null = null;
     let scrollContainerEl: HTMLElement | null = null;
+
+    /** Scroll the grid so that the given 0-indexed row is visible. */
+    function scrollToRow(row: number) {
+        const el = getScrollContainer();
+        if (!el) return;
+        const top = row * sizes.rowHeight;
+        if (top < el.scrollTop) {
+            el.scrollTop = top;
+        } else if (top + sizes.rowHeight > el.scrollTop + el.clientHeight) {
+            el.scrollTop = top + sizes.rowHeight - el.clientHeight;
+        }
+    }
 
     // get the grid's scroll container element
     function getScrollContainer(): HTMLElement | null {
@@ -1239,20 +1279,16 @@
         editorInsertReferenceStart = null;
         editorInsertReferenceEnd = null;
         editorInsertReference = false;
+        gridRows = baseRows.slice(viewportStart, viewportEnd + 1);
 
         ensureColumnsFillWidth();
-        invoke("init_viewport");
+        restartPolling();
     }
 
-    onMount(() => {
-        initOverlays();
+    let pollInterval: ReturnType<typeof setInterval> | undefined;
 
-        // add more columns if window can fit more
-        ensureColumnsFillWidth();
-        const resizeObs = new ResizeObserver(() => ensureColumnsFillWidth());
-        if (gridWrapperEl) resizeObs.observe(gridWrapperEl);
-
-        let pollInterval: ReturnType<typeof setInterval>;
+    function restartPolling() {
+        if (pollInterval !== undefined) clearInterval(pollInterval);
         invoke("init_viewport").then(() => {
             pollInterval = setInterval(() => {
                 startTimer("poll_cells");
@@ -1271,10 +1307,21 @@
                 });
             }, 16);
         });
+    }
+
+    onMount(() => {
+        initOverlays();
+
+        // add more columns if window can fit more
+        ensureColumnsFillWidth();
+        const resizeObs = new ResizeObserver(() => ensureColumnsFillWidth());
+        if (gridWrapperEl) resizeObs.observe(gridWrapperEl);
+
+        restartPolling();
 
         return () => {
             resizeObs.disconnect();
-            clearInterval(pollInterval);
+            if (pollInterval !== undefined) clearInterval(pollInterval);
         };
     });
 
@@ -1321,7 +1368,6 @@
             split={{ left }}
             {sizes}
             {select}
-            undo
         />
     </ContextMenu>
     <div class="selection-overlays-clip" bind:this={clipWrapperEl}>

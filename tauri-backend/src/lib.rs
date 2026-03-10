@@ -5,7 +5,7 @@ use std::{
 };
 
 use fastnum::D256;
-use tauri::Manager;
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_log::log::{debug, info};
 
 use crate::{
@@ -22,9 +22,34 @@ mod file_api;
 mod parser;
 mod sheet;
 
+enum InputLogEntry {
+    Update {
+        id: u64,
+        cell_ids: Vec<CellId>,
+        old_user_strings: Vec<String>,
+        new_user_strings: Vec<String>,
+    },
+    Delete {
+        id: u64,
+        cell_ids: Vec<CellId>,
+        old_user_strings: Vec<String>,
+    },
+}
+
 struct TonicState {
     spreadsheet: Spreadsheet,
-    //undo_redo_log: Vec<(CellId, String)>,
+
+    input_log: Vec<InputLogEntry>,
+
+    // the index for next log entry
+    // (so the last log entry that was written is at next_input_log_position - 1)
+    next_input_log_position: usize,
+    next_log_entry_id: u64,
+
+    // The id of the last log entry at save time, or None when file is not saved.
+    // Equals Some(0) when just opened the file from disk
+    saved_log_entry_id: Option<u64>,
+
     last_viewport_buf: Vec<u8>,
     last_viewport_range: (u32, u32),
     file_name: Option<String>,
@@ -35,12 +60,105 @@ impl TonicState {
     fn new() -> Self {
         Self {
             spreadsheet: Spreadsheet::new(),
+            input_log: Vec::new(),
+            next_input_log_position: 0,
+            next_log_entry_id: 1, // zero should be already saved
+            saved_log_entry_id: None,
             last_viewport_buf: Vec::new(),
             last_viewport_range: (u32::MAX, u32::MAX),
             file_name: None,
             file_path: None,
         }
     }
+}
+
+fn emit_save_status(app: &AppHandle, state: &TonicState) {
+    let current_id = if state.next_input_log_position == 0 {
+        Some(0)
+    } else {
+        match state.input_log[state.next_input_log_position - 1] {
+            InputLogEntry::Update { id, .. } | InputLogEntry::Delete { id, .. } => Some(id),
+        }
+    };
+    let is_saved = current_id == state.saved_log_entry_id;
+    let _ = app.emit("save-status", is_saved);
+}
+
+/// Truncate any redo history and push an entry to the log.
+fn push_input_to_log(state: &mut TonicState, mut entry: InputLogEntry) {
+    state.input_log.truncate(state.next_input_log_position);
+    let id = state.next_log_entry_id;
+    state.next_log_entry_id += 1;
+
+    // set id of the new input log
+    match &mut entry {
+        InputLogEntry::Update {
+            id: ref mut eid, ..
+        } => *eid = id,
+        InputLogEntry::Delete {
+            id: ref mut eid, ..
+        } => *eid = id,
+    }
+
+    state.input_log.push(entry);
+    state.next_input_log_position = state.input_log.len();
+}
+
+/// Set user_input_raw_text for each cell and log the change.
+fn update_user_strings(
+    state: &mut MutexGuard<'_, TonicState>,
+    cell_ids: &[CellId],
+    new_strings: Vec<String>,
+) {
+    let old_strings: Vec<String> = cell_ids
+        .iter()
+        .map(|id| {
+            state
+                .spreadsheet
+                .user_input_raw_text
+                .get(id)
+                .cloned()
+                .unwrap_or_default()
+        })
+        .collect();
+    for (id, s) in cell_ids.iter().zip(new_strings.iter()) {
+        state.spreadsheet.user_input_raw_text.insert(*id, s.clone());
+    }
+    push_input_to_log(
+        state,
+        InputLogEntry::Update {
+            id: 0,
+            cell_ids: cell_ids.to_vec(),
+            old_user_strings: old_strings,
+            new_user_strings: new_strings,
+        },
+    );
+}
+
+/// Remove user_input_raw_text for each cell and log the change.
+fn remove_user_strings(state: &mut MutexGuard<'_, TonicState>, cell_ids: &[CellId]) {
+    let old_strings: Vec<String> = cell_ids
+        .iter()
+        .map(|id| {
+            state
+                .spreadsheet
+                .user_input_raw_text
+                .get(id)
+                .cloned()
+                .unwrap_or_default()
+        })
+        .collect();
+    for id in cell_ids {
+        state.spreadsheet.user_input_raw_text.remove(id);
+    }
+    push_input_to_log(
+        state,
+        InputLogEntry::Delete {
+            id: 0,
+            cell_ids: cell_ids.to_vec(),
+            old_user_strings: old_strings,
+        },
+    );
 }
 
 /// Emit a backend timing measurement to the frontend dev panel.
@@ -187,7 +305,7 @@ fn remove_cells(state: &mut MutexGuard<'_, TonicState>, cell_ids: &[CellId]) {
     debug!("Eval took: {:?}", eval_time.elapsed());
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn init_viewport(state: tauri::State<'_, Mutex<TonicState>>) {
     let mut state = state.lock().unwrap();
     state.last_viewport_buf.clear();
@@ -195,7 +313,7 @@ fn init_viewport(state: tauri::State<'_, Mutex<TonicState>>) {
 }
 
 // todo: maybe rename to "pull_cells"?
-#[tauri::command]
+#[tauri::command(async)]
 fn get_cells_in_viewport(
     state: tauri::State<'_, Mutex<TonicState>>,
     request: tauri::ipc::Request<'_>,
@@ -248,36 +366,35 @@ fn get_cells_in_viewport(
     tauri::ipc::Response::new(buf)
 }
 
-#[tauri::command]
-fn enter_input(cell_id: CellId, user_input: &str, state: tauri::State<'_, Mutex<TonicState>>) {
+#[tauri::command(async)]
+fn enter_input(
+    app: AppHandle,
+    cell_id: CellId,
+    user_input: &str,
+    state: tauri::State<'_, Mutex<TonicState>>,
+) {
     let mut state = state
         .lock()
         .expect("to able to lock spreadsheet in enter_input");
-
-    // always save user input
-    state
-        .spreadsheet
-        .user_input_raw_text
-        .insert(cell_id, user_input.to_string());
-
+    update_user_strings(&mut state, &[cell_id], vec![user_input.to_string()]);
     parse_and_insert_cells(&mut state, &[cell_id]);
+    emit_save_status(&app, &state);
 }
 
-#[tauri::command]
-fn delete_cells(state: tauri::State<'_, Mutex<TonicState>>, cells: Vec<CellId>) {
+#[tauri::command(async)]
+fn delete_cells(app: AppHandle, state: tauri::State<'_, Mutex<TonicState>>, cells: Vec<CellId>) {
     let mut state = state
         .lock()
         .expect("to able to lock spreadsheet in delete_cells");
-
-    for cell_id in &cells {
-        state.spreadsheet.user_input_raw_text.remove(cell_id);
-    }
+    remove_user_strings(&mut state, &cells);
     remove_cells(&mut state, &cells);
+    emit_save_status(&app, &state);
 }
 
-// todo: rename to clone_cells
-#[tauri::command]
+// todo: simplify and rename to clone_cells
+#[tauri::command(async)]
 fn fill_cells(
+    app: AppHandle,
     state: tauri::State<'_, Mutex<TonicState>>,
     sources: Vec<CellId>,
     dests: Vec<CellId>,
@@ -294,7 +411,8 @@ fn fill_cells(
         .lock()
         .expect("to able to lock spreadsheet in fill_cells");
 
-    let mut cells_to_parse: Vec<CellId> = Vec::with_capacity(dests.len());
+    let mut new_cell_ids: Vec<CellId> = Vec::with_capacity(dests.len());
+    let mut new_strings: Vec<String> = Vec::with_capacity(dests.len());
 
     let sheet = &state.spreadsheet.sheets[0].btree;
     let get_num = |cell: &CellId| -> Option<D256> {
@@ -367,11 +485,8 @@ fn fill_cells(
                 + row_step.unwrap_or(D256::ZERO) * dr
                 + col_step.unwrap_or(D256::ZERO) * dc
                 + cross_step.unwrap_or(D256::ZERO) * dr * dc;
-            state
-                .spreadsheet
-                .user_input_raw_text
-                .insert(dest, dest_val.to_string());
-            cells_to_parse.push(dest);
+            new_cell_ids.push(dest);
+            new_strings.push(dest_val.to_string());
             continue;
         }
 
@@ -390,35 +505,120 @@ fn fill_cells(
         } else {
             raw.clone()
         };
-        state
-            .spreadsheet
-            .user_input_raw_text
-            .insert(dest, adjusted_raw);
-        cells_to_parse.push(dest);
+        new_cell_ids.push(dest);
+        new_strings.push(adjusted_raw);
     }
 
-    parse_and_insert_cells(&mut state, &cells_to_parse);
+    update_user_strings(&mut state, &new_cell_ids, new_strings);
+    parse_and_insert_cells(&mut state, &new_cell_ids);
+    emit_save_status(&app, &state);
 }
 
-#[tauri::command]
-fn paste_values(state: tauri::State<'_, Mutex<TonicState>>, cells: Vec<(CellId, String)>) {
+#[tauri::command(async)]
+fn paste_values(
+    app: AppHandle,
+    state: tauri::State<'_, Mutex<TonicState>>,
+    cells: Vec<(CellId, String)>,
+) {
     let mut state = state.lock().expect("to able to lock state in paste_values");
 
-    let mut to_remove: Vec<CellId> = Vec::new();
-    let mut to_parse: Vec<CellId> = Vec::new();
+    // if pasted new value to a cell, then update cell's value.
+    // If pasted nothing, then remove cell
+
+    let mut ids_to_remove: Vec<CellId> = Vec::new();
+    let mut ids_to_update: Vec<CellId> = Vec::new();
+    let mut strings_to_update: Vec<String> = Vec::new();
 
     for (cell_id, text) in cells {
         if text.is_empty() {
-            state.spreadsheet.user_input_raw_text.remove(&cell_id);
-            to_remove.push(cell_id);
+            ids_to_remove.push(cell_id);
         } else {
-            state.spreadsheet.user_input_raw_text.insert(cell_id, text);
-            to_parse.push(cell_id);
+            ids_to_update.push(cell_id);
+            strings_to_update.push(text);
         }
     }
 
-    remove_cells(&mut state, &to_remove);
-    parse_and_insert_cells(&mut state, &to_parse);
+    if !ids_to_remove.is_empty() {
+        remove_user_strings(&mut state, &ids_to_remove);
+        remove_cells(&mut state, &ids_to_remove);
+    }
+    if !ids_to_update.is_empty() {
+        update_user_strings(&mut state, &ids_to_update, strings_to_update);
+        parse_and_insert_cells(&mut state, &ids_to_update);
+    }
+    emit_save_status(&app, &state);
+}
+
+// todo: undo_input and redo_input can be quite slow in theory
+// remove (or change) return value of undo_input and redo_input?
+// used by frotned to change focus after undo/redo
+
+#[tauri::command(async)]
+fn undo_input(app: AppHandle, state: tauri::State<'_, Mutex<TonicState>>) -> Vec<CellId> {
+    let undo_time = Instant::now();
+    let mut state = state.lock().unwrap();
+    if state.next_input_log_position == 0 {
+        return vec![];
+    }
+    state.next_input_log_position -= 1;
+    let idx = state.next_input_log_position;
+    let (cell_ids, old) = match &state.input_log[idx] {
+        InputLogEntry::Update {
+            cell_ids,
+            old_user_strings,
+            ..
+        }
+        | InputLogEntry::Delete {
+            cell_ids,
+            old_user_strings,
+            ..
+        } => (cell_ids.clone(), old_user_strings.clone()),
+    };
+    for (id, s) in cell_ids.iter().zip(old.into_iter()) {
+        state.spreadsheet.user_input_raw_text.insert(*id, s);
+    }
+    parse_and_insert_cells(&mut state, &cell_ids);
+    emit_save_status(&app, &state);
+    debug!("Undo took {:?}", undo_time.elapsed());
+    cell_ids
+}
+
+#[tauri::command(async)]
+fn redo_input(app: AppHandle, state: tauri::State<'_, Mutex<TonicState>>) -> Vec<CellId> {
+    let redo_time = Instant::now();
+    let mut state = state.lock().unwrap();
+    if state.next_input_log_position >= state.input_log.len() {
+        return vec![];
+    }
+    let idx = state.next_input_log_position;
+    state.next_input_log_position += 1;
+    match &state.input_log[idx] {
+        InputLogEntry::Update {
+            cell_ids,
+            new_user_strings,
+            ..
+        } => {
+            let cell_ids = cell_ids.clone();
+            let new = new_user_strings.clone();
+            for (id, s) in cell_ids.iter().zip(new.into_iter()) {
+                state.spreadsheet.user_input_raw_text.insert(*id, s);
+            }
+            parse_and_insert_cells(&mut state, &cell_ids);
+            emit_save_status(&app, &state);
+            debug!("Redo took {:?}", redo_time.elapsed());
+            cell_ids
+        }
+        InputLogEntry::Delete { cell_ids, .. } => {
+            let cell_ids = cell_ids.clone();
+            for id in &cell_ids {
+                state.spreadsheet.user_input_raw_text.remove(id);
+            }
+            remove_cells(&mut state, &cell_ids);
+            emit_save_status(&app, &state);
+            debug!("Redo took {:?}", redo_time.elapsed());
+            cell_ids
+        }
+    }
 }
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn Error + 'static>> {
@@ -432,36 +632,76 @@ fn update_file_info(state: &mut TonicState, path: &str) {
     state.file_path = Some(path.to_string());
 }
 
-#[tauri::command]
-fn save_file(state: tauri::State<'_, Mutex<TonicState>>, path: &str) -> Result<(), String> {
+#[tauri::command(async)]
+fn save_file(
+    app: AppHandle,
+    state: tauri::State<'_, Mutex<TonicState>>,
+    path: &str,
+) -> Result<(), String> {
+    let save_file_time = std::time::Instant::now();
+
+    let path = if path.ends_with(".tcs") {
+        path.to_string()
+    } else {
+        format!("{}.tcs", path)
+    };
     let mut state = state.lock().unwrap();
-    file_api::save(&state.spreadsheet, path).map_err(|e| e.to_string())?;
-    update_file_info(&mut state, path);
-    info!("Saved file: {}", path);
+    file_api::save(&state.spreadsheet, &path).map_err(|e| e.to_string())?;
+    update_file_info(&mut state, &path);
+
+    state.saved_log_entry_id = if state.next_input_log_position == 0 {
+        Some(0)
+    } else {
+        match state.input_log[state.next_input_log_position - 1] {
+            InputLogEntry::Update { id, .. } | InputLogEntry::Delete { id, .. } => Some(id),
+        }
+    };
+
+    emit_save_status(&app, &state);
+
+    info!("Saving \"{}\" took {:?}", path, save_file_time.elapsed());
     Ok(())
 }
 
-#[tauri::command]
-fn open_file(state: tauri::State<'_, Mutex<TonicState>>, path: &str) -> Result<(), String> {
+#[tauri::command(async)]
+fn open_file(
+    app: AppHandle,
+    state: tauri::State<'_, Mutex<TonicState>>,
+    path: &str,
+) -> Result<(), String> {
+    let open_file_time = std::time::Instant::now();
+
     let spreadsheet = file_api::load(path).map_err(|e| e.to_string())?;
     let mut state = state.lock().unwrap();
     state.spreadsheet = spreadsheet;
     state.last_viewport_buf.clear();
     state.last_viewport_range = (u32::MAX, u32::MAX);
+    state.input_log.clear();
+    state.next_input_log_position = 0;
+    state.next_log_entry_id = 1;
+    state.saved_log_entry_id = Some(0);
+
     update_file_info(&mut state, path);
-    info!("Opened file: {}", path);
+    emit_save_status(&app, &state);
+
+    debug!("Opening \"{}\" took {:?}", path, open_file_time.elapsed());
     Ok(())
 }
 
-#[tauri::command]
-fn new_file(state: tauri::State<'_, Mutex<TonicState>>) {
+#[tauri::command(async)]
+fn new_file(app: AppHandle, state: tauri::State<'_, Mutex<TonicState>>) {
     let mut state = state.lock().unwrap();
     state.file_name = Some("Untitled.tcv".to_string());
     state.file_path = None;
     state.spreadsheet = Spreadsheet::new();
+    state.input_log.clear();
+    state.next_input_log_position = 0;
+    state.next_log_entry_id = 1;
+    state.saved_log_entry_id = None;
+    emit_save_status(&app, &state);
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_file_info(state: tauri::State<'_, Mutex<TonicState>>) -> (Option<String>, Option<String>) {
     let state = state.lock().unwrap();
     (state.file_name.clone(), state.file_path.clone())
@@ -490,6 +730,8 @@ pub fn run() {
             open_file,
             new_file,
             get_file_info,
+            undo_input,
+            redo_input,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
