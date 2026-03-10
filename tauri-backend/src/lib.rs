@@ -1,18 +1,20 @@
 use std::{
     error::Error,
     sync::{Mutex, MutexGuard},
+    time::Instant,
 };
 
 use fastnum::D256;
 use tauri::Manager;
+use tauri_plugin_log::log::debug;
 
 use crate::{
-    engine::eval_formula,
+    engine::eval,
     parser::{
         lex_formula, lexer_errors_to_string, offset_refs, parse_formula,
         parse_formula_errors_to_string, FormulaState,
     },
-    sheet::{Cell, CellId, CellValue, Spreadsheet},
+    sheet::{create_cell_with_formula_error, Cell, CellId, CellValue, Spreadsheet},
 };
 
 mod engine;
@@ -44,13 +46,25 @@ impl TonicState {
 //     );
 // }
 
+// How backend works
+//
+// Backend exposes tarui commands to the frontend. Every command is not async.
+// Frontend polls for cells that are in the current viewport (cells currently
+// visible on screen) each 20ms or so (via get_cells_in_viewport command).
+//
+// When user modifies the spreadsheet, the main thread is blocked until the
+// backend reacts to modification (inserts values, recomputes dependencies, etc)
+//
+
 /// Encode a single cell into the binary buffer.
 /// Format: [row: u32 LE][col: u32 LE][is_error: u8][display_len: u32 LE][display][entered_len: u32 LE][entered]
 fn encode_cell(buf: &mut Vec<u8>, spreadsheet: &Spreadsheet, cell_id: CellId) {
-    let (display, is_error) = match spreadsheet.sheets[0].get(&cell_id) {
+    let (display, is_error) = match spreadsheet.sheets[0].btree.get(&cell_id) {
         Some(Cell::SingleValue(v)) => (v.to_string(), false),
-        Some(Cell::Formula { value, .. }) => (value.to_string(), false),
-        Some(Cell::FormulaError { error }) => (error.clone(), true),
+        Some(Cell::Formula {
+            value: Some(value), ..
+        }) => (value.to_string(), false),
+        Some(Cell::Formula { value: None, .. }) => (String::new(), false),
         None => (String::new(), false),
     };
     let entered_text = spreadsheet
@@ -75,6 +89,8 @@ fn parse_and_insert_cells(state: &mut MutexGuard<'_, TonicState>, cell_ids: &[Ce
     let sp = &mut state.spreadsheet;
 
     for &cell_id in cell_ids {
+        // todo: always remove cell_id from dependants
+
         let Some(user_input) = sp.user_input_raw_text.get(&cell_id) else {
             continue;
         };
@@ -82,10 +98,14 @@ fn parse_and_insert_cells(state: &mut MutexGuard<'_, TonicState>, cell_ids: &[Ce
         // if not entering formula, then just update value
         if !user_input.starts_with('=') {
             if let Ok(n) = user_input.parse::<D256>() {
-                sp.sheets[0].insert(cell_id, Cell::SingleValue(CellValue::Number(n)));
+                sp.sheets[0]
+                    .btree
+                    .insert(cell_id, Cell::SingleValue(CellValue::Number(n)));
             } else {
                 let text = user_input.clone();
-                sp.sheets[0].insert(cell_id, Cell::SingleValue(CellValue::Text(text)));
+                sp.sheets[0]
+                    .btree
+                    .insert(cell_id, Cell::SingleValue(CellValue::Text(text)));
             }
             continue;
         }
@@ -98,7 +118,9 @@ fn parse_and_insert_cells(state: &mut MutexGuard<'_, TonicState>, cell_ids: &[Ce
         // report any errors happened during lexing
         if lex_output.has_errors() {
             let msg = lexer_errors_to_string(lex_output.errors());
-            sp.sheets[0].insert(cell_id, Cell::FormulaError { error: msg });
+            sp.sheets[0]
+                .btree
+                .insert(cell_id, create_cell_with_formula_error(msg));
             continue;
         }
 
@@ -107,40 +129,50 @@ fn parse_and_insert_cells(state: &mut MutexGuard<'_, TonicState>, cell_ids: &[Ce
             continue;
         };
 
-        let mut formula_state = FormulaState {
+        let sheet = &mut sp.sheets[0];
+        let mut formula_parser_state = FormulaState {
+            cell_id,
             sheet_names: &mut sp.sheet_names,
             cell_names: &mut sp.cell_names,
             user_function_names: &mut sp.user_function_names,
+            dependencies: &mut sheet.dependencies,
+            dependents: &mut sheet.dependents,
             expr_arena: Vec::new(),
         };
-        let (parsed, parse_errs) = parse_formula(tokens, formula_text.len(), &mut formula_state);
+        let (parsed, parse_errs) =
+            parse_formula(tokens, formula_text.len(), &mut formula_parser_state);
 
         // report any errors happened during parsing formula (syntax, name not found)
         if !parse_errs.is_empty() {
             let msg = parse_formula_errors_to_string(&parse_errs);
-            sp.sheets[0].insert(cell_id, Cell::FormulaError { error: msg });
+            sp.sheets[0]
+                .btree
+                .insert(cell_id, create_cell_with_formula_error(msg));
             continue;
         }
 
         if let Some((expr, _root)) = parsed {
-            // report any evaluation errors
-            match eval_formula(&expr, sp) {
-                Ok(value) => {
-                    sp.sheets[0].insert(cell_id, Cell::Formula { expr, value });
-                }
-                Err(e) => {
-                    let msg = format!("Eval Error: {:?}", e);
-                    sp.sheets[0].insert(cell_id, Cell::FormulaError { error: msg });
-                }
-            }
+            sp.sheets[0].btree.insert(
+                cell_id,
+                Cell::Formula {
+                    expr,
+                    value: None,
+                    prev_value: None,
+                },
+            );
         }
     }
+
+    let eval_time = Instant::now();
+    eval(cell_ids, sp);
+    debug!("Eval took: {:?}", eval_time.elapsed());
 }
 
+// todo: remove in favor of parse_and_insert_cells
 /// Remove cells from sheets[0].
 fn remove_cells(state: &mut MutexGuard<'_, TonicState>, cell_ids: &[CellId]) {
     for cell_id in cell_ids {
-        state.spreadsheet.sheets[0].remove(cell_id);
+        state.spreadsheet.sheets[0].btree.remove(cell_id);
     }
 }
 
@@ -151,6 +183,7 @@ fn init_viewport(state: tauri::State<'_, Mutex<TonicState>>) {
     state.last_viewport_range = (u32::MAX, u32::MAX);
 }
 
+// todo: maybe rename to "pull_cells"?
 #[tauri::command]
 fn get_cells_in_viewport(
     state: tauri::State<'_, Mutex<TonicState>>,
@@ -173,7 +206,7 @@ fn get_cells_in_viewport(
     };
 
     let mut state = state.lock().unwrap();
-    let sheet = &state.spreadsheet.sheets[0];
+    let sheet = &state.spreadsheet.sheets[0].btree;
 
     let mut buf = Vec::new();
     let lo = CellId {
@@ -251,12 +284,12 @@ fn fill_cells(
 
     let mut cells_to_parse: Vec<CellId> = Vec::with_capacity(dests.len());
 
-    let sheet = &state.spreadsheet.sheets[0];
+    let sheet = &state.spreadsheet.sheets[0].btree;
     let get_num = |cell: &CellId| -> Option<D256> {
         match sheet.get(cell)? {
             Cell::SingleValue(CellValue::Number(n)) => Some(*n),
             Cell::Formula {
-                value: CellValue::Number(n),
+                value: Some(CellValue::Number(n)),
                 ..
             } => Some(*n),
             _ => None,

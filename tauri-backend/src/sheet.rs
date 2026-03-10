@@ -81,6 +81,8 @@ pub type SheetId = u32;
 pub type UserFuncId = u32;
 pub type ExprId = u32;
 
+// todo: figure out cell references (make ranges more ergonomic, more safe sheet resolution, etc)
+
 #[derive(Serialize, Deserialize, Eq, PartialEq, Hash, Ord, PartialOrd, Clone, Copy, Debug)]
 pub struct CellId {
     pub col: u32,
@@ -143,6 +145,7 @@ pub enum Expr {
 pub enum CellValue {
     Number(D256),
     Text(String),
+    FormulaError(String),
 }
 
 impl fmt::Display for CellValue {
@@ -150,21 +153,51 @@ impl fmt::Display for CellValue {
         match self {
             CellValue::Number(num) => write!(f, "{}", num),
             CellValue::Text(text) => write!(f, "{}", text),
+            CellValue::FormulaError(msg) => write!(f, "Error: {}", msg),
         }
+    }
+}
+
+impl CellId {
+    /// Convert to A1-style name: col 0 -> "A", 25 -> "Z", 26 -> "AA", etc. Row is 1-indexed.
+    pub fn display_name(&self) -> String {
+        let mut col = self.col;
+        let mut letters = Vec::new();
+        loop {
+            letters.push(b'A' + (col % 26) as u8);
+            if col < 26 {
+                break;
+            }
+            col = col / 26 - 1;
+        }
+        letters.reverse();
+        let col_str = unsafe { String::from_utf8_unchecked(letters) };
+        format!("{}{}", col_str, self.row + 1)
     }
 }
 
 impl fmt::Display for CellId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "(column: {}, row: {})", self.col, self.row)
+        write!(f, "{}", self.display_name())
+    }
+}
+
+pub fn create_cell_with_formula_error(msg: String) -> Cell {
+    Cell::Formula {
+        expr: Vec::new(),
+        value: Some(CellValue::FormulaError(msg)),
+        prev_value: None,
     }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Cell {
     SingleValue(CellValue),
-    Formula { expr: Vec<Expr>, value: CellValue },
-    FormulaError { error: String },
+    Formula {
+        expr: Vec<Expr>,
+        value: Option<CellValue>,
+        prev_value: Option<CellValue>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -212,8 +245,49 @@ impl fmt::Display for NameRef {
 //
 
 #[derive(Serialize, Deserialize, Debug)]
+pub enum Dependency {
+    SingleCell(SheetId, CellId),
+    Range(SheetId, CellRange),
+}
+
+impl Dependency {
+    // todo: probably can refactor for_each_cell (and Dependency) into something better
+    /// Apply function to every cell in dependency
+    pub fn for_each_cell(&self, mut f: impl FnMut(CellId)) {
+        match self {
+            Dependency::SingleCell(_, cell_id) => f(*cell_id),
+            Dependency::Range(_, range) => {
+                let min_col = range.start.col.min(range.end.col);
+                let max_col = range.start.col.max(range.end.col);
+                let min_row = range.start.row.min(range.end.row);
+                let max_row = range.start.row.max(range.end.row);
+                for col in min_col..=max_col {
+                    for row in min_row..=max_row {
+                        f(CellId { col, row });
+                    }
+                }
+            }
+        }
+    }
+}
+
+// todo: it's possible to optimize in future, replace hashmaps and remove Vec
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Sheet {
+    pub btree: BTreeMap<CellId, Cell>,
+
+    /// references (single or range) of 'key' cell
+    /// (what cells are needed to compute 'key'?)
+    pub dependencies: HashMap<CellId, Vec<Dependency>>,
+
+    /// cells that reference 'key' cell
+    /// (what cells depend on 'key'?)
+    pub dependents: HashMap<CellId, Vec<CellId>>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Spreadsheet {
-    pub sheets: Vec<BTreeMap<CellId, Cell>>,
+    pub sheets: Vec<Sheet>,
 
     pub sheet_names: HashMap<String, SheetId>,
     pub sheet_names_lookup: HashMap<SheetId, String>,
@@ -230,16 +304,19 @@ pub struct Spreadsheet {
 
 impl Spreadsheet {
     pub fn get_cell_value(&self, cell_id: &CellId, sheet_id: SheetId) -> Option<&CellValue> {
-        match self.sheets.get(sheet_id as usize)?.get(cell_id)? {
+        match self.sheets.get(sheet_id as usize)?.btree.get(cell_id)? {
             Cell::SingleValue(v) => Some(v),
-            Cell::Formula { value, .. } => Some(value),
-            Cell::FormulaError { .. } => None,
+            Cell::Formula { value, .. } => value.as_ref(),
         }
     }
 
     pub fn new() -> Self {
         Self {
-            sheets: vec![BTreeMap::new()],
+            sheets: vec![Sheet {
+                btree: BTreeMap::new(),
+                dependencies: HashMap::new(),
+                dependents: HashMap::new(),
+            }],
             sheet_names: HashMap::new(),
             sheet_names_lookup: HashMap::new(),
             cell_names: HashMap::new(),

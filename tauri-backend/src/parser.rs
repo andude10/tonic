@@ -16,7 +16,9 @@ use fastnum::D256;
 
 use std::collections::HashMap;
 
-use crate::sheet::{CellId, CellRange, Expr, ExprAtom, ExprId, NameRef, SheetId, UserFuncId};
+use crate::sheet::{
+    CellId, CellRange, Dependency, Expr, ExprAtom, ExprId, NameRef, SheetId, UserFuncId,
+};
 
 // --- Tokens ---
 
@@ -175,9 +177,12 @@ type FormulaInput<'tokens, 'src> = MappedInput<
 type FormulaOutput = ExprId;
 /// Expression arena (flat AST)
 pub struct FormulaState<'a> {
+    pub cell_id: CellId,
     pub sheet_names: &'a mut HashMap<String, SheetId>,
     pub cell_names: &'a mut HashMap<NameRef, CellId>,
     pub user_function_names: &'a mut HashMap<NameRef, UserFuncId>,
+    pub dependencies: &'a mut HashMap<CellId, Vec<Dependency>>,
+    pub dependents: &'a mut HashMap<CellId, Vec<CellId>>,
     pub expr_arena: Vec<Expr>,
 }
 
@@ -192,7 +197,56 @@ impl<'src, I: Input<'src>> Inspector<'src, I> for FormulaState<'_> {
     fn on_rewind<'parse>(&mut self, _: &input::Checkpoint<'src, 'parse, I, Self::Checkpoint>) {}
 }
 
+fn add_dependency(
+    cell_id: CellId,
+    dep: Dependency,
+    dependencies: &mut HashMap<CellId, Vec<Dependency>>,
+    dependents: &mut HashMap<CellId, Vec<CellId>>,
+) {
+    // for each cell in dependency, add currently parsed cell (cell_id) into list of dependants
+    dep.for_each_cell(|ref_cell| {
+        dependents.entry(ref_cell).or_default().push(cell_id);
+    });
+    // add dependency to dependencies of currently parsed cell
+    dependencies.entry(cell_id).or_default().push(dep);
+}
+
+fn remove_dependency(
+    cell_id: CellId,
+    dep: &Dependency,
+    dependents: &mut HashMap<CellId, Vec<CellId>>,
+) {
+    dep.for_each_cell(|ref_cell| {
+        if let Some(entries) = dependents.get_mut(&ref_cell) {
+            entries.retain(|c| *c != cell_id);
+        }
+    });
+}
+
 fn push_expr(state: &mut FormulaState, expr: Expr) -> ExprId {
+    // if expression (expr) is a reference, then add it to list of
+    // dependencies of currently parsed cell (cell_id)
+    match &expr {
+        Expr::Atom(ExprAtom::CellRef(s, c)) => {
+            add_dependency(
+                state.cell_id,
+                Dependency::SingleCell(*s, *c),
+                state.dependencies,
+                state.dependents,
+            );
+        }
+        Expr::Atom(ExprAtom::CellRange(s, r)) => {
+            add_dependency(
+                state.cell_id,
+                Dependency::Range(*s, *r),
+                state.dependencies,
+                state.dependents,
+            );
+        }
+        _ => {}
+    }
+
+    // push expression into arena
     let id = state.expr_arena.len() as ExprId;
     state.expr_arena.push(expr);
     id
@@ -343,6 +397,15 @@ pub fn parse_formula<'tokens, 'src: 'tokens>(
     src_len: usize,
     state: &mut FormulaState<'tokens>,
 ) -> (Option<(Vec<Expr>, ExprId)>, Vec<Rich<'tokens, Token<'src>>>) {
+    // clear old dependencies before parsing (push_expr will populate new ones)
+    let cell_id = state.cell_id;
+    if let Some(old_deps) = state.dependencies.get_mut(&cell_id) {
+        for dep in old_deps.iter() {
+            remove_dependency(cell_id, dep, state.dependents);
+        }
+        old_deps.clear();
+    }
+
     let eoi = SimpleSpan::new((), src_len..src_len);
     let result = create_formula_praser()
         .boxed()
@@ -392,7 +455,7 @@ fn parse_cell_at(s: &[u8], pos: usize) -> Option<(u32, u32, usize)> {
         row = row * 10 + (s[i] - b'0') as u32;
         i += 1;
     }
-    row -= 1; // 1-indexed in text → 0-indexed
+    row -= 1; // 1-indexed in text -> 0-indexed
     Some((col, row, i))
 }
 
@@ -408,6 +471,7 @@ pub fn offset_refs(formula: &str, row_off: i32, col_off: i32) -> String {
     let mut pos = 0;
 
     while pos < bytes.len() {
+        // todo: make escape logic less hidden
         // skip quoted strings
         if bytes[pos] == b'"' {
             result.push('"');
@@ -461,10 +525,14 @@ mod tests {
     /// Lex + parse a formula string, return (arena, root_id) or panic with errors.
     fn parse(src: &str, spreadsheet: &mut Spreadsheet) -> (Vec<Expr>, ExprId) {
         let tokens = lex_formula(src).into_output().expect("lexer failed");
+        let sheet = &mut spreadsheet.sheets[0];
         let mut state = FormulaState {
+            cell_id: CellId { col: 0, row: 0 },
             sheet_names: &mut spreadsheet.sheet_names,
             cell_names: &mut spreadsheet.cell_names,
             user_function_names: &mut spreadsheet.user_function_names,
+            dependencies: &mut sheet.dependencies,
+            dependents: &mut sheet.dependents,
             expr_arena: Vec::new(),
         };
         let (parsed, errs) = parse_formula(&tokens, src.len(), &mut state);
