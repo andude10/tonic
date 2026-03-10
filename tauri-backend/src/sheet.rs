@@ -299,6 +299,7 @@ pub struct Spreadsheet {
     pub user_function_names: HashMap<NameRef, UserFuncId>,
     pub user_function_names_lookup: HashMap<UserFuncId, NameRef>,
 
+    // todo: move into TonicState
     pub user_input_raw_text: HashMap<CellId, String>,
 }
 

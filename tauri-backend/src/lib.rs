@@ -6,7 +6,7 @@ use std::{
 
 use fastnum::D256;
 use tauri::Manager;
-use tauri_plugin_log::log::debug;
+use tauri_plugin_log::log::{debug, info};
 
 use crate::{
     engine::eval,
@@ -24,8 +24,11 @@ mod sheet;
 
 struct TonicState {
     spreadsheet: Spreadsheet,
+    //undo_redo_log: Vec<(CellId, String)>,
     last_viewport_buf: Vec<u8>,
     last_viewport_range: (u32, u32),
+    file_name: Option<String>,
+    file_path: Option<String>,
 }
 
 impl TonicState {
@@ -34,6 +37,8 @@ impl TonicState {
             spreadsheet: Spreadsheet::new(),
             last_viewport_buf: Vec::new(),
             last_viewport_range: (u32::MAX, u32::MAX),
+            file_name: None,
+            file_path: None,
         }
     }
 }
@@ -171,9 +176,15 @@ fn parse_and_insert_cells(state: &mut MutexGuard<'_, TonicState>, cell_ids: &[Ce
 // todo: remove in favor of parse_and_insert_cells
 /// Remove cells from sheets[0].
 fn remove_cells(state: &mut MutexGuard<'_, TonicState>, cell_ids: &[CellId]) {
+    let sp = &mut state.spreadsheet;
+
     for cell_id in cell_ids {
-        state.spreadsheet.sheets[0].btree.remove(cell_id);
+        sp.sheets[0].btree.remove(cell_id);
     }
+
+    let eval_time = Instant::now();
+    eval(cell_ids, sp);
+    debug!("Eval took: {:?}", eval_time.elapsed());
 }
 
 #[tauri::command]
@@ -264,6 +275,7 @@ fn delete_cells(state: tauri::State<'_, Mutex<TonicState>>, cells: Vec<CellId>) 
     remove_cells(&mut state, &cells);
 }
 
+// todo: rename to clone_cells
 #[tauri::command]
 fn fill_cells(
     state: tauri::State<'_, Mutex<TonicState>>,
@@ -414,6 +426,47 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn Error + 'static>> {
     Ok(())
 }
 
+fn update_file_info(state: &mut TonicState, path: &str) {
+    let p = std::path::Path::new(path);
+    state.file_name = p.file_name().map(|n| n.to_string_lossy().into_owned());
+    state.file_path = Some(path.to_string());
+}
+
+#[tauri::command]
+fn save_file(state: tauri::State<'_, Mutex<TonicState>>, path: &str) -> Result<(), String> {
+    let mut state = state.lock().unwrap();
+    file_api::save(&state.spreadsheet, path).map_err(|e| e.to_string())?;
+    update_file_info(&mut state, path);
+    info!("Saved file: {}", path);
+    Ok(())
+}
+
+#[tauri::command]
+fn open_file(state: tauri::State<'_, Mutex<TonicState>>, path: &str) -> Result<(), String> {
+    let spreadsheet = file_api::load(path).map_err(|e| e.to_string())?;
+    let mut state = state.lock().unwrap();
+    state.spreadsheet = spreadsheet;
+    state.last_viewport_buf.clear();
+    state.last_viewport_range = (u32::MAX, u32::MAX);
+    update_file_info(&mut state, path);
+    info!("Opened file: {}", path);
+    Ok(())
+}
+
+#[tauri::command]
+fn new_file(state: tauri::State<'_, Mutex<TonicState>>) {
+    let mut state = state.lock().unwrap();
+    state.file_name = Some("Untitled.tcv".to_string());
+    state.file_path = None;
+    state.spreadsheet = Spreadsheet::new();
+}
+
+#[tauri::command]
+fn get_file_info(state: tauri::State<'_, Mutex<TonicState>>) -> (Option<String>, Option<String>) {
+    let state = state.lock().unwrap();
+    (state.file_name.clone(), state.file_path.clone())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -424,6 +477,7 @@ pub fn run() {
                 ))
                 .build(),
         )
+        .plugin(tauri_plugin_dialog::init())
         .setup(setup)
         .invoke_handler(tauri::generate_handler![
             init_viewport,
@@ -431,7 +485,11 @@ pub fn run() {
             fill_cells,
             delete_cells,
             paste_values,
-            get_cells_in_viewport
+            get_cells_in_viewport,
+            save_file,
+            open_file,
+            new_file,
+            get_file_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

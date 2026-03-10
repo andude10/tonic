@@ -9,15 +9,85 @@
     import type { IApi } from "@svar-ui/svelte-grid";
     import { attachConsole } from "@tauri-apps/plugin-log";
     import { getCurrentWindow } from "@tauri-apps/api/window";
+    import { invoke } from "@tauri-apps/api/core";
+    import { open, save } from "@tauri-apps/plugin-dialog";
     import { onMount } from "svelte";
 
     attachConsole();
     trackFps();
 
-    // on start-up, window flashes white screen before rendering
-    // it is known webview issue: https://github.com/tauri-apps/tauri/issues/1564
-    // this allows to show window once everything is loaded
-    onMount(() => {
+    let sheet: Sheet;
+    let currentFilePath: string | null = $state(null);
+    let fileTitle: string | null = $state(null);
+    let dialogOpen = $state(false);
+
+    const DIALOG_FILTER = { name: "Tonic Spreadsheet", extensions: ["tcs"] };
+
+    async function syncFileInfo() {
+        const [name, path] =
+            await invoke<[string | null, string | null]>("get_file_info");
+        currentFilePath = path;
+        fileTitle = name;
+    }
+
+    async function onMenuClick(ev: any) {
+        const id = ev.action?.id;
+        if (!id) return;
+        switch (id) {
+            case "file-new":
+                await invoke("new_file");
+                await syncFileInfo();
+                sheet.onFileLoad();
+                break;
+            case "file-open": {
+                dialogOpen = true;
+                const path = await open({
+                    multiple: false,
+                    directory: false,
+                    filters: [DIALOG_FILTER],
+                });
+                dialogOpen = false;
+                if (!path) return;
+                await invoke("open_file", { path });
+                await syncFileInfo();
+                sheet.onFileLoad();
+                break;
+            }
+            case "file-save":
+                if (currentFilePath) {
+                    await invoke("save_file", { path: currentFilePath });
+                } else {
+                    dialogOpen = true;
+                    const path = await save({ filters: [DIALOG_FILTER] });
+                    dialogOpen = false;
+                    if (!path) return;
+                    await invoke("save_file", { path });
+                }
+                await syncFileInfo();
+                break;
+            case "file-save-as": {
+                dialogOpen = true;
+                const path = await save({ filters: [DIALOG_FILTER] });
+                dialogOpen = false;
+                if (!path) return;
+                await invoke("save_file", { path });
+                await syncFileInfo();
+                break;
+            }
+        }
+    }
+
+    onMount(async () => {
+        // create new file if none is open
+        await syncFileInfo();
+        if (!currentFilePath) {
+            await invoke("new_file");
+        }
+        await syncFileInfo();
+
+        // on start-up, window flashes white screen before rendering
+        // it is known webview issue: https://github.com/tauri-apps/tauri/issues/1564
+        // this allows to show window once everything is loaded
         getCurrentWindow().show();
     });
 </script>
@@ -26,10 +96,12 @@
     <WillowDark>
         <div class="layout-container">
             <WindowBar>
-                <MenuBar options={menu_options}></MenuBar>
+                <span class="file-title">{fileTitle}</span>
+                <MenuBar options={menu_options} onclick={onMenuClick}></MenuBar>
             </WindowBar>
 
-            <Sheet />
+            <Sheet bind:this={sheet} />
+            {#if dialogOpen}<div class="dialog-overlay"></div>{/if}
 
             <DevBottomPanel />
         </div>
@@ -37,6 +109,41 @@
 </div>
 
 <style>
+    /* Menu bar options */
+    :global([data-wx-menu] .wx-option) {
+        font-size: 12px !important;
+        height: 28px !important;
+        display: flex !important;
+        align-items: center !important;
+    }
+
+    /* Menu bar icons */
+    :global([data-wx-menu] .wx-icon) {
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        font-size: 14px !important;
+    }
+
+    .dialog-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        background: rgba(0, 0, 0, 0.3);
+    }
+
+    .file-title {
+        min-width: 7em;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin-left: 1em;
+        margin-right: 1em;
+        font-weight: 500;
+        color: rgba(255, 255, 255, 0.7);
+        white-space: nowrap;
+    }
+
     :global(html, body) {
         margin: 0;
         padding: 0;
@@ -85,7 +192,6 @@
     }
 
     .layout-container {
-        --wx-font-size: 12px;
         font-size: 12px;
         display: flex;
         flex-direction: column;

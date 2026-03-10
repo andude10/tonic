@@ -5,26 +5,40 @@ export const menu_options: IMenuOption[] = [
         id: "file",
         text: "File",
         data: [
-            { id: "file-new", text: "New document", icon: "wxi wxi-file" },
+            { id: "file-new", text: "New", icon: "wxi wxi-file" },
+            { id: "file-open", text: "Open...", icon: "wxi wxi-folder" },
             {
-                id: "file-export",
-                text: "Export",
+                id: "file-save",
+                text: "Save",
+                subtext: "Ctrl+S",
                 icon: "wxi wxi-download",
-                data: [
-                    { id: "export-pdf", text: "PDF" },
-                    { id: "export-txt", text: "TXT" },
-                ],
             },
-            { id: "file-print", text: "Print" },
+            {
+                id: "file-save-as",
+                text: "Save As...",
+                icon: "wxi wxi-download",
+            },
         ],
     },
     {
         id: "edit",
         text: "Edit",
         data: [
-            { id: "edit-cut", text: "Cut", icon: "wxi wxi-content-cut" },
-            { id: "edit-copy", text: "Copy", icon: "wxi wxi-content-copy" },
-            { id: "edit-paste", text: "Paste", icon: "wxi wxi-content-paste" },
+            {
+                id: "edit-cut",
+                text: "Cut",
+                icon: "wxi wxi-content-cut",
+            },
+            {
+                id: "edit-copy",
+                text: "Copy",
+                icon: "wxi wxi-content-copy",
+            },
+            {
+                id: "edit-paste",
+                text: "Paste",
+                icon: "wxi wxi-content-paste",
+            },
         ],
     },
     {

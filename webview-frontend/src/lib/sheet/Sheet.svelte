@@ -1218,6 +1218,32 @@
         repositionOverlays();
     });
 
+    export function onFileLoad() {
+        // reset grid data
+        baseRows.length = 0;
+        for (let i = 0; i < INITIAL_ROWS; i++) {
+            baseRows.push(makeRow(i, columnCount));
+        }
+
+        // reset selection and editing state
+        focusedCell = null;
+        focusedRangeStart = null;
+        hoveredCell = null;
+        isSelecting = false;
+        shiftClickedOnce = false;
+        isFilling = false;
+        fillOriginalBounds = null;
+        clonedFormulaBounds = null;
+        isEditing = false;
+        editorInput = "";
+        editorInsertReferenceStart = null;
+        editorInsertReferenceEnd = null;
+        editorInsertReference = false;
+
+        ensureColumnsFillWidth();
+        invoke("init_viewport");
+    }
+
     onMount(() => {
         initOverlays();
 
