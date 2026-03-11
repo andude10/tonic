@@ -189,11 +189,12 @@ pub fn eval(modified_cells: &[CellId], spreadsheet: &mut Spreadsheet) {
     // 2. Compute active_dependency_count: for each affected cell, count how many
     //    of its dependencies are also in the affected set
     let mut active_dep_count: HashMap<CellId, u32> = HashMap::new();
+    let mut compute_dep_count_duration = std::time::Duration::ZERO;
     for &cell_id in &affected {
-        active_dep_count.insert(
-            cell_id,
-            compute_active_dep_count(cell_id, &affected, spreadsheet),
-        );
+        let t = std::time::Instant::now();
+        let count = compute_active_dep_count(cell_id, &affected, spreadsheet);
+        compute_dep_count_duration += t.elapsed();
+        active_dep_count.insert(cell_id, count);
     }
 
     let mut dep_duration = dep_time.elapsed();
@@ -259,10 +260,10 @@ pub fn eval(modified_cells: &[CellId], spreadsheet: &mut Spreadsheet) {
                         for &dep in deps {
                             if !affected.contains(&dep) {
                                 affected.insert(dep);
-                                active_dep_count.insert(
-                                    dep,
-                                    compute_active_dep_count(dep, &affected, spreadsheet),
-                                );
+                                let t2 = std::time::Instant::now();
+                                let count = compute_active_dep_count(dep, &affected, spreadsheet);
+                                compute_dep_count_duration += t2.elapsed();
+                                active_dep_count.insert(dep, count);
                             }
                         }
                     }
@@ -286,6 +287,10 @@ pub fn eval(modified_cells: &[CellId], spreadsheet: &mut Spreadsheet) {
     debug!(
         "Eval (dependencies & dependants) took: {:.2}ms",
         dep_duration.as_secs_f64() * 1000.0
+    );
+    debug!(
+        "Eval (compute_active_dep_count) took: {:.2}ms",
+        compute_dep_count_duration.as_secs_f64() * 1000.0
     );
     debug!(
         "Eval (running expressions) took: {:.2}ms",
