@@ -6,76 +6,6 @@ use std::{
 use fastnum::D256;
 use serde::{Deserialize, Serialize};
 
-// #[macro_export]
-// macro_rules! display_cell {
-//     ($cell:expr) => {{
-//         let col_char =
-//             std::char::from_u32(65 + $cell.col).expect("Column index out of bounds (0-25)");
-//         format!("{}{}", col_char, $cell.row + 1)
-//     }};
-// }
-// #[macro_export]
-// macro_rules! display_expr_value {
-//     ($spreadsheet:expr, $expr:expr) => {{
-//         match $expr {
-//             ExprValue::Number(num) => format!("{}", num),
-//             ExprValue::Text(text) => text.clone(),
-//             ExprValue::Function(func_id) => {
-//                 format!("{}", $spreadsheet.user_functions_names_lookup[func_id])
-//             }
-//             ExprValue::CellRef(opt_sheet_id, cell_id) => match opt_sheet_id {
-//                 $crate::sheet::OptSheetId::Id(id) => format!(
-//                     "{}.{}",
-//                     $spreadsheet.sheets_names_reverse[*id as usize],
-//                     $crate::format_cell!(cell_id)
-//                 ),
-//                 $crate::sheet::OptSheetId::None => $crate::format_cell!(cell_id),
-//             },
-//             ExprValue::NamedCellRef(name_ref) => match name_ref.sheet_id {
-//                 $crate::sheet::OptSheetId::Id(id) => format!(
-//                     "{}.{}",
-//                     $spreadsheet.sheets_name_table[id as usize], name_ref.name
-//                 ),
-//                 $crate::sheet::OptSheetId::None => format!("{}", name_ref.name),
-//             },
-//             ExprValue::RelativeCellRef(opt_sheet_id, cell_id) => match opt_sheet_id {
-//                 $crate::sheet::OptSheetId::Id(id) => format!(
-//                     "{}.~{}",
-//                     $spreadsheet.sheets_name_table[*id as usize],
-//                     $crate::format_cell!(cell_id)
-//                 ),
-//                 $crate::sheet::OptSheetId::None => format!("~{}", $crate::format_cell!(cell_id)),
-//             },
-//             ExprValue::CellRange(opt_sheet_id, cell_range) => match opt_sheet_id {
-//                 $crate::sheet::OptSheetId::Id(id) => format!(
-//                     "{}.{}:{}",
-//                     $spreadsheet.sheets_name_table[*id as usize],
-//                     $crate::format_cell!(cell_range.start),
-//                     $crate::format_cell!(cell_range.end)
-//                 ),
-//                 $crate::sheet::OptSheetId::None => format!(
-//                     "{}:{}",
-//                     $crate::format_cell!(cell_range.start),
-//                     $crate::format_cell!(cell_range.end)
-//                 ),
-//             },
-//             ExprValue::RelativeCellRange(opt_sheet_id, cell_range) => match opt_sheet_id {
-//                 $crate::sheet::OptSheetId::Id(id) => format!(
-//                     "{}.~{}:{}",
-//                     $spreadsheet.sheets_name_table[*id as usize],
-//                     $crate::format_cell!(cell_range.start),
-//                     $crate::format_cell!(cell_range.end)
-//                 ),
-//                 $crate::sheet::OptSheetId::None => format!(
-//                     "~{}:{}",
-//                     $crate::format_cell!(cell_range.start),
-//                     $crate::format_cell!(cell_range.end)
-//                 ),
-//             },
-//         }
-//     }};
-// }
-
 pub type SheetId = u32;
 
 pub type UserFuncId = u32;
@@ -280,6 +210,8 @@ pub struct Sheet {
     /// (what cells are needed to compute 'key'?)
     pub dependencies: HashMap<CellId, Vec<Dependency>>,
 
+    // todo: dependants is akward: when adding range to dependencies of cell X,
+    // we need to add X as dependant to each cell in range
     /// cells that reference 'key' cell
     /// (what cells depend on 'key'?)
     pub dependents: HashMap<CellId, Vec<CellId>>,
@@ -299,8 +231,8 @@ pub struct Spreadsheet {
     pub user_function_names: HashMap<NameRef, UserFuncId>,
     pub user_function_names_lookup: HashMap<UserFuncId, NameRef>,
 
-    // todo: move into TonicState
-    pub user_input_raw_text: HashMap<CellId, String>,
+    // todo: move into TonicState?
+    pub user_strings: HashMap<CellId, String>,
 }
 
 impl Spreadsheet {
@@ -325,7 +257,7 @@ impl Spreadsheet {
             user_functions: Vec::new(),
             user_function_names: HashMap::new(),
             user_function_names_lookup: HashMap::new(),
-            user_input_raw_text: HashMap::new(),
+            user_strings: HashMap::new(),
         }
     }
 }

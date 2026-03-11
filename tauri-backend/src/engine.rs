@@ -66,38 +66,40 @@ impl ExprAtom {
 pub fn eval_formula(
     formula_exprs: &[Expr],
     spreadsheet: &Spreadsheet,
+    eval_store: &mut Vec<ExprAtom>,
 ) -> Result<CellValue, EvalError> {
-    let mut store: Vec<ExprAtom> = Vec::with_capacity(formula_exprs.len());
+    eval_store.clear();
 
     for expr in formula_exprs {
         let res = match expr {
             Expr::Atom(atom) => atom.clone(),
             Expr::Negate(id) => {
-                let n = store[*id as usize].as_number(spreadsheet)?;
+                let n = eval_store[*id as usize].as_number(spreadsheet)?;
                 ExprAtom::Number(-n)
             }
             Expr::Add(a_id, b_id) => {
-                let a = store[*a_id as usize].as_number(spreadsheet)?;
-                let b = store[*b_id as usize].as_number(spreadsheet)?;
+                let a = eval_store[*a_id as usize].as_number(spreadsheet)?;
+                let b = eval_store[*b_id as usize].as_number(spreadsheet)?;
                 ExprAtom::Number(a + b)
             }
             Expr::Subtract(a_id, b_id) => {
-                let a = store[*a_id as usize].as_number(spreadsheet)?;
-                let b = store[*b_id as usize].as_number(spreadsheet)?;
+                let a = eval_store[*a_id as usize].as_number(spreadsheet)?;
+                let b = eval_store[*b_id as usize].as_number(spreadsheet)?;
                 ExprAtom::Number(a - b)
             }
             Expr::Multiply(a_id, b_id) => {
-                let a = store[*a_id as usize].as_number(spreadsheet)?;
-                let b = store[*b_id as usize].as_number(spreadsheet)?;
+                let a = eval_store[*a_id as usize].as_number(spreadsheet)?;
+                let b = eval_store[*b_id as usize].as_number(spreadsheet)?;
                 ExprAtom::Number(a * b)
             }
             Expr::Divide(a_id, b_id) => {
-                let a = store[*a_id as usize].as_number(spreadsheet)?;
-                let b = store[*b_id as usize].as_number(spreadsheet)?;
+                let a = eval_store[*a_id as usize].as_number(spreadsheet)?;
+                let b = eval_store[*b_id as usize].as_number(spreadsheet)?;
                 ExprAtom::Number(a / b)
             }
             Expr::Sum { range_id, mut sum } => {
-                let (sheet_id, start, end) = store[*range_id as usize].as_range_normalized()?;
+                let (sheet_id, start, end) =
+                    eval_store[*range_id as usize].as_range_normalized()?;
                 let sheet = &spreadsheet.sheets[sheet_id as usize].btree;
                 // todo: remove branching?
                 for col in start.col..=end.col {
@@ -126,7 +128,8 @@ pub fn eval_formula(
                 mut sum,
                 mut count,
             } => {
-                let (sheet_id, start, end) = store[*range_id as usize].as_range_normalized()?;
+                let (sheet_id, start, end) =
+                    eval_store[*range_id as usize].as_range_normalized()?;
                 let sheet = &spreadsheet.sheets[sheet_id as usize].btree;
                 for col in start.col..=end.col {
                     let col_start = CellId {
@@ -152,10 +155,10 @@ pub fn eval_formula(
             }
             Expr::ExtrnalFunctionCall { .. } => todo!(),
         };
-        store.push(res);
+        eval_store.push(res);
     }
 
-    let value = match store.pop() {
+    let value = match eval_store.pop() {
         Some(ExprAtom::Number(n)) => CellValue::Number(n),
         Some(ExprAtom::Text(s)) => CellValue::Text(s),
         Some(ExprAtom::Boolean(b)) => CellValue::Text(b.to_string()),
@@ -191,8 +194,9 @@ pub fn eval(modified_cells: &[CellId], spreadsheet: &mut Spreadsheet) {
         );
     }
 
+    let mut eval_store: Vec<ExprAtom> = Vec::new();
+
     // 3. Wave loop: evaluate cells with no pending dependencies, propagate changes
-    //let mut wave_num = 0;
     loop {
         let wave: Vec<CellId> = affected
             .iter()
@@ -203,26 +207,6 @@ pub fn eval(modified_cells: &[CellId], spreadsheet: &mut Spreadsheet) {
         if wave.is_empty() {
             break;
         }
-
-        // print affected set of current wave
-        // wave_num += 1;
-        // debug!(
-        //     "Wave {} (count {})\n{}",
-        //     wave_num,
-        //     wave.len(),
-        //     wave.iter()
-        //         .enumerate()
-        //         .map(|(i, c)| format!(
-        //             "{:>3}. {:>4} (col: {}, row: {}) (deps: {})",
-        //             i + 1,
-        //             c,
-        //             c.col,
-        //             c.row,
-        //             active_dep_count.get(c).copied().unwrap_or(0)
-        //         ))
-        //         .collect::<Vec<_>>()
-        //         .join("\n")
-        // );
 
         for &cell_id in &wave {
             affected.remove(&cell_id);
@@ -236,7 +220,7 @@ pub fn eval(modified_cells: &[CellId], spreadsheet: &mut Spreadsheet) {
             {
                 let expr = expr.clone();
                 let prev_value = prev_value.clone();
-                let new_value = match eval_formula(&expr, spreadsheet) {
+                let new_value = match eval_formula(&expr, spreadsheet, &mut eval_store) {
                     Ok(v) => v,
                     Err(e) => CellValue::FormulaError(format!("Eval Error: {:?}", e)),
                 };

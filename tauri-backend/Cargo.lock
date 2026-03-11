@@ -4457,6 +4457,7 @@ version = "0.1.0"
 dependencies = [
  "chumsky",
  "fastnum",
+ "flate2",
  "ron",
  "serde",
  "serde_json",

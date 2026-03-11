@@ -1,21 +1,30 @@
 use crate::sheet::Spreadsheet;
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use std::fs;
-use std::io::{self, BufReader};
+use std::io::{self, Read, Write};
 use std::path::Path;
 
-/// Saves the spreadsheet to a single file in RON format.
+/// Saves the spreadsheet as gzip-compressed RON.
 pub fn save(spreadsheet: &Spreadsheet, path: &str) -> io::Result<()> {
     if let Some(parent) = Path::new(path).parent() {
         fs::create_dir_all(parent)?;
     }
-    let ron_string = ron::ser::to_string_pretty(spreadsheet, ron::ser::PrettyConfig::default())
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-    fs::write(path, ron_string)
+    let ron_bytes = ron::ser::to_string_pretty(spreadsheet, ron::ser::PrettyConfig::default())
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+        .into_bytes();
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    encoder.write_all(&ron_bytes)?;
+    let compressed = encoder.finish()?;
+    fs::write(path, compressed)
 }
 
-/// Loads a spreadsheet from a single RON file.
+/// Loads a spreadsheet from a gzip-compressed RON file.
 pub fn load(path: &str) -> io::Result<Spreadsheet> {
     let file = fs::File::open(path)?;
-    let reader = BufReader::new(file);
-    ron::de::from_reader(reader).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    let mut decoder = GzDecoder::new(file);
+    let mut decompressed = Vec::new();
+    decoder.read_to_end(&mut decompressed)?;
+    ron::de::from_bytes(&decompressed).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
 }

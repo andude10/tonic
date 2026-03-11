@@ -6,7 +6,7 @@ use std::{
 
 use fastnum::D256;
 use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_log::log::{debug, info};
+use tauri_plugin_log::log::{debug, error, info};
 
 use crate::{
     engine::eval,
@@ -21,6 +21,7 @@ mod engine;
 mod file_api;
 mod parser;
 mod sheet;
+mod sheet_store;
 
 enum InputLogEntry {
     Update {
@@ -115,14 +116,14 @@ fn update_user_strings(
         .map(|id| {
             state
                 .spreadsheet
-                .user_input_raw_text
+                .user_strings
                 .get(id)
                 .cloned()
                 .unwrap_or_default()
         })
         .collect();
     for (id, s) in cell_ids.iter().zip(new_strings.iter()) {
-        state.spreadsheet.user_input_raw_text.insert(*id, s.clone());
+        state.spreadsheet.user_strings.insert(*id, s.clone());
     }
     push_input_to_log(
         state,
@@ -142,14 +143,14 @@ fn remove_user_strings(state: &mut MutexGuard<'_, TonicState>, cell_ids: &[CellI
         .map(|id| {
             state
                 .spreadsheet
-                .user_input_raw_text
+                .user_strings
                 .get(id)
                 .cloned()
                 .unwrap_or_default()
         })
         .collect();
     for id in cell_ids {
-        state.spreadsheet.user_input_raw_text.remove(id);
+        state.spreadsheet.user_strings.remove(id);
     }
     push_input_to_log(
         state,
@@ -191,7 +192,7 @@ fn encode_cell(buf: &mut Vec<u8>, spreadsheet: &Spreadsheet, cell_id: CellId) {
         None => (String::new(), false),
     };
     let entered_text = spreadsheet
-        .user_input_raw_text
+        .user_strings
         .get(&cell_id)
         .map(|s| s.as_bytes())
         .unwrap_or(b"");
@@ -214,7 +215,7 @@ fn parse_and_insert_cells(state: &mut MutexGuard<'_, TonicState>, cell_ids: &[Ce
     for &cell_id in cell_ids {
         // todo: always remove cell_id from dependants
 
-        let Some(user_input) = sp.user_input_raw_text.get(&cell_id) else {
+        let Some(user_input) = sp.user_strings.get(&cell_id) else {
             continue;
         };
 
@@ -418,10 +419,6 @@ fn fill_cells(
     let get_num = |cell: &CellId| -> Option<D256> {
         match sheet.get(cell)? {
             Cell::SingleValue(CellValue::Number(n)) => Some(*n),
-            Cell::Formula {
-                value: Some(CellValue::Number(n)),
-                ..
-            } => Some(*n),
             _ => None,
         }
     };
@@ -496,7 +493,7 @@ fn fill_cells(
         // offset all refs in the raw text
         let raw = state
             .spreadsheet
-            .user_input_raw_text
+            .user_strings
             .get(&source)
             .cloned()
             .unwrap_or_default();
@@ -575,7 +572,7 @@ fn undo_input(app: AppHandle, state: tauri::State<'_, Mutex<TonicState>>) -> Vec
         } => (cell_ids.clone(), old_user_strings.clone()),
     };
     for (id, s) in cell_ids.iter().zip(old.into_iter()) {
-        state.spreadsheet.user_input_raw_text.insert(*id, s);
+        state.spreadsheet.user_strings.insert(*id, s);
     }
     parse_and_insert_cells(&mut state, &cell_ids);
     emit_save_status(&app, &state);
@@ -601,7 +598,7 @@ fn redo_input(app: AppHandle, state: tauri::State<'_, Mutex<TonicState>>) -> Vec
             let cell_ids = cell_ids.clone();
             let new = new_user_strings.clone();
             for (id, s) in cell_ids.iter().zip(new.into_iter()) {
-                state.spreadsheet.user_input_raw_text.insert(*id, s);
+                state.spreadsheet.user_strings.insert(*id, s);
             }
             parse_and_insert_cells(&mut state, &cell_ids);
             emit_save_status(&app, &state);
@@ -611,7 +608,7 @@ fn redo_input(app: AppHandle, state: tauri::State<'_, Mutex<TonicState>>) -> Vec
         InputLogEntry::Delete { cell_ids, .. } => {
             let cell_ids = cell_ids.clone();
             for id in &cell_ids {
-                state.spreadsheet.user_input_raw_text.remove(id);
+                state.spreadsheet.user_strings.remove(id);
             }
             remove_cells(&mut state, &cell_ids);
             emit_save_status(&app, &state);
@@ -646,7 +643,10 @@ fn save_file(
         format!("{}.tcs", path)
     };
     let mut state = state.lock().unwrap();
-    file_api::save(&state.spreadsheet, &path).map_err(|e| e.to_string())?;
+    if let Err(e) = file_api::save(&state.spreadsheet, &path) {
+        error!("Failed to save file '{}': {}", path, e);
+        return Err(e.to_string());
+    }
     update_file_info(&mut state, &path);
 
     state.saved_log_entry_id = if state.next_input_log_position == 0 {
@@ -671,7 +671,10 @@ fn open_file(
 ) -> Result<(), String> {
     let open_file_time = std::time::Instant::now();
 
-    let spreadsheet = file_api::load(path).map_err(|e| e.to_string())?;
+    let spreadsheet = file_api::load(path).map_err(|e| {
+        error!("Failed to open file '{}': {}", path, e);
+        e.to_string()
+    })?;
     let mut state = state.lock().unwrap();
     state.spreadsheet = spreadsheet;
     state.last_viewport_buf.clear();

@@ -33,21 +33,26 @@
         fileTitle = name;
     }
 
+    async function commitSaveAs() {
+        dialogOpen = true;
+        const path = await save({ filters: [DIALOG_FILTER] });
+        dialogOpen = false;
+        if (!path) return;
+        isSaving = true;
+        await invoke("save_file", { path });
+        isSaving = false;
+        await syncFileInfo();
+    }
+
     async function commitSave() {
         if (currentFilePath) {
             isSaving = true;
             await invoke("save_file", { path: currentFilePath });
             isSaving = false;
+            await syncFileInfo();
         } else {
-            dialogOpen = true;
-            const path = await save({ filters: [DIALOG_FILTER] });
-            dialogOpen = false;
-            if (!path) return;
-            isSaving = true;
-            await invoke("save_file", { path });
-            isSaving = false;
+            await commitSaveAs();
         }
-        await syncFileInfo();
     }
 
     async function onMenuClick(ev: any) {
@@ -76,22 +81,17 @@
             case "file-save":
                 await commitSave();
                 break;
-            case "file-save-as": {
-                dialogOpen = true;
-                const path = await save({ filters: [DIALOG_FILTER] });
-                dialogOpen = false;
-                if (!path) return;
-                isSaving = true;
-                await invoke("save_file", { path });
-                isSaving = false;
-                await syncFileInfo();
+            case "file-save-as":
+                await commitSaveAs();
                 break;
-            }
         }
     }
 
     function handleKeyDown(e: KeyboardEvent) {
-        if (e.ctrlKey && e.key === "s") {
+        if (e.ctrlKey && e.shiftKey && e.key === "S") {
+            e.preventDefault();
+            commitSaveAs();
+        } else if (e.ctrlKey && e.key === "s") {
             e.preventDefault();
             commitSave();
         }
@@ -149,6 +149,7 @@
                             viewBox="0 0 60 60"
                             xmlns="http://www.w3.org/2000/svg"
                         >
+                            <title>All changes are saved</title>
                             <path
                                 fill="#699f4c"
                                 fill-rule="evenodd"
@@ -161,6 +162,7 @@
                             viewBox="0 0 60 60"
                             xmlns="http://www.w3.org/2000/svg"
                         >
+                            <title>Changes are not saved</title>
                             <path
                                 fill="#9f4c4c"
                                 fill-rule="evenodd"
