@@ -635,8 +635,6 @@ fn save_file(
     state: tauri::State<'_, Mutex<TonicState>>,
     path: &str,
 ) -> Result<(), String> {
-    let save_file_time = std::time::Instant::now();
-
     let path = if path.ends_with(".tcs") {
         path.to_string()
     } else {
@@ -648,7 +646,6 @@ fn save_file(
         return Err(e.to_string());
     }
     update_file_info(&mut state, &path);
-
     state.saved_log_entry_id = if state.next_input_log_position == 0 {
         Some(0)
     } else {
@@ -656,10 +653,7 @@ fn save_file(
             InputLogEntry::Update { id, .. } | InputLogEntry::Delete { id, .. } => Some(id),
         }
     };
-
     emit_save_status(&app, &state);
-
-    info!("Saving \"{}\" took {:?}", path, save_file_time.elapsed());
     Ok(())
 }
 
@@ -669,8 +663,6 @@ fn open_file(
     state: tauri::State<'_, Mutex<TonicState>>,
     path: &str,
 ) -> Result<(), String> {
-    let open_file_time = std::time::Instant::now();
-
     let spreadsheet = file_api::load(path).map_err(|e| {
         error!("Failed to open file '{}': {}", path, e);
         e.to_string()
@@ -683,11 +675,8 @@ fn open_file(
     state.next_input_log_position = 0;
     state.next_log_entry_id = 1;
     state.saved_log_entry_id = Some(0);
-
     update_file_info(&mut state, path);
     emit_save_status(&app, &state);
-
-    debug!("Opening \"{}\" took {:?}", path, open_file_time.elapsed());
     Ok(())
 }
 

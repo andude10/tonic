@@ -171,6 +171,8 @@ pub fn eval_formula(
 
 /// Recalculate all formulas affected by modified cells, propagating in waves.
 pub fn eval(modified_cells: &[CellId], spreadsheet: &mut Spreadsheet) {
+    let dep_time = std::time::Instant::now();
+
     let sheet = &spreadsheet.sheets[0];
 
     // 1. Build affected set: modified cells + their direct dependents
@@ -194,10 +196,15 @@ pub fn eval(modified_cells: &[CellId], spreadsheet: &mut Spreadsheet) {
         );
     }
 
+    let mut dep_duration = dep_time.elapsed();
+    let mut eval_duration = std::time::Duration::ZERO;
+
     let mut eval_store: Vec<ExprAtom> = Vec::new();
 
     // 3. Wave loop: evaluate cells with no pending dependencies, propagate changes
     loop {
+        let t = std::time::Instant::now();
+
         let wave: Vec<CellId> = affected
             .iter()
             .filter(|c| active_dep_count.get(c).copied().unwrap_or(0) == 0)
@@ -205,8 +212,11 @@ pub fn eval(modified_cells: &[CellId], spreadsheet: &mut Spreadsheet) {
             .collect();
 
         if wave.is_empty() {
+            dep_duration += t.elapsed();
             break;
         }
+
+        dep_duration += t.elapsed();
 
         for &cell_id in &wave {
             affected.remove(&cell_id);
@@ -220,10 +230,14 @@ pub fn eval(modified_cells: &[CellId], spreadsheet: &mut Spreadsheet) {
             {
                 let expr = expr.clone();
                 let prev_value = prev_value.clone();
+
+                let t = std::time::Instant::now();
                 let new_value = match eval_formula(&expr, spreadsheet, &mut eval_store) {
                     Ok(v) => v,
                     Err(e) => CellValue::FormulaError(format!("Eval Error: {:?}", e)),
                 };
+                eval_duration += t.elapsed();
+
                 let value_changed = match &prev_value {
                     Some(pv) => !cell_values_equal(pv, &new_value),
                     None => true,
@@ -240,6 +254,7 @@ pub fn eval(modified_cells: &[CellId], spreadsheet: &mut Spreadsheet) {
 
                 // if value changed, add dependents into affected set
                 if value_changed {
+                    let t = std::time::Instant::now();
                     if let Some(deps) = spreadsheet.sheets[0].dependents.get(&cell_id) {
                         for &dep in deps {
                             if !affected.contains(&dep) {
@@ -251,10 +266,12 @@ pub fn eval(modified_cells: &[CellId], spreadsheet: &mut Spreadsheet) {
                             }
                         }
                     }
+                    dep_duration += t.elapsed();
                 }
             }
 
             // decrement active_dep_count for dependents still in the affected set
+            let t = std::time::Instant::now();
             if let Some(deps) = spreadsheet.sheets[0].dependents.get(&cell_id) {
                 for &dep in deps {
                     if let Some(count) = active_dep_count.get_mut(&dep) {
@@ -262,8 +279,18 @@ pub fn eval(modified_cells: &[CellId], spreadsheet: &mut Spreadsheet) {
                     }
                 }
             }
+            dep_duration += t.elapsed();
         }
     }
+
+    debug!(
+        "Eval (dependencies & dependants) took: {:.2}ms",
+        dep_duration.as_secs_f64() * 1000.0
+    );
+    debug!(
+        "Eval (running expressions) took: {:.2}ms",
+        eval_duration.as_secs_f64() * 1000.0
+    );
 }
 
 fn compute_active_dep_count(
