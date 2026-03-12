@@ -76,7 +76,11 @@
     const textDecoder = new TextDecoder();
     const EMPTY_BODY = new Uint8Array();
 
+    // todo: remove, lazy hack: needed to check if backend removed any cells
+    let prevCells: Set<string> = new Set();
+
     function decodeCells(bytes: Uint8Array, view: DataView) {
+        const currentCells: Set<string> = new Set();
         let offset = 0;
         const len = bytes.byteLength;
         while (offset < len) {
@@ -95,6 +99,7 @@
             const enteredStart = offset;
             offset += enteredLen;
 
+            currentCells.add(`${row},${col}`);
             const gridRow = gridApi?.getRow(row + 1);
             if (!gridRow) continue;
             const cell = gridRow[columnIndexToLetter(col)];
@@ -115,6 +120,18 @@
             if (cell.enteredText !== enteredText)
                 cell.enteredText = enteredText;
         }
+
+        for (const key of prevCells) {
+            if (currentCells.has(key)) continue;
+            const [r, c] = key.split(",");
+            const gridRow = gridApi?.getRow(Number(r) + 1);
+            if (!gridRow) continue;
+            const cell = gridRow[columnIndexToLetter(Number(c))];
+            if (!cell || typeof cell !== "object") continue;
+            cell.computedValue = "";
+            cell.enteredText = "";
+        }
+        prevCells = currentCells;
     }
 
     // todo: it's gonna be non trivial refactor when introducing named cells

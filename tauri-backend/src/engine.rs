@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, VecDeque};
 
 use fastnum::D256;
 use tauri_plugin_log::log::debug;
@@ -175,113 +175,85 @@ pub fn eval(modified_cells: &[CellId], spreadsheet: &mut Spreadsheet) {
 
     let sheet = &spreadsheet.sheets[0];
 
-    // 1. Build affected set: modified cells + their direct dependents
-    let mut affected: HashSet<CellId> = HashSet::new();
-    for &cell_id in modified_cells {
-        affected.insert(cell_id);
+    // 1. Collect all transitive dependents of modified cells
+    let mut pending: HashMap<CellId, u32> = HashMap::new();
+    let mut stack: Vec<CellId> = modified_cells.to_vec();
+    while let Some(cell_id) = stack.pop() {
+        if pending.contains_key(&cell_id) {
+            continue;
+        }
+        pending.insert(cell_id, 0);
+        if let Some(deps) = sheet.dependents.get(&cell_id) {
+            stack.extend(deps);
+        }
+    }
+
+    // 2. Count active deps by walking reverse edges
+    let affected_keys: Vec<CellId> = pending.keys().copied().collect();
+    for &cell_id in &affected_keys {
         if let Some(deps) = sheet.dependents.get(&cell_id) {
             for &dep in deps {
-                affected.insert(dep);
+                if let Some(count) = pending.get_mut(&dep) {
+                    *count += 1;
+                }
             }
         }
     }
 
-    // 2. Compute active_dependency_count: for each affected cell, count how many
-    //    of its dependencies are also in the affected set
-    let mut active_dep_count: HashMap<CellId, u32> = HashMap::new();
-    let mut compute_dep_count_duration = std::time::Duration::ZERO;
-    for &cell_id in &affected {
-        let t = std::time::Instant::now();
-        let count = compute_active_dep_count(cell_id, &affected, spreadsheet);
-        compute_dep_count_duration += t.elapsed();
-        active_dep_count.insert(cell_id, count);
-    }
+    // 3. Seed ready queue with cells that have no pending dependencies
+    let mut ready: VecDeque<CellId> = pending
+        .iter()
+        .filter(|(_, &c)| c == 0)
+        .map(|(&id, _)| id)
+        .collect();
 
     let mut dep_duration = dep_time.elapsed();
     let mut eval_duration = std::time::Duration::ZERO;
-
     let mut eval_store: Vec<ExprAtom> = Vec::new();
 
-    // 3. Wave loop: evaluate cells with no pending dependencies, propagate changes
-    loop {
-        let t = std::time::Instant::now();
+    // 4. Process ready cells, decrement dependents, enqueue newly ready
+    while let Some(cell_id) = ready.pop_front() {
+        pending.remove(&cell_id);
 
-        let wave: Vec<CellId> = affected
-            .iter()
-            .filter(|c| active_dep_count.get(c).copied().unwrap_or(0) == 0)
-            .copied()
-            .collect();
+        if let Some(Cell::Formula {
+            expr,
+            value: prev_value,
+            ..
+        }) = spreadsheet.sheets[0].btree.get(&cell_id)
+        {
+            let expr = expr.clone();
+            let prev_value = prev_value.clone();
 
-        if wave.is_empty() {
-            dep_duration += t.elapsed();
-            break;
-        }
-
-        dep_duration += t.elapsed();
-
-        for &cell_id in &wave {
-            affected.remove(&cell_id);
-
-            // evaluate formula cells (plain values are already updated by caller)
-            if let Some(Cell::Formula {
-                expr,
-                value: prev_value,
-                ..
-            }) = spreadsheet.sheets[0].btree.get(&cell_id)
-            {
-                let expr = expr.clone();
-                let prev_value = prev_value.clone();
-
-                let t = std::time::Instant::now();
-                let new_value = match eval_formula(&expr, spreadsheet, &mut eval_store) {
-                    Ok(v) => v,
-                    Err(e) => CellValue::FormulaError(format!("Eval Error: {:?}", e)),
-                };
-                eval_duration += t.elapsed();
-
-                let value_changed = match &prev_value {
-                    Some(pv) => !cell_values_equal(pv, &new_value),
-                    None => true,
-                };
-
-                spreadsheet.sheets[0].btree.insert(
-                    cell_id,
-                    Cell::Formula {
-                        expr,
-                        value: Some(new_value),
-                        prev_value,
-                    },
-                );
-
-                // if value changed, add dependents into affected set
-                if value_changed {
-                    let t = std::time::Instant::now();
-                    if let Some(deps) = spreadsheet.sheets[0].dependents.get(&cell_id) {
-                        for &dep in deps {
-                            if !affected.contains(&dep) {
-                                affected.insert(dep);
-                                let t2 = std::time::Instant::now();
-                                let count = compute_active_dep_count(dep, &affected, spreadsheet);
-                                compute_dep_count_duration += t2.elapsed();
-                                active_dep_count.insert(dep, count);
-                            }
-                        }
-                    }
-                    dep_duration += t.elapsed();
-                }
-            }
-
-            // decrement active_dep_count for dependents still in the affected set
             let t = std::time::Instant::now();
-            if let Some(deps) = spreadsheet.sheets[0].dependents.get(&cell_id) {
-                for &dep in deps {
-                    if let Some(count) = active_dep_count.get_mut(&dep) {
-                        *count = count.saturating_sub(1);
+            let new_value = match eval_formula(&expr, spreadsheet, &mut eval_store) {
+                Ok(v) => v,
+                Err(e) => CellValue::FormulaError(format!("Eval Error: {:?}", e)),
+            };
+            eval_duration += t.elapsed();
+
+            spreadsheet.sheets[0].btree.insert(
+                cell_id,
+                Cell::Formula {
+                    expr,
+                    value: Some(new_value),
+                    prev_value,
+                },
+            );
+        }
+
+        // decrement dependents still pending, enqueue if ready
+        let t = std::time::Instant::now();
+        if let Some(deps) = spreadsheet.sheets[0].dependents.get(&cell_id) {
+            for &dep in deps {
+                if let Some(count) = pending.get_mut(&dep) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        ready.push_back(dep);
                     }
                 }
             }
-            dep_duration += t.elapsed();
         }
+        dep_duration += t.elapsed();
     }
 
     debug!(
@@ -289,41 +261,7 @@ pub fn eval(modified_cells: &[CellId], spreadsheet: &mut Spreadsheet) {
         dep_duration.as_secs_f64() * 1000.0
     );
     debug!(
-        "Eval (compute_active_dep_count) took: {:.2}ms",
-        compute_dep_count_duration.as_secs_f64() * 1000.0
-    );
-    debug!(
         "Eval (running expressions) took: {:.2}ms",
         eval_duration.as_secs_f64() * 1000.0
     );
-}
-
-fn compute_active_dep_count(
-    cell_id: CellId,
-    affected: &HashSet<CellId>,
-    spreadsheet: &Spreadsheet,
-) -> u32 {
-    let Some(deps) = spreadsheet.sheets[0].dependencies.get(&cell_id) else {
-        return 0;
-    };
-    deps.iter()
-        .map(|dep| {
-            let mut c = 0u32;
-            dep.for_each_cell(|ref_cell| {
-                if affected.contains(&ref_cell) {
-                    c += 1;
-                }
-            });
-            c
-        })
-        .sum()
-}
-
-fn cell_values_equal(a: &CellValue, b: &CellValue) -> bool {
-    match (a, b) {
-        (CellValue::Number(a), CellValue::Number(b)) => a == b,
-        (CellValue::Text(a), CellValue::Text(b)) => a == b,
-        (CellValue::FormulaError(a), CellValue::FormulaError(b)) => a == b,
-        _ => false,
-    }
 }
