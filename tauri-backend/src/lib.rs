@@ -21,7 +21,12 @@ mod engine;
 mod file_api;
 mod parser;
 mod sheet;
-mod sheet_store;
+mod storage {
+    mod grid;
+    mod name_resolution;
+    mod stable_vec;
+    mod types;
+}
 
 enum InputLogEntry {
     Update {
