@@ -1,4 +1,4 @@
-use crate::sheet::Spreadsheet;
+use crate::storage::types::Spreadsheet;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;

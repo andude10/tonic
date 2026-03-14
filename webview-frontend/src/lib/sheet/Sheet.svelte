@@ -7,6 +7,7 @@
         setSheetSharedState,
         type CellData,
         type CellId,
+        type ChangeBounds,
         type SheetRow,
         type UICell,
     } from "$lib/sheet/shared";
@@ -70,23 +71,43 @@
 
     // -- backend (tauri) communication setup --
 
-    let viewportStart = 0;
-    let viewportEnd = 0;
+    let viewportRowStart = 0;
+    let viewportRowEnd = 0;
+    let viewportColumnStart = 0;
+    let viewportColumnEnd = 25;
 
     const textDecoder = new TextDecoder();
     const EMPTY_BODY = new Uint8Array();
 
-    // todo: remove, lazy hack: needed to check if backend removed any cells
-    let prevCells: Set<string> = new Set();
+    /** Decode a single editor value from raw bytes */
+    function decodeEditorValue(bytes: Uint8Array): string {
+        return textDecoder.decode(bytes);
+    }
+
+    /** Decode multiple editor values from backend response: [count: u32][len: u32][bytes]... */
+    function decodeEditorValues(bytes: Uint8Array, view: DataView): string[] {
+        const values: string[] = [];
+        let offset = 0;
+        const count = view.getUint32(offset, true);
+        offset += 4;
+        for (let i = 0; i < count; i++) {
+            const len = view.getUint32(offset, true);
+            offset += 4;
+            values.push(
+                textDecoder.decode(bytes.subarray(offset, offset + len)),
+            );
+            offset += len;
+        }
+        return values;
+    }
 
     function decodeCells(bytes: Uint8Array, view: DataView) {
-        const currentCells: Set<string> = new Set();
         let offset = 0;
         const len = bytes.byteLength;
         while (offset < len) {
             const row = view.getUint32(offset, true);
             const col = view.getUint32(offset + 4, true);
-            // const isError = bytes[offset + 8];
+            const isFormula = bytes[offset + 8] !== 0;
             offset += 9;
 
             const displayLen = view.getUint32(offset, true);
@@ -94,12 +115,6 @@
             const displayStart = offset;
             offset += displayLen;
 
-            const enteredLen = view.getUint32(offset, true);
-            offset += 4;
-            const enteredStart = offset;
-            offset += enteredLen;
-
-            currentCells.add(`${row},${col}`);
             const gridRow = gridApi?.getRow(row + 1);
             if (!gridRow) continue;
             const cell = gridRow[columnIndexToLetter(col)];
@@ -110,28 +125,10 @@
                       bytes.subarray(displayStart, displayStart + displayLen),
                   )
                 : "";
-            const enteredText = enteredLen
-                ? textDecoder.decode(
-                      bytes.subarray(enteredStart, enteredStart + enteredLen),
-                  )
-                : "";
 
             if (cell.computedValue !== display) cell.computedValue = display;
-            if (cell.enteredText !== enteredText)
-                cell.enteredText = enteredText;
+            if (cell.isFormula !== isFormula) cell.isFormula = isFormula;
         }
-
-        for (const key of prevCells) {
-            if (currentCells.has(key)) continue;
-            const [r, c] = key.split(",");
-            const gridRow = gridApi?.getRow(Number(r) + 1);
-            if (!gridRow) continue;
-            const cell = gridRow[columnIndexToLetter(Number(c))];
-            if (!cell || typeof cell !== "object") continue;
-            cell.computedValue = "";
-            cell.enteredText = "";
-        }
-        prevCells = currentCells;
     }
 
     // todo: it's gonna be non trivial refactor when introducing named cells
@@ -160,7 +157,7 @@
         for (let j = 0; j < colCount; j++) {
             row[columnIndexToLetter(j)] = {
                 computedValue: "",
-                enteredText: "",
+                isFormula: false,
             };
         }
         return row;
@@ -214,19 +211,30 @@
                 resize: true,
             });
             for (const row of baseRows) {
-                row[id] = { computedValue: "", enteredText: "" };
+                row[id] = { computedValue: "", isFormula: false };
             }
         }
         gridColumns = [...gridColumns, ...newCols];
         columnCount = newCount;
     }
 
-    /** Ensure columns fill the visible width plus a buffer. */
+    /** Ensure columns fill the visible width plus a buffer, and update visible column bounds. */
     function ensureColumnsFillWidth() {
         gridWrapperEl ??= document.querySelector<HTMLElement>(".grid-wrapper");
         if (!gridWrapperEl) return;
         const needed = Math.ceil(gridWrapperEl.clientWidth / COL_WIDTH) + 5;
         if (needed > columnCount) expandColumns(needed);
+        updateVisibleColumns();
+    }
+
+    function updateVisibleColumns() {
+        const scroller = getScrollContainer();
+        if (!scroller) return;
+        viewportColumnStart = Math.floor(scroller.scrollLeft / COL_WIDTH);
+        viewportColumnEnd = Math.min(
+            Math.ceil((scroller.scrollLeft + scroller.clientWidth) / COL_WIDTH),
+            columnCount - 1,
+        );
     }
 
     let gridApi: IApi | null = $state(null);
@@ -392,11 +400,11 @@
         });
     });
 
-    // set editorInput to the enteredText of focused cell
+    // set editorInput to the computedValue of focused cell
     $effect(() => {
         let cell = getCell(focusedCell);
         if (cell) {
-            editorInput = cell.enteredText;
+            editorInput = cell.computedValue;
         }
     });
 
@@ -460,11 +468,10 @@
         if (!focusedCell) return;
         const cell = getCell(focusedCell);
         if (!cell) return;
-        if (editorInput == cell.enteredText) return;
-        cell.enteredText = editorInput;
+        if (editorInput == cell.computedValue) return;
         invoke("enter_input", {
             cellId: focusedCell,
-            userInput: cell.enteredText,
+            userInput: editorInput,
         });
     }
 
@@ -473,8 +480,6 @@
         for (const cellId of cellIds) {
             const cell = getCell(cellId);
             if (!cell) continue;
-            cell.enteredText = "";
-            cell.computedValue = "";
             if (
                 focusedCell &&
                 focusedCell.row === cellId.row &&
@@ -503,63 +508,83 @@
     }
 
     async function commitUndo() {
-        const cellIds: CellId[] = await invoke("undo_input");
-        if (cellIds.length === 0) return;
-        const minR = Math.min(...cellIds.map((c) => c.row));
-        const maxR = Math.max(...cellIds.map((c) => c.row));
-        const minC = Math.min(...cellIds.map((c) => c.col));
-        const maxC = Math.max(...cellIds.map((c) => c.col));
-        focusedRangeStart = { row: minR, col: minC };
-        focusedCell = { row: maxR, col: maxC };
-        scrollToRow(minR);
+        const bounds: ChangeBounds | null = await invoke("undo_input");
+        if (!bounds) return;
+        focusedRangeStart = { row: bounds.min_row, col: bounds.min_col };
+        focusedCell = { row: bounds.max_row, col: bounds.max_col };
+        scrollToRow(bounds.min_row);
     }
 
     async function commitRedo() {
-        const cellIds: CellId[] = await invoke("redo_input");
-        if (cellIds.length === 0) return;
-        const minR = Math.min(...cellIds.map((c) => c.row));
-        const maxR = Math.max(...cellIds.map((c) => c.row));
-        const minC = Math.min(...cellIds.map((c) => c.col));
-        const maxC = Math.max(...cellIds.map((c) => c.col));
-        focusedRangeStart = { row: minR, col: minC };
-        focusedCell = { row: maxR, col: maxC };
-        scrollToRow(minR);
+        const bounds: ChangeBounds | null = await invoke("redo_input");
+        if (!bounds) return;
+        focusedRangeStart = { row: bounds.min_row, col: bounds.min_col };
+        focusedCell = { row: bounds.max_row, col: bounds.max_col };
+        scrollToRow(bounds.min_row);
     }
 
     // set editor input to entered value of the focused cell
     $effect(() => {
-        const cell = getCell(focusedCell)!;
-        if (!cell) return;
-        editorInput = cell.enteredText;
+        if (!focusedCell) return;
+        invoke("get_editor_value_for_cell", {
+            cellId: { row: focusedCell.row, col: focusedCell.col },
+        }).then((response) => {
+            editorInput = decodeEditorValue(
+                new Uint8Array(response as ArrayBuffer),
+            );
+        });
     });
 
     // --- copy / paste ---
 
-    function copySelection() {
-        // if focused range, save range as TSV to the clipboard
+    async function copySelection() {
+        // build list of cells to copy
+        const cellIds: CellId[] = [];
+        let numCols = 1;
+        let numRows = 1;
+
         if (focusedRangeBounds) {
-            const rows: string[] = [];
+            numRows = focusedRangeBounds.maxR - focusedRangeBounds.minR + 1;
+            numCols = focusedRangeBounds.maxC - focusedRangeBounds.minC + 1;
             for (
                 let r = focusedRangeBounds.minR;
                 r <= focusedRangeBounds.maxR;
                 r++
             ) {
-                const cols: string[] = [];
                 for (
                     let c = focusedRangeBounds.minC;
                     c <= focusedRangeBounds.maxC;
                     c++
                 ) {
-                    const cell = getCell({ row: r, col: c });
-                    cols.push(cell?.enteredText ?? "");
+                    cellIds.push({ row: r, col: c });
+                }
+            }
+        } else if (focusedCell) {
+            cellIds.push(focusedCell);
+        } else {
+            return;
+        }
+
+        // fetch editor values from backend
+        const response = (await invoke("get_editor_value_for_cells", {
+            cells: cellIds,
+        })) as ArrayBuffer;
+        const bytes = new Uint8Array(response);
+        const values = decodeEditorValues(bytes, new DataView(response));
+
+        // build TSV from values
+        if (focusedRangeBounds) {
+            const rows: string[] = [];
+            for (let r = 0; r < numRows; r++) {
+                const cols: string[] = [];
+                for (let c = 0; c < numCols; c++) {
+                    cols.push(values[r * numCols + c] ?? "");
                 }
                 rows.push(cols.join("\t"));
             }
             navigator.clipboard.writeText(rows.join("\n"));
-        } else if (focusedCell) {
-            // if focused single cell, save enteredText to clipboard
-            const cell = getCell(focusedCell);
-            navigator.clipboard.writeText(cell?.enteredText ?? "");
+        } else {
+            navigator.clipboard.writeText(values[0] ?? "");
         }
     }
 
@@ -1200,6 +1225,7 @@
         if ((ev.target as HTMLElement).closest(".formula-input")) return;
         const scroller = ev.target as HTMLElement;
         syncScroll(sos, scroller.scrollLeft, scroller.scrollTop);
+        updateVisibleColumns();
         if (
             scroller.scrollLeft + scroller.clientWidth >
             scroller.scrollWidth - 200
@@ -1296,7 +1322,7 @@
         editorInsertReferenceStart = null;
         editorInsertReferenceEnd = null;
         editorInsertReference = false;
-        gridRows = baseRows.slice(viewportStart, viewportEnd + 1);
+        gridRows = baseRows.slice(viewportRowStart, viewportRowEnd + 1);
 
         ensureColumnsFillWidth();
         restartPolling();
@@ -1311,8 +1337,10 @@
                 startTimer("poll_cells");
                 invoke<ArrayBuffer>("get_cells_in_viewport", EMPTY_BODY, {
                     headers: {
-                        "row-start": String(viewportStart),
-                        "row-end": String(viewportEnd),
+                        "row-start": String(viewportRowStart),
+                        "row-end": String(viewportRowEnd),
+                        "col-start": String(viewportColumnStart),
+                        "col-end": String(viewportColumnEnd),
                     },
                 }).then((buf) => {
                     // "buf" length is 0 when the cells in the current viewport did not change,
@@ -1350,8 +1378,8 @@
         } = ev;
         if (end > rowCount - 100) expandRows(rowCount + 200);
         gridRows = baseRows.slice(start, end + 1);
-        viewportStart = start;
-        viewportEnd = end;
+        viewportRowStart = start;
+        viewportRowEnd = end;
     }
 </script>
 

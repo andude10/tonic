@@ -4,7 +4,13 @@ import { createContext } from "svelte";
 export type UICell = { row: number; column: string };
 /** Internal cell ID: 0-indexed row and col. */
 export type CellId = { row: number; col: number };
-export type CellData = { computedValue: string; enteredText: string };
+export type CellData = { computedValue: string; isFormula: boolean };
+export type ChangeBounds = {
+    min_row: number;
+    max_row: number;
+    min_col: number;
+    max_col: number;
+};
 
 export type SheetSharedState = {
     focusedCell: CellId | null;
@@ -49,9 +55,7 @@ export function columnIndexToLetter(index: number): string {
 
 export function isCellData(val: CellData | number): val is CellData {
     return (
-        typeof val === "object" &&
-        "computedValue" in val &&
-        "enteredText" in val
+        typeof val === "object" && "computedValue" in val && "isFormula" in val
     );
 }
 

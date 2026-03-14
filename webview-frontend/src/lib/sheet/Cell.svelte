@@ -32,9 +32,10 @@
         return cell ?? "";
     });
 
+    // todo: simplify
     const hasFormula = $derived.by(() => {
         const cell = row[column.id];
-        return isCellData(cell) && cell.enteredText.startsWith("=");
+        return isCellData(cell) && cell.isFormula;
     });
 
     let editingCellEl: HTMLDivElement | undefined = $state();

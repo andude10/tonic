@@ -14,10 +14,10 @@ use chumsky::{
 };
 use fastnum::D256;
 
-use std::collections::HashMap;
-
-use crate::sheet::{
-    CellId, CellRange, Dependency, Expr, ExprAtom, ExprId, NameRef, SheetId, UserFuncId,
+use crate::storage::{
+    grid::GridCellId,
+    name_resolution::SpreadsheetNames,
+    types::{AbsoluteCellId, Expr, ExprAtom, ExprId, Reference, SheetId},
 };
 
 // --- Tokens ---
@@ -177,13 +177,10 @@ type FormulaInput<'tokens, 'src> = MappedInput<
 type FormulaOutput = ExprId;
 /// Expression arena (flat AST)
 pub struct FormulaState<'a> {
-    pub cell_id: CellId,
-    pub sheet_names: &'a mut HashMap<String, SheetId>,
-    pub cell_names: &'a mut HashMap<NameRef, CellId>,
-    pub user_function_names: &'a mut HashMap<NameRef, UserFuncId>,
-    pub dependencies: &'a mut HashMap<CellId, Vec<Dependency>>,
-    pub dependents: &'a mut HashMap<CellId, Vec<CellId>>,
+    pub names: &'a mut SpreadsheetNames,
+    pub cell_id: GridCellId,
     pub expr_arena: Vec<Expr>,
+    pub dependencies: Vec<AbsoluteCellId>,
 }
 
 type FormulaExtra<'tokens, 'src> =
@@ -197,56 +194,7 @@ impl<'src, I: Input<'src>> Inspector<'src, I> for FormulaState<'_> {
     fn on_rewind<'parse>(&mut self, _: &input::Checkpoint<'src, 'parse, I, Self::Checkpoint>) {}
 }
 
-fn add_dependency(
-    cell_id: CellId,
-    dep: Dependency,
-    dependencies: &mut HashMap<CellId, Vec<Dependency>>,
-    dependents: &mut HashMap<CellId, Vec<CellId>>,
-) {
-    // for each cell in dependency, add currently parsed cell (cell_id) into list of dependants
-    dep.for_each_cell(|ref_cell| {
-        dependents.entry(ref_cell).or_default().push(cell_id);
-    });
-    // add dependency to dependencies of currently parsed cell
-    dependencies.entry(cell_id).or_default().push(dep);
-}
-
-fn remove_dependency(
-    cell_id: CellId,
-    dep: &Dependency,
-    dependents: &mut HashMap<CellId, Vec<CellId>>,
-) {
-    dep.for_each_cell(|ref_cell| {
-        if let Some(entries) = dependents.get_mut(&ref_cell) {
-            entries.retain(|c| *c != cell_id);
-        }
-    });
-}
-
 fn push_expr(state: &mut FormulaState, expr: Expr) -> ExprId {
-    // if expression (expr) is a reference, then add it to list of
-    // dependencies of currently parsed cell (cell_id)
-    match &expr {
-        Expr::Atom(ExprAtom::CellRef(s, c)) => {
-            add_dependency(
-                state.cell_id,
-                Dependency::SingleCell(*s, *c),
-                state.dependencies,
-                state.dependents,
-            );
-        }
-        Expr::Atom(ExprAtom::CellRange(s, r)) => {
-            add_dependency(
-                state.cell_id,
-                Dependency::Range(*s, *r),
-                state.dependencies,
-                state.dependents,
-            );
-        }
-        _ => {}
-    }
-
-    // push expression into arena
     let id = state.expr_arena.len() as ExprId;
     state.expr_arena.push(expr);
     id
@@ -268,7 +216,7 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
                 let st: &mut FormulaState = extra.state();
                 match second {
                     Some(name) => {
-                        let &sheet_id = st.sheet_names.get(first).ok_or_else(|| {
+                        let &sheet_id = st.names.sheet_names.get(first).ok_or_else(|| {
                             Rich::custom(span, format!("unknown sheet '{first}'"))
                         })?;
                         Ok((sheet_id, name))
@@ -277,8 +225,8 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
                 }
             });
 
-        // cell_id == A1-style token, produces CellId (defaults to sheet 0)
-        let cell_id = select_ref! { Token::Cell(col, row) => CellId { col: *col, row: *row } };
+        // cell_id == A1-style token, produces GridCellId (defaults to sheet 0)
+        let cell_id = select_ref! { Token::Cell(col, row) => GridCellId { col: *col, row: *row } };
 
         // call_args: (expr, expr, ...)
         let call_args = expr
@@ -299,58 +247,92 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
                             if args.len() != 1 {
                                 return Err(Rich::custom(span, "sum expects exactly 1 argument"));
                             }
-                            Expr::Sum {
-                                range_id: args[0],
-                                sum: D256::ZERO,
-                            }
+                            Expr::Sum
                         }
                         "avg" => {
                             if args.len() != 1 {
                                 return Err(Rich::custom(span, "avg expects exactly 1 argument"));
                             }
-                            Expr::Avg {
-                                range_id: args[0],
-                                sum: D256::ZERO,
-                                count: 0,
-                            }
+                            Expr::Avg
                         }
                         _ => {
-                            let func_id = st
-                                .user_function_names
-                                .get(&NameRef {
-                                    sheet_id,
-                                    name: name.into(),
-                                })
-                                .copied()
-                                .ok_or_else(|| {
-                                    Rich::custom(span, format!("unresolved function '{name}'"))
-                                })?;
-                            Expr::ExtrnalFunctionCall { func_id, args }
+                            // todo: user functions not yet supported
+                            return Err(Rich::custom(
+                                span,
+                                format!("unresolved function '{name}'"),
+                            ));
                         }
                     }
                 } else {
                     // cell ref: bare name
-                    let cell_id = st
-                        .cell_names
-                        .get(&NameRef {
-                            sheet_id,
-                            name: name.into(),
-                        })
-                        .copied()
-                        .ok_or_else(|| Rich::custom(span, format!("unresolved cell '{name}'")))?;
-                    Expr::Atom(ExprAtom::CellRef(sheet_id, cell_id))
+                    let named_cell =
+                        st.names.cell_names.get(name).ok_or_else(|| {
+                            Rich::custom(span, format!("unresolved cell '{name}'"))
+                        })?;
+                    let row_offset = named_cell.row as i32 - st.cell_id.row as i32;
+                    let col_offset = named_cell.col as i32 - st.cell_id.col as i32;
+                    st.dependencies.push(AbsoluteCellId {
+                        sheet_id: named_cell.sheet_id,
+                        row: named_cell.row,
+                        col: named_cell.col,
+                    });
+                    Expr::Atom(ExprAtom::Reference(Reference::Single {
+                        sheet_id: named_cell.sheet_id,
+                        row_offset,
+                        col_offset,
+                    }))
                 };
                 Ok(push_expr(extra.state(), expr))
             },
         );
 
-        // A1 or A1:B2 == produces ExprAtom::CellRef or ExprAtom::CellRange
+        // A1 or A1:B2 == produces Reference with offsets
         let cell_or_range = cell_id
             .clone()
             .then(just(Token::Colon).ignore_then(cell_id.clone()).or_not())
-            .map(|(start, end)| match end {
-                Some(end) => ExprAtom::CellRange(0, CellRange { start, end }),
-                None => ExprAtom::CellRef(0, start),
+            .map_with(|(start, end), extra| {
+                let st: &mut FormulaState = extra.state();
+                let start_row_offset = start.row as i32 - st.cell_id.row as i32;
+                let start_col_offset = start.col as i32 - st.cell_id.col as i32;
+                match end {
+                    Some(end) => {
+                        let end_row_offset = end.row as i32 - st.cell_id.row as i32;
+                        let end_col_offset = end.col as i32 - st.cell_id.col as i32;
+                        // add all cells in range as dependencies
+                        let min_row = start.row.min(end.row);
+                        let max_row = start.row.max(end.row);
+                        let min_col = start.col.min(end.col);
+                        let max_col = start.col.max(end.col);
+                        for row in min_row..=max_row {
+                            for col in min_col..=max_col {
+                                st.dependencies.push(AbsoluteCellId {
+                                    sheet_id: 0,
+                                    row,
+                                    col,
+                                });
+                            }
+                        }
+                        ExprAtom::Reference(Reference::Range {
+                            sheet_id: 0,
+                            range_start_row_offset: start_row_offset,
+                            range_start_col_offset: start_col_offset,
+                            range_end_row_offset: end_row_offset,
+                            range_end_col_offset: end_col_offset,
+                        })
+                    }
+                    None => {
+                        st.dependencies.push(AbsoluteCellId {
+                            sheet_id: 0,
+                            row: start.row,
+                            col: start.col,
+                        });
+                        ExprAtom::Reference(Reference::Single {
+                            sheet_id: 0,
+                            row_offset: start_row_offset,
+                            col_offset: start_col_offset,
+                        })
+                    }
+                }
             });
 
         // atom_value == self-contained value (3, false, A1, A1:A5, 3.14, "text", etc)
@@ -397,15 +379,6 @@ pub fn parse_formula<'tokens, 'src: 'tokens>(
     src_len: usize,
     state: &mut FormulaState<'tokens>,
 ) -> (Option<(Vec<Expr>, ExprId)>, Vec<Rich<'tokens, Token<'src>>>) {
-    // clear old dependencies before parsing (push_expr will populate new ones)
-    let cell_id = state.cell_id;
-    if let Some(old_deps) = state.dependencies.get_mut(&cell_id) {
-        for dep in old_deps.iter() {
-            remove_dependency(cell_id, dep, state.dependents);
-        }
-        old_deps.clear();
-    }
-
     let eoi = SimpleSpan::new((), src_len..src_len);
     let result = create_formula_praser()
         .boxed()
@@ -415,23 +388,6 @@ pub fn parse_formula<'tokens, 'src: 'tokens>(
         .into_output()
         .map(|root| (std::mem::take(&mut state.expr_arena), root));
     (output, errs)
-}
-
-/// Convert 0-indexed column to letter(s): 0→A, 25→Z, 26→AA
-fn col_to_letters(buf: &mut String, mut col: u32) {
-    let mut tmp = [0u8; 4];
-    let mut len = 0;
-    loop {
-        tmp[len] = b'A' + (col % 26) as u8;
-        len += 1;
-        if col < 26 {
-            break;
-        }
-        col = col / 26 - 1;
-    }
-    for i in (0..len).rev() {
-        buf.push(tmp[i] as char);
-    }
 }
 
 /// Parse a cell reference at position `pos` in `s` (letters then digits).
@@ -459,19 +415,33 @@ fn parse_cell_at(s: &[u8], pos: usize) -> Option<(u32, u32, usize)> {
     Some((col, row, i))
 }
 
-/// Offset all cell references (A1, A1:B2) in a formula string.
-/// Returns a new string with adjusted references, or the original if nothing changed.
-pub fn offset_refs(formula: &str, row_off: i32, col_off: i32) -> String {
-    if row_off == 0 && col_off == 0 {
-        return formula.to_string();
+/// Shift all cell references in a formula string using AST references.
+/// References in the string and AST appear in the same left-to-right order.
+/// `cell_id` is the cell where the formula will be displayed.
+/// `ast` contains the parsed expressions with R1C1 offsets.
+/// `names` is used to convert absolute cell IDs to names.
+pub fn shift_formula_refs(
+    formula: &str,
+    cell_id: &GridCellId,
+    ast: &[Expr],
+    names: &SpreadsheetNames,
+) -> String {
+    use crate::storage::types::{ExprAtom, Reference};
+
+    // collect all references from AST in order
+    let mut refs: Vec<&Reference> = Vec::new();
+    for expr in ast {
+        if let Expr::Atom(ExprAtom::Reference(r)) = expr {
+            refs.push(r);
+        }
     }
 
     let bytes = formula.as_bytes();
     let mut result = String::with_capacity(formula.len());
     let mut pos = 0;
+    let mut ref_idx = 0;
 
     while pos < bytes.len() {
-        // todo: make escape logic less hidden
         // skip quoted strings
         if bytes[pos] == b'"' {
             result.push('"');
@@ -488,25 +458,72 @@ pub fn offset_refs(formula: &str, row_off: i32, col_off: i32) -> String {
         }
 
         if bytes[pos].is_ascii_alphabetic() {
-            if let Some((col, row, end)) = parse_cell_at(bytes, pos) {
-                let new_col = (col as i32 + col_off).max(0) as u32;
-                let new_row = (row as i32 + row_off).max(0) as u32;
-                col_to_letters(&mut result, new_col);
-                result.push_str(&(new_row + 1).to_string());
+            if let Some((_col, _row, end)) = parse_cell_at(bytes, pos) {
+                // Check for range: A1:B2
+                let is_range = end < bytes.len() && bytes[end] == b':';
+                let final_end = if is_range {
+                    parse_cell_at(bytes, end + 1)
+                        .map(|(_, _, e)| e)
+                        .unwrap_or(end)
+                } else {
+                    end
+                };
 
-                // check for range: A1:B2
-                if end < bytes.len() && bytes[end] == b':' {
-                    if let Some((col2, row2, end2)) = parse_cell_at(bytes, end + 1) {
-                        let new_col2 = (col2 as i32 + col_off).max(0) as u32;
-                        let new_row2 = (row2 as i32 + row_off).max(0) as u32;
-                        result.push(':');
-                        col_to_letters(&mut result, new_col2);
-                        result.push_str(&(new_row2 + 1).to_string());
-                        pos = end2;
-                        continue;
+                // Use AST reference if available
+                if ref_idx < refs.len() {
+                    let r = refs[ref_idx];
+                    ref_idx += 1;
+                    match r {
+                        Reference::Single {
+                            sheet_id,
+                            row_offset,
+                            col_offset,
+                        } => {
+                            let abs_row = (cell_id.row as i32 + row_offset).max(0) as u32;
+                            let abs_col = (cell_id.col as i32 + col_offset).max(0) as u32;
+                            let abs_id = AbsoluteCellId {
+                                sheet_id: *sheet_id,
+                                row: abs_row,
+                                col: abs_col,
+                            };
+                            result.push_str(&names.cell_id_to_name(&abs_id));
+                        }
+                        Reference::Range {
+                            sheet_id,
+                            range_start_row_offset,
+                            range_start_col_offset,
+                            range_end_row_offset,
+                            range_end_col_offset,
+                        } => {
+                            let start_row =
+                                (cell_id.row as i32 + range_start_row_offset).max(0) as u32;
+                            let start_col =
+                                (cell_id.col as i32 + range_start_col_offset).max(0) as u32;
+                            let end_row = (cell_id.row as i32 + range_end_row_offset).max(0) as u32;
+                            let end_col = (cell_id.col as i32 + range_end_col_offset).max(0) as u32;
+                            let start_id = AbsoluteCellId {
+                                sheet_id: *sheet_id,
+                                row: start_row,
+                                col: start_col,
+                            };
+                            let end_id = AbsoluteCellId {
+                                sheet_id: *sheet_id,
+                                row: end_row,
+                                col: end_col,
+                            };
+                            result.push_str(&names.cell_id_to_name(&start_id));
+                            result.push(':');
+                            result.push_str(&names.cell_id_to_name(&end_id));
+                        }
                     }
+                    pos = final_end;
+                    continue;
                 }
-                pos = end;
+                // Fallback: copy original reference
+                while pos < final_end {
+                    result.push(bytes[pos] as char);
+                    pos += 1;
+                }
                 continue;
             }
         }
@@ -519,21 +536,16 @@ pub fn offset_refs(formula: &str, row_off: i32, col_off: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sheet::Spreadsheet;
     use fastnum::dec256;
 
     /// Lex + parse a formula string, return (arena, root_id) or panic with errors.
-    fn parse(src: &str, spreadsheet: &mut Spreadsheet) -> (Vec<Expr>, ExprId) {
+    fn parse(src: &str, names: &mut SpreadsheetNames) -> (Vec<Expr>, ExprId) {
         let tokens = lex_formula(src).into_output().expect("lexer failed");
-        let sheet = &mut spreadsheet.sheets[0];
         let mut state = FormulaState {
-            cell_id: CellId { col: 0, row: 0 },
-            sheet_names: &mut spreadsheet.sheet_names,
-            cell_names: &mut spreadsheet.cell_names,
-            user_function_names: &mut spreadsheet.user_function_names,
-            dependencies: &mut sheet.dependencies,
-            dependents: &mut sheet.dependents,
+            names,
+            cell_id: GridCellId { col: 0, row: 0 },
             expr_arena: Vec::new(),
+            dependencies: Vec::new(),
         };
         let (parsed, errs) = parse_formula(&tokens, src.len(), &mut state);
         assert!(
@@ -545,15 +557,20 @@ mod tests {
     }
 
     fn assert_parses(cases: &[(&str, Vec<Expr>)]) {
-        let mut ss = Spreadsheet::new();
+        let mut names = SpreadsheetNames::new();
         for (src, expected_arena) in cases {
-            let (arena, _root) = parse(src, &mut ss);
+            let (arena, _root) = parse(src, &mut names);
             assert_eq!(arena, *expected_arena, "failed for input: {src:?}");
         }
     }
 
-    fn c(col: u32, row: u32) -> CellId {
-        CellId { col, row }
+    /// Helper to create a Reference::Single with offsets (relative to cell 0,0)
+    fn r(col: i32, row: i32) -> Reference {
+        Reference::Single {
+            sheet_id: 0,
+            row_offset: row,
+            col_offset: col,
+        }
     }
 
     #[test]
@@ -583,8 +600,8 @@ mod tests {
     #[test]
     fn test_cell_ref() {
         assert_parses(&[
-            ("A1", vec![Expr::Atom(ExprAtom::CellRef(0, c(0, 0)))]),
-            ("B3", vec![Expr::Atom(ExprAtom::CellRef(0, c(1, 2)))]),
+            ("A1", vec![Expr::Atom(ExprAtom::Reference(r(0, 0)))]),
+            ("B3", vec![Expr::Atom(ExprAtom::Reference(r(1, 2)))]),
         ]);
     }
 
@@ -592,13 +609,13 @@ mod tests {
     fn test_cell_range() {
         assert_parses(&[(
             "A1:B2",
-            vec![Expr::Atom(ExprAtom::CellRange(
-                0,
-                CellRange {
-                    start: c(0, 0),
-                    end: c(1, 1),
-                },
-            ))],
+            vec![Expr::Atom(ExprAtom::Reference(Reference::Range {
+                sheet_id: 0,
+                range_start_row_offset: 0,
+                range_start_col_offset: 0,
+                range_end_row_offset: 1,
+                range_end_col_offset: 1,
+            }))],
         )]);
     }
 
@@ -678,22 +695,19 @@ mod tests {
 
     #[test]
     fn test_builtin_sum() {
-        let mut ss = Spreadsheet::new();
-        let (arena, root) = parse("sum(A1:B2)", &mut ss);
+        let mut names = SpreadsheetNames::new();
+        let (arena, root) = parse("sum(A1:B2)", &mut names);
         assert_eq!(
             arena,
             vec![
-                Expr::Atom(ExprAtom::CellRange(
-                    0,
-                    CellRange {
-                        start: c(0, 0),
-                        end: c(1, 1),
-                    }
-                )),
-                Expr::Sum {
-                    range_id: 0,
-                    sum: D256::ZERO
-                }
+                Expr::Atom(ExprAtom::Reference(Reference::Range {
+                    sheet_id: 0,
+                    range_start_row_offset: 0,
+                    range_start_col_offset: 0,
+                    range_end_row_offset: 1,
+                    range_end_col_offset: 1,
+                })),
+                Expr::Sum
             ]
         );
         assert_eq!(root, 1);
@@ -701,23 +715,19 @@ mod tests {
 
     #[test]
     fn test_builtin_avg() {
-        let mut ss = Spreadsheet::new();
-        let (arena, root) = parse("avg(A1:B2)", &mut ss);
+        let mut names = SpreadsheetNames::new();
+        let (arena, root) = parse("avg(A1:B2)", &mut names);
         assert_eq!(
             arena,
             vec![
-                Expr::Atom(ExprAtom::CellRange(
-                    0,
-                    CellRange {
-                        start: c(0, 0),
-                        end: c(1, 1),
-                    }
-                )),
-                Expr::Avg {
-                    range_id: 0,
-                    sum: D256::ZERO,
-                    count: 0
-                }
+                Expr::Atom(ExprAtom::Reference(Reference::Range {
+                    sheet_id: 0,
+                    range_start_row_offset: 0,
+                    range_start_col_offset: 0,
+                    range_end_row_offset: 1,
+                    range_end_col_offset: 1,
+                })),
+                Expr::Avg
             ]
         );
         assert_eq!(root, 1);
@@ -728,7 +738,7 @@ mod tests {
         assert_parses(&[(
             "A1 + 2 * 3",
             vec![
-                Expr::Atom(ExprAtom::CellRef(0, c(0, 0))),
+                Expr::Atom(ExprAtom::Reference(r(0, 0))),
                 Expr::Atom(ExprAtom::Number(dec256!(2))),
                 Expr::Atom(ExprAtom::Number(dec256!(3))),
                 Expr::Multiply(1, 2),
@@ -739,42 +749,22 @@ mod tests {
 
     #[test]
     fn test_named_cell_ref() {
-        let mut ss = Spreadsheet::new();
-        let cell = CellId { col: 5, row: 10 };
-        ss.cell_names.insert(
-            NameRef {
-                sheet_id: 0,
-                name: "total".into(),
-            },
-            cell,
-        );
-        let (arena, _) = parse("total", &mut ss);
-        assert_eq!(arena, vec![Expr::Atom(ExprAtom::CellRef(0, cell))]);
-    }
-
-    #[test]
-    fn test_user_function_call() {
-        let mut ss = Spreadsheet::new();
-        ss.user_function_names.insert(
-            NameRef {
-                sheet_id: 0,
-                name: "myfunc".into(),
-            },
-            0,
-        );
-        ss.user_functions.push(Default::default());
-        let (arena, root) = parse("myfunc(1, 2)", &mut ss);
+        let mut names = SpreadsheetNames::new();
+        let cell = AbsoluteCellId {
+            sheet_id: 0,
+            col: 5,
+            row: 10,
+        };
+        names.cell_names.insert("total".into(), cell.clone());
+        let (arena, _) = parse("total", &mut names);
+        // Offset from (0,0) to (5,10) is (5,10)
         assert_eq!(
             arena,
-            vec![
-                Expr::Atom(ExprAtom::Number(dec256!(1))),
-                Expr::Atom(ExprAtom::Number(dec256!(2))),
-                Expr::ExtrnalFunctionCall {
-                    func_id: 0,
-                    args: vec![0, 1]
-                },
-            ]
+            vec![Expr::Atom(ExprAtom::Reference(Reference::Single {
+                sheet_id: 0,
+                row_offset: 10,
+                col_offset: 5,
+            }))]
         );
-        assert_eq!(root, 2);
     }
 }

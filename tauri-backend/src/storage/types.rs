@@ -1,10 +1,9 @@
-use std::collections::HashMap;
-
 use fastnum::D256;
 use serde::{Deserialize, Serialize};
 
 use crate::storage::{
     grid::{Grid, GridCellId},
+    name_resolution::SpreadsheetNames,
     stable_vec::StableVec,
 };
 
@@ -15,9 +14,19 @@ pub type ExprId = u32;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Hash, PartialEq, Eq)]
 pub struct AbsoluteCellId {
-    sheet_id: SheetId,
-    row: u32,
-    col: u32,
+    pub sheet_id: SheetId,
+    pub row: u32,
+    pub col: u32,
+}
+
+impl AbsoluteCellId {
+    // todo: remove
+    pub fn grid_cell_id(&self) -> GridCellId {
+        GridCellId {
+            row: self.row,
+            col: self.col,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -51,8 +60,7 @@ pub enum AtomType {
     Number,
     Text,
     Function,
-    CellRef,
-    CellRange,
+    Reference,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -68,23 +76,46 @@ pub enum Expr {
     Sum,
     Avg,
 
+    // todo:
     ExtrnalFunctionCall {
         func_id: UserFuncId,
         args: Vec<ExprId>,
     },
 }
 
+/// Repressentation of formula. If multiple cells contain the same FormulaId, then they share single formula
+///
+/// When new formula is entered by user, it is parsed and preserved. During parsing, all references
+/// are converted into R1C1 format (meaning AST stores relative offsets, instead of exact IDs of cells) .
+/// If the formula is cloned, then it becomes shared formula (multiple cells will contain same FormulaId)
+#[derive(Serialize, Deserialize)]
 pub struct Formula {
-    exprs: Vec<Expr>,
-    applied_cells: Vec<Reference>,
+    /// Abstract syntax tree (result of parsing `formula_string`)
+    pub ast: Vec<Expr>,
+
+    /// Original text, entered by user to create this formula (preserves spaces)
+    ///
+    /// References should be adjusted relative to offsets if the formula is shared.
+    pub formula_string: String,
 }
 
 pub type Sheets = Vec<Grid>;
 
+#[derive(Serialize, Deserialize)]
 pub struct Spreadsheet {
-    sheets: Sheets,
-    formulas: StableVec<Formula>,
-    user_strings: HashMap<AbsoluteCellId, String>,
+    pub(crate) sheets: Sheets,
+    pub(crate) formulas: StableVec<Formula>,
+    pub(crate) names: SpreadsheetNames,
     // todo:
     // pub user_functions: Vec<UserFunction>,
+}
+
+impl Spreadsheet {
+    pub fn new() -> Self {
+        Self {
+            sheets: vec![Grid::new(12_500, 2)],
+            formulas: StableVec::new(),
+            names: SpreadsheetNames::new(),
+        }
+    }
 }

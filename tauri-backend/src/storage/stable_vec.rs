@@ -1,6 +1,9 @@
 use std::ops::{Deref, DerefMut};
 
+use serde::{Deserialize, Serialize};
+
 /// Wrapper around Vec, that guarantees stable indices.
+#[derive(Serialize, Deserialize)]
 pub struct StableVec<T> {
     entries: Vec<Option<T>>,
     free: Vec<u32>,
