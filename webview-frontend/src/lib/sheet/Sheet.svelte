@@ -37,6 +37,7 @@
     ];
 
     function handleContextMenuClick(ev: IMenuOptionClick) {
+        if (!ev.option) return;
         if (ev.option.id === "copy") copySelection();
         else if (ev.option.id === "paste") pasteFromClipboard();
     }
@@ -400,14 +401,6 @@
         });
     });
 
-    // set editorInput to the computedValue of focused cell
-    $effect(() => {
-        let cell = getCell(focusedCell);
-        if (cell) {
-            editorInput = cell.computedValue;
-        }
-    });
-
     // bounding box of the selection range (0-indexed)
     let focusedRangeBounds = $derived.by(() => {
         if (!focusedRangeStart || !focusedCell) return null;
@@ -523,22 +516,9 @@
         scrollToRow(bounds.min_row);
     }
 
-    // set editor input to entered value of the focused cell
-    $effect(() => {
-        if (!focusedCell) return;
-        invoke("get_editor_value_for_cell", {
-            cellId: { row: focusedCell.row, col: focusedCell.col },
-        }).then((response) => {
-            editorInput = decodeEditorValue(
-                new Uint8Array(response as ArrayBuffer),
-            );
-        });
-    });
-
     // --- copy / paste ---
 
-    async function copySelection() {
-        // build list of cells to copy
+    function copySelection() {
         const cellIds: CellId[] = [];
         let numCols = 1;
         let numRows = 1;
@@ -565,27 +545,34 @@
             return;
         }
 
-        // fetch editor values from backend
-        const response = (await invoke("get_editor_value_for_cells", {
-            cells: cellIds,
-        })) as ArrayBuffer;
-        const bytes = new Uint8Array(response);
-        const values = decodeEditorValues(bytes, new DataView(response));
+        const hasRange = !!focusedRangeBounds;
 
-        // build TSV from values
-        if (focusedRangeBounds) {
-            const rows: string[] = [];
-            for (let r = 0; r < numRows; r++) {
-                const cols: string[] = [];
-                for (let c = 0; c < numCols; c++) {
-                    cols.push(values[r * numCols + c] ?? "");
+        const blobPromise = invoke<ArrayBuffer>("get_editor_value_for_cells", {
+            cells: cellIds,
+        }).then((response) => {
+            const bytes = new Uint8Array(response);
+            const values = decodeEditorValues(bytes, new DataView(response));
+
+            let text: string;
+            if (hasRange) {
+                const rows: string[] = [];
+                for (let r = 0; r < numRows; r++) {
+                    const cols: string[] = [];
+                    for (let c = 0; c < numCols; c++) {
+                        cols.push(values[r * numCols + c] ?? "");
+                    }
+                    rows.push(cols.join("\t"));
                 }
-                rows.push(cols.join("\t"));
+                text = rows.join("\n");
+            } else {
+                text = values[0] ?? "";
             }
-            navigator.clipboard.writeText(rows.join("\n"));
-        } else {
-            navigator.clipboard.writeText(values[0] ?? "");
-        }
+            return new Blob([text], { type: "text/plain" });
+        });
+
+        navigator.clipboard.write([
+            new ClipboardItem({ "text/plain": blobPromise }),
+        ]);
     }
 
     async function pasteFromClipboard() {
@@ -1334,7 +1321,6 @@
         if (pollInterval !== undefined) clearInterval(pollInterval);
         invoke("init_viewport").then(() => {
             pollInterval = setInterval(() => {
-                startTimer("poll_cells");
                 invoke<ArrayBuffer>("get_cells_in_viewport", EMPTY_BODY, {
                     headers: {
                         "row-start": String(viewportRowStart),
@@ -1348,8 +1334,19 @@
                     if (buf.byteLength > 0) {
                         decodeCells(new Uint8Array(buf), new DataView(buf));
                     }
-                    endTimer("poll_cells");
                 });
+                // keep editor value fresh for focused cell (skip while user is editing)
+                if (focusedCell && !isEditing) {
+                    invoke<ArrayBuffer>("get_editor_value_for_cell", {
+                        cellId: focusedCell,
+                    }).then((response) => {
+                        if (!isEditing) {
+                            editorInput = decodeEditorValue(
+                                new Uint8Array(response),
+                            );
+                        }
+                    });
+                }
             }, 16);
         });
     }

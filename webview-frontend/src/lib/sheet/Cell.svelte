@@ -42,8 +42,8 @@
 
     $effect(() => {
         shared.editorInput;
-        if (editingCellEl) {
-            const cellEl = editingCellEl.parentElement!;
+        const cellEl = editingCellEl?.parentElement;
+        if (editingCellEl && cellEl) {
             const padding =
                 parseFloat(getComputedStyle(cellEl).paddingLeft) * 2;
             shared.editorInputWidth = editingCellEl.offsetWidth + padding;

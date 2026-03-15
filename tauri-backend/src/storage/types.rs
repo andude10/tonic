@@ -12,7 +12,7 @@ pub type FormulaId = u32;
 pub type UserFuncId = u32;
 pub type ExprId = u32;
 
-#[derive(Serialize, Deserialize, Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct AbsoluteCellId {
     pub sheet_id: SheetId,
     pub row: u32,

@@ -14,16 +14,14 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_log::log::error;
 
-use crate::engine_api::{ChangeBounds, Engine};
+use crate::engine::{ChangeBounds, Engine};
 use crate::parser::shift_formula_refs;
 use crate::storage::grid::{CellContent, CellValue, GridCellId};
 use crate::storage::types::AbsoluteCellId;
 
 mod engine;
-mod engine_api;
 mod file_api;
 mod parser;
-mod sheet;
 pub(crate) mod storage {
     pub(crate) mod grid;
     pub(crate) mod name_resolution;
@@ -250,7 +248,11 @@ fn fill_cells(
 
     let get_num = |row: u32, col: u32| -> Option<D256> {
         let gid = GridCellId { row, col };
-        match &grid.get_content(&gid)?.val {
+        let content = grid.get_content(&gid)?;
+        if content.defined_by_formula.is_some() {
+            return None;
+        }
+        match &content.val {
             CellValue::Number(n) => Some(*n),
             _ => None,
         }

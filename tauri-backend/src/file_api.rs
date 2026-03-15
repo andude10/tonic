@@ -5,6 +5,7 @@ use flate2::Compression;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::Path;
+use tauri_plugin_log::log::info;
 
 /// Saves the spreadsheet as gzip-compressed bitcode.
 pub fn save(spreadsheet: &Spreadsheet, path: &str) -> io::Result<()> {
@@ -15,14 +16,14 @@ pub fn save(spreadsheet: &Spreadsheet, path: &str) -> io::Result<()> {
     let t = std::time::Instant::now();
     let encoded =
         bitcode::serialize(spreadsheet).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-    println!("Saving (serializing) \"{}\" took {:?}", path, t.elapsed());
+    info!("Saving (serializing) \"{}\" took {:?}", path, t.elapsed());
 
     let t = std::time::Instant::now();
     let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
     encoder.write_all(&encoded)?;
     let compressed = encoder.finish()?;
     let result = fs::write(path, compressed);
-    println!(
+    info!(
         "Saving (writing to disk) \"{}\" took {:?}",
         path,
         t.elapsed()
@@ -37,7 +38,7 @@ pub fn load(path: &str) -> io::Result<Spreadsheet> {
     let mut decoder = GzDecoder::new(file);
     let mut decompressed = Vec::new();
     decoder.read_to_end(&mut decompressed)?;
-    println!(
+    info!(
         "Opening (reading from disk) \"{}\" took {:?}",
         path,
         t.elapsed()
@@ -46,6 +47,6 @@ pub fn load(path: &str) -> io::Result<Spreadsheet> {
     let t = std::time::Instant::now();
     let result =
         bitcode::deserialize(&decompressed).map_err(|e| io::Error::new(io::ErrorKind::Other, e));
-    println!("Opening (parsing) \"{}\" took {:?}", path, t.elapsed());
+    info!("Opening (parsing) \"{}\" took {:?}", path, t.elapsed());
     result
 }
