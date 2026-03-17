@@ -23,7 +23,7 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chumsky = {version = "0.12.0", features = ["pratt", "regex"] }
-bitcode = { version = "0.6", features = ["serde"] }
+sonic-rs = "0.3"
 thiserror = "2.0.18"
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"

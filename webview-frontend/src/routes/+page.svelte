@@ -23,6 +23,7 @@
     let dialogOpen = $state(false);
     let isSaved = $state(true);
     let isSaving = $state(false);
+    let isLoading = $state(false);
 
     const DIALOG_FILTER = { name: "Tonic Spreadsheet", extensions: ["tcs"] };
 
@@ -73,7 +74,9 @@
                 });
                 dialogOpen = false;
                 if (!path) return;
+                isLoading = true;
                 await invoke("open_file", { path });
+                isLoading = false;
                 await syncFileInfo();
                 sheet.onFileLoad();
                 break;
@@ -84,6 +87,31 @@
             case "file-save-as":
                 await commitSaveAs();
                 break;
+        }
+    }
+
+    async function onTitleChange(e: Event) {
+        const el = e.target as HTMLElement;
+        const newName = (el.textContent ?? "").trim();
+        if (!newName || newName === fileTitle) {
+            el.textContent = fileTitle ?? "";
+            return;
+        }
+        const finalName = newName.endsWith(".tcs") ? newName : newName + ".tcs";
+        try {
+            await invoke("rename_current_file", { newName: finalName });
+            await syncFileInfo();
+            el.textContent = fileTitle ?? "";
+        } catch (e) {
+            console.error("Rename failed:", e);
+            el.textContent = fileTitle ?? "";
+        }
+    }
+
+    function onTitleKeyDown(e: KeyboardEvent) {
+        if (e.key === "Enter") {
+            e.preventDefault();
+            (e.target as HTMLElement).blur();
         }
     }
 
@@ -121,7 +149,14 @@
         <div class="layout-container">
             <WindowBar>
                 <span class="file-title">
-                    {fileTitle}
+                    <span
+                        contenteditable="true"
+                        role="textbox"
+                        tabindex="0"
+                        style="outline: none"
+                        onblur={onTitleChange}
+                        onkeydown={onTitleKeyDown}>{fileTitle}</span
+                    >
                     {#if isSaving}
                         <svg
                             class="file-status save-icon spinning"
@@ -177,6 +212,9 @@
 
             <Sheet bind:this={sheet} />
             {#if dialogOpen}<div class="dialog-overlay"></div>{/if}
+            {#if isLoading}<div class="dialog-overlay">
+                    <div class="loading-text"></div>
+                </div>{/if}
 
             <DevBottomPanel />
         </div>
@@ -205,6 +243,46 @@
         inset: 0;
         z-index: 9999;
         background: rgba(0, 0, 0, 0.3);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: rgba(255, 255, 255, 0.8);
+        font-size: 14px;
+    }
+
+    .loading-text {
+        width: fit-content;
+        font-size: 40px;
+        line-height: 1.5;
+        font-family: system-ui, sans-serif;
+        font-weight: bold;
+        text-transform: uppercase;
+        color: #0000;
+        -webkit-text-stroke: 1px var(--wx-color-primary);
+        background:
+            radial-gradient(
+                    1.13em at 50% 1.6em,
+                    var(--wx-color-primary) 99%,
+                    #0000 101%
+                )
+                calc(50% - 1.6em) 0/3.2em 100% text,
+            radial-gradient(
+                    1.13em at 50% -0.8em,
+                    #0000 99%,
+                    var(--wx-color-primary) 101%
+                )
+                50% 0.8em/3.2em 100% repeat-x text;
+        animation: l9 2s linear infinite;
+    }
+    .loading-text:before {
+        content: "Loading";
+    }
+    @keyframes l9 {
+        to {
+            background-position:
+                calc(50% + 1.6em) 0,
+                calc(50% + 3.2em) 0.8em;
+        }
     }
 
     .file-title {

@@ -15,7 +15,9 @@ pub struct GridCellId {
 /// Content of a cell (value + formula info). Separate from dependents tracking.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct CellContent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defined_by_formula: Option<FormulaId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependencies: Option<Vec<AbsoluteCellId>>,
     pub val: CellValue,
     #[serde(skip)]
@@ -53,7 +55,9 @@ impl CellContent {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Cell {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) dependents: Option<Vec<AbsoluteCellId>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) content: Option<CellContent>,
 }
 

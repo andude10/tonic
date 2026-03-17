@@ -411,6 +411,32 @@ fn save_file(
 }
 
 #[tauri::command(async)]
+fn rename_current_file(
+    app: AppHandle,
+    state: tauri::State<'_, Mutex<TonicState>>,
+    new_name: &str,
+) -> Result<(), String> {
+    let mut state = state.lock().unwrap();
+    let Some(old_path) = state.file_path.clone() else {
+        state.file_name = Some(new_name.to_string());
+        return Ok(());
+    };
+    let old = std::path::Path::new(&old_path);
+    let new_path = old.with_file_name(new_name);
+    let new_path_str = new_path.to_string_lossy().to_string();
+    file_api::rename_file(&old_path, &new_path_str).map_err(|e| {
+        error!(
+            "Failed to rename '{}' to '{}': {}",
+            old_path, new_path_str, e
+        );
+        e.to_string()
+    })?;
+    update_file_info(&mut state, &new_path_str);
+    emit_save_status(&app, &state);
+    Ok(())
+}
+
+#[tauri::command(async)]
 fn open_file(
     app: AppHandle,
     state: tauri::State<'_, Mutex<TonicState>>,
@@ -468,6 +494,7 @@ pub fn run() {
             open_file,
             new_file,
             get_file_info,
+            rename_current_file,
             undo_input,
             redo_input,
         ])

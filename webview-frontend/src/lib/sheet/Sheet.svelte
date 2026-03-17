@@ -1311,6 +1311,10 @@
         editorInsertReference = false;
         gridRows = baseRows.slice(viewportRowStart, viewportRowEnd + 1);
 
+        // scroll to the top
+        const el = getScrollContainer();
+        if (el) el.scrollTop = 0;
+
         ensureColumnsFillWidth();
         restartPolling();
     }
