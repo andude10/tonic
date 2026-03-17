@@ -12,7 +12,7 @@ use chumsky::{
     prelude::*,
     text,
 };
-use fastnum::D256;
+use rust_decimal::Decimal;
 
 use crate::storage::{
     grid::GridCellId,
@@ -24,7 +24,7 @@ use crate::storage::{
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token<'src> {
-    Number(D256),
+    Number(Decimal),
     Text(&'src str),
     True,
     False,
@@ -134,7 +134,7 @@ pub fn create_lexer<'src>(
         text::int(10)
             .then(just('.').then(text::digits(10)).or_not())
             .to_slice()
-            .map(|s: &str| Token::Number(s.parse::<D256>().unwrap())),
+            .map(|s: &str| Token::Number(s.parse::<Decimal>().unwrap())),
     ))
     .spanned()
     .padded()
@@ -536,7 +536,14 @@ pub fn shift_formula_refs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fastnum::dec256;
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
+
+    macro_rules! dec {
+        ($val:expr) => {
+            Decimal::from_str(stringify!($val)).unwrap()
+        };
+    }
 
     /// Lex + parse a formula string, return (arena, root_id) or panic with errors.
     fn parse(src: &str, names: &mut SpreadsheetNames) -> (Vec<Expr>, ExprId) {
@@ -576,8 +583,8 @@ mod tests {
     #[test]
     fn test_number_literal() {
         assert_parses(&[
-            ("42", vec![Expr::Atom(ExprAtom::Number(dec256!(42)))]),
-            ("3.14", vec![Expr::Atom(ExprAtom::Number(dec256!(3.14)))]),
+            ("42", vec![Expr::Atom(ExprAtom::Number(dec!(42)))]),
+            ("3.14", vec![Expr::Atom(ExprAtom::Number(dec!(3.14)))]),
         ]);
     }
 
@@ -624,8 +631,8 @@ mod tests {
         assert_parses(&[(
             "1 + 2",
             vec![
-                Expr::Atom(ExprAtom::Number(dec256!(1))),
-                Expr::Atom(ExprAtom::Number(dec256!(2))),
+                Expr::Atom(ExprAtom::Number(dec!(1))),
+                Expr::Atom(ExprAtom::Number(dec!(2))),
                 Expr::Add(0, 1),
             ],
         )]);
@@ -636,8 +643,8 @@ mod tests {
         assert_parses(&[(
             "5 - 3",
             vec![
-                Expr::Atom(ExprAtom::Number(dec256!(5))),
-                Expr::Atom(ExprAtom::Number(dec256!(3))),
+                Expr::Atom(ExprAtom::Number(dec!(5))),
+                Expr::Atom(ExprAtom::Number(dec!(3))),
                 Expr::Subtract(0, 1),
             ],
         )]);
@@ -648,8 +655,8 @@ mod tests {
         assert_parses(&[(
             "2 * 3",
             vec![
-                Expr::Atom(ExprAtom::Number(dec256!(2))),
-                Expr::Atom(ExprAtom::Number(dec256!(3))),
+                Expr::Atom(ExprAtom::Number(dec!(2))),
+                Expr::Atom(ExprAtom::Number(dec!(3))),
                 Expr::Multiply(0, 1),
             ],
         )]);
@@ -661,9 +668,9 @@ mod tests {
         assert_parses(&[(
             "1 + 2 * 3",
             vec![
-                Expr::Atom(ExprAtom::Number(dec256!(1))),
-                Expr::Atom(ExprAtom::Number(dec256!(2))),
-                Expr::Atom(ExprAtom::Number(dec256!(3))),
+                Expr::Atom(ExprAtom::Number(dec!(1))),
+                Expr::Atom(ExprAtom::Number(dec!(2))),
+                Expr::Atom(ExprAtom::Number(dec!(3))),
                 Expr::Multiply(1, 2),
                 Expr::Add(0, 3),
             ],
@@ -676,10 +683,10 @@ mod tests {
         assert_parses(&[(
             "(1 + 2) * 3",
             vec![
-                Expr::Atom(ExprAtom::Number(dec256!(1))),
-                Expr::Atom(ExprAtom::Number(dec256!(2))),
+                Expr::Atom(ExprAtom::Number(dec!(1))),
+                Expr::Atom(ExprAtom::Number(dec!(2))),
                 Expr::Add(0, 1),
-                Expr::Atom(ExprAtom::Number(dec256!(3))),
+                Expr::Atom(ExprAtom::Number(dec!(3))),
                 Expr::Multiply(2, 3),
             ],
         )]);
@@ -689,7 +696,7 @@ mod tests {
     fn test_negation() {
         assert_parses(&[(
             "-1",
-            vec![Expr::Atom(ExprAtom::Number(dec256!(1))), Expr::Negate(0)],
+            vec![Expr::Atom(ExprAtom::Number(dec!(1))), Expr::Negate(0)],
         )]);
     }
 
@@ -739,8 +746,8 @@ mod tests {
             "A1 + 2 * 3",
             vec![
                 Expr::Atom(ExprAtom::Reference(r(0, 0))),
-                Expr::Atom(ExprAtom::Number(dec256!(2))),
-                Expr::Atom(ExprAtom::Number(dec256!(3))),
+                Expr::Atom(ExprAtom::Number(dec!(2))),
+                Expr::Atom(ExprAtom::Number(dec!(3))),
                 Expr::Multiply(1, 2),
                 Expr::Add(0, 3),
             ],

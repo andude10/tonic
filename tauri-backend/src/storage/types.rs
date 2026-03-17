@@ -1,8 +1,8 @@
-use fastnum::D256;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::storage::{
-    grid::{Grid, GridCellId},
+    grid::{CellContent, CellValue, Grid, GridCellId},
     name_resolution::SpreadsheetNames,
     stable_vec::StableVec,
 };
@@ -19,12 +19,11 @@ pub struct AbsoluteCellId {
     pub col: u32,
 }
 
-impl AbsoluteCellId {
-    // todo: remove
-    pub fn grid_cell_id(&self) -> GridCellId {
+impl From<&AbsoluteCellId> for GridCellId {
+    fn from(id: &AbsoluteCellId) -> Self {
         GridCellId {
-            row: self.row,
-            col: self.col,
+            row: id.row,
+            col: id.col,
         }
     }
 }
@@ -48,7 +47,7 @@ pub enum Reference {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum ExprAtom {
     Boolean(bool),
-    Number(D256),
+    Number(Decimal),
     Text(String),
     Function(UserFuncId),
     Reference(Reference),
@@ -117,5 +116,51 @@ impl Spreadsheet {
             formulas: StableVec::new(),
             names: SpreadsheetNames::new(),
         }
+    }
+
+    // todo: remove this mess.
+
+    pub fn get_content(&self, id: &AbsoluteCellId) -> Option<&CellContent> {
+        self.sheets[id.sheet_id as usize].get_content(&id.into())
+    }
+
+    pub fn get_value(&self, id: &AbsoluteCellId) -> Option<&CellValue> {
+        self.sheets[id.sheet_id as usize].get_value(&id.into())
+    }
+
+    pub fn set_value(&mut self, id: &AbsoluteCellId, val: CellValue) {
+        self.sheets[id.sheet_id as usize].set_value(&id.into(), val);
+    }
+
+    pub fn insert_content(&mut self, id: &AbsoluteCellId, content: CellContent) {
+        self.sheets[id.sheet_id as usize].insert_content(&id.into(), content);
+    }
+
+    pub fn remove_content(&mut self, id: &AbsoluteCellId) {
+        self.sheets[id.sheet_id as usize].remove_content(&id.into());
+    }
+
+    pub fn get_dependents(&self, id: &AbsoluteCellId) -> Option<&Vec<AbsoluteCellId>> {
+        self.sheets[id.sheet_id as usize].get_dependents(&id.into())
+    }
+
+    pub fn add_dependant(&mut self, id: &AbsoluteCellId, dependant: &AbsoluteCellId) {
+        self.sheets[id.sheet_id as usize].add_dependant(&id.into(), dependant);
+    }
+
+    pub fn remove_dependant(&mut self, id: &AbsoluteCellId, dependant: &AbsoluteCellId) {
+        self.sheets[id.sheet_id as usize].remove_dependant(&id.into(), dependant);
+    }
+
+    pub fn increase_pending_dependencies(&mut self, id: &AbsoluteCellId) {
+        self.sheets[id.sheet_id as usize].increase_pending_dependencies(&id.into());
+    }
+
+    pub fn decrease_pending_dependencies(&mut self, id: &AbsoluteCellId) {
+        self.sheets[id.sheet_id as usize].decrease_pending_dependencies(&id.into());
+    }
+
+    pub fn get_pending_dependencies(&self, id: &AbsoluteCellId) -> u32 {
+        self.sheets[id.sheet_id as usize].get_pending_dependencies(&id.into())
     }
 }

@@ -1,7 +1,8 @@
 use std::fmt;
 
-use fastnum::D256;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use tauri_plugin_log::log::debug;
 
 use crate::storage::types::{AbsoluteCellId, FormulaId};
 
@@ -18,7 +19,7 @@ pub struct CellContent {
     pub dependencies: Option<Vec<AbsoluteCellId>>,
     pub val: CellValue,
     #[serde(skip)]
-    pub pending_dependencies_count: u32,
+    pub pending_dependencies: u32,
 }
 
 impl CellContent {
@@ -27,16 +28,16 @@ impl CellContent {
             defined_by_formula: None,
             dependencies: None,
             val: CellValue::Text(s),
-            pending_dependencies_count: 0,
+            pending_dependencies: 0,
         }
     }
 
-    pub fn number(n: D256) -> Self {
+    pub fn number(n: Decimal) -> Self {
         Self {
             defined_by_formula: None,
             dependencies: None,
             val: CellValue::Number(n),
-            pending_dependencies_count: 0,
+            pending_dependencies: 0,
         }
     }
 
@@ -45,7 +46,7 @@ impl CellContent {
             defined_by_formula: None,
             dependencies: None,
             val: CellValue::Error(msg),
-            pending_dependencies_count: 0,
+            pending_dependencies: 0,
         }
     }
 }
@@ -76,7 +77,7 @@ impl Cell {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum CellValue {
     Text(String),
-    Number(D256),
+    Number(Decimal),
     Error(String),
 }
 
@@ -214,10 +215,13 @@ impl Grid {
         let block = self.blocks[idx].get_or_insert_with(Block::new);
         let (r, c) = id.local();
         let cell = block.cells[r][c].get_or_insert_with(Cell::new);
-        let had_dependents = cell.has_dependents();
-        cell.dependents
-            .get_or_insert_with(Vec::new)
-            .push(dependant.clone());
+        let deps = cell.dependents.get_or_insert_with(Vec::new);
+        if deps.contains(dependant) {
+            panic!("Duplikate!");
+            return;
+        }
+        let had_dependents = !deps.is_empty();
+        deps.push(dependant.clone());
         if !had_dependents {
             block.dependants_count += 1;
         }
@@ -233,7 +237,7 @@ impl Grid {
     // todo: probably remove increase_pending_dependency_count, decrease_pending_dependency_count
     // and get_pending_dependency_count with something shorter
 
-    pub fn increase_pending_dependency_count(&mut self, id: &GridCellId) {
+    pub fn increase_pending_dependencies(&mut self, id: &GridCellId) {
         let idx = id.block_idx(self.stride);
         let Some(block) = self.blocks[idx].as_mut() else {
             return;
@@ -241,12 +245,12 @@ impl Grid {
         let (r, c) = id.local();
         if let Some(cell) = block.cells[r][c].as_mut() {
             if let Some(content) = cell.content.as_mut() {
-                content.pending_dependencies_count += 1;
+                content.pending_dependencies += 1;
             }
         }
     }
 
-    pub fn decrease_pending_dependency_count(&mut self, id: &GridCellId) {
+    pub fn decrease_pending_dependencies(&mut self, id: &GridCellId) {
         let idx = id.block_idx(self.stride);
         let Some(block) = self.blocks[idx].as_mut() else {
             return;
@@ -254,12 +258,12 @@ impl Grid {
         let (r, c) = id.local();
         if let Some(cell) = block.cells[r][c].as_mut() {
             if let Some(content) = cell.content.as_mut() {
-                content.pending_dependencies_count -= 1;
+                content.pending_dependencies -= 1;
             }
         }
     }
 
-    pub fn get_pending_dependency_count(&self, id: &GridCellId) -> u32 {
+    pub fn get_pending_dependencies(&self, id: &GridCellId) -> u32 {
         let Some(block) = self.blocks[id.block_idx(self.stride)].as_ref() else {
             return 0;
         };
@@ -267,7 +271,7 @@ impl Grid {
         block.cells[r][c]
             .as_ref()
             .and_then(|cell| cell.content.as_ref())
-            .map_or(0, |c| c.pending_dependencies_count)
+            .map_or(0, |c| c.pending_dependencies)
     }
 
     /// Removes a dependant from a cell. Deallocates block if empty.
@@ -309,7 +313,7 @@ mod tests {
             defined_by_formula: None,
             dependencies: None,
             val,
-            pending_dependencies_count: 0,
+            pending_dependencies: 0,
         }
     }
 
@@ -317,7 +321,7 @@ mod tests {
     fn insert_and_get() {
         let mut grid = Grid::new(1024, 32);
         grid.insert_content(&id(0, 0), content(CellValue::Text("hello".into())));
-        grid.insert_content(&id(100, 200), content(CellValue::Number(D256::from(42))));
+        grid.insert_content(&id(100, 200), content(CellValue::Number(Decimal::from(42))));
 
         assert!(
             matches!(grid.get_content(&id(0, 0)).map(|c| &c.val), Some(CellValue::Text(s)) if s == "hello")

@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use fastnum::D256;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tauri_plugin_log::log::debug;
 
@@ -99,52 +99,45 @@ impl Engine {
 
     /// If the cell is defined by a formula, remove this cell from the dependants of its dependencies
     fn remove_cell_from_dependents(&mut self, id: &AbsoluteCellId) {
-        let gid = id.grid_cell_id();
-        let Some(content) = self.spreadsheet.sheets[id.sheet_id as usize].get_content(&gid) else {
+        let Some(content) = self.spreadsheet.get_content(id) else {
             return;
         };
         let Some(dependencies) = content.dependencies.clone() else {
             return;
         };
         for dep in &dependencies {
-            let dep_gid = dep.grid_cell_id();
-            self.spreadsheet.sheets[dep.sheet_id as usize].remove_dependant(&dep_gid, id);
+            self.spreadsheet.remove_dependant(dep, id);
         }
     }
 
     /// If the cell is defined by a formula, add this cell to the dependants of its dependencies
     fn add_cell_to_dependents(&mut self, id: &AbsoluteCellId) {
-        let gid = id.grid_cell_id();
-        let Some(content) = self.spreadsheet.sheets[id.sheet_id as usize].get_content(&gid) else {
+        let Some(content) = self.spreadsheet.get_content(id) else {
             return;
         };
         let Some(dependencies) = content.dependencies.clone() else {
             return;
         };
         for dep in &dependencies {
-            let dep_gid = dep.grid_cell_id();
-            self.spreadsheet.sheets[dep.sheet_id as usize].add_dependant(&dep_gid, id);
+            self.spreadsheet.add_dependant(dep, id);
         }
     }
 
     /// Parse string and insert appropriate cell.
     pub fn parse_and_insert_string(&mut self, _: &EngineGuard, id: AbsoluteCellId, input: &str) {
-        let gid = id.grid_cell_id();
-        let old = self.spreadsheet.sheets[id.sheet_id as usize]
-            .get_content(&gid)
-            .cloned();
+        let old = self.spreadsheet.get_content(&id).cloned();
 
         // Remove this cell from dependants of its old dependencies
         self.remove_cell_from_dependents(&id);
 
         // if not entering formula, just update value
         if !input.starts_with('=') {
-            let new = if let Ok(n) = input.parse::<D256>() {
+            let new = if let Ok(n) = input.parse::<Decimal>() {
                 CellContent::number(n)
             } else {
                 CellContent::text(input.to_string())
             };
-            self.spreadsheet.sheets[id.sheet_id as usize].insert_content(&gid, new.clone());
+            self.spreadsheet.insert_content(&id, new.clone());
             self.batch.push(CellUpdate(id, old, Some(new)));
             return;
         }
@@ -155,7 +148,7 @@ impl Engine {
         // report any errors during lexing
         if lex_result.has_errors() {
             let new = CellContent::error("Lex error".into());
-            self.spreadsheet.sheets[id.sheet_id as usize].insert_content(&gid, new.clone());
+            self.spreadsheet.insert_content(&id, new.clone());
             self.batch.push(CellUpdate(id, old, Some(new)));
             return;
         }
@@ -165,9 +158,13 @@ impl Engine {
             return;
         };
 
+        let parser_cell_id = GridCellId {
+            row: id.row,
+            col: id.col,
+        };
         let mut state = FormulaState {
             names: &mut self.spreadsheet.names,
-            cell_id: gid.clone(),
+            cell_id: parser_cell_id,
             expr_arena: Vec::new(),
             dependencies: Vec::new(),
         };
@@ -175,7 +172,7 @@ impl Engine {
         // report any errors during parsing (syntax, name not found)
         if !parse_errs.is_empty() {
             let new = CellContent::error("Parse error".into());
-            self.spreadsheet.sheets[id.sheet_id as usize].insert_content(&gid, new.clone());
+            self.spreadsheet.insert_content(&id, new.clone());
             self.batch.push(CellUpdate(id, old, Some(new)));
             return;
         }
@@ -201,9 +198,9 @@ impl Engine {
                 Some(dependencies)
             },
             val: CellValue::Error(String::new()),
-            pending_dependencies_count: 0,
+            pending_dependencies: 0,
         };
-        self.spreadsheet.sheets[id.sheet_id as usize].insert_content(&gid, new.clone());
+        self.spreadsheet.insert_content(&id, new.clone());
 
         // add this cell as dependant to all its dependencies
         self.add_cell_to_dependents(&id);
@@ -211,14 +208,11 @@ impl Engine {
         self.batch.push(CellUpdate(id, old, Some(new)));
     }
 
-    pub fn insert_number(&mut self, _: &EngineGuard, id: AbsoluteCellId, n: D256) {
-        let gid = id.grid_cell_id();
-        let old = self.spreadsheet.sheets[id.sheet_id as usize]
-            .get_content(&gid)
-            .cloned();
+    pub fn insert_number(&mut self, _: &EngineGuard, id: AbsoluteCellId, n: Decimal) {
+        let old = self.spreadsheet.get_content(&id).cloned();
         self.remove_cell_from_dependents(&id);
         let new = CellContent::number(n);
-        self.spreadsheet.sheets[id.sheet_id as usize].insert_content(&gid, new.clone());
+        self.spreadsheet.insert_content(&id, new.clone());
         self.batch.push(CellUpdate(id, old, Some(new)));
     }
 
@@ -230,10 +224,7 @@ impl Engine {
         id: AbsoluteCellId,
         formula_id: FormulaId,
     ) {
-        let gid = id.grid_cell_id();
-        let old = self.spreadsheet.sheets[id.sheet_id as usize]
-            .get_content(&gid)
-            .cloned();
+        let old = self.spreadsheet.get_content(&id).cloned();
         self.remove_cell_from_dependents(&id);
 
         let dependencies = self
@@ -251,20 +242,17 @@ impl Engine {
                 Some(dependencies)
             },
             val: CellValue::Error(String::new()),
-            pending_dependencies_count: 0,
+            pending_dependencies: 0,
         };
-        self.spreadsheet.sheets[id.sheet_id as usize].insert_content(&gid, new.clone());
+        self.spreadsheet.insert_content(&id, new.clone());
         self.add_cell_to_dependents(&id);
         self.batch.push(CellUpdate(id, old, Some(new)));
     }
 
     pub fn delete(&mut self, _: &EngineGuard, id: AbsoluteCellId) {
-        let gid = id.grid_cell_id();
-        let old = self.spreadsheet.sheets[id.sheet_id as usize]
-            .get_content(&gid)
-            .cloned();
+        let old = self.spreadsheet.get_content(&id).cloned();
         self.remove_cell_from_dependents(&id);
-        self.spreadsheet.sheets[id.sheet_id as usize].remove_content(&gid);
+        self.spreadsheet.remove_content(&id);
         self.batch.push(CellUpdate(id, old, None));
     }
 
@@ -275,60 +263,56 @@ impl Engine {
         debug!("Eval #{}", self.debug.eval_number);
         let dep_time = std::time::Instant::now();
 
-        let mut wave: Vec<CellUpdate> = changes;
-        let mut pending: Vec<CellUpdate> = Vec::new();
+        // step 1.
+        //
+        // for each cell X (that is changed, or is (transitive) dependent of changed cell):
+        // set "pending_dependencies" to be the number of cells that need to be calculated before X.
 
-        for CellUpdate(cell_id, _, _) in &wave {
-            let gid = cell_id.grid_cell_id();
-            let deps = self.spreadsheet.sheets[cell_id.sheet_id as usize]
-                .get_dependents(&gid)
-                .cloned();
-            if let Some(deps) = deps {
-                for dep in deps {
-                    let dep_gid = dep.grid_cell_id();
-                    self.spreadsheet.sheets[dep.sheet_id as usize]
-                        .increase_pending_dependency_count(&dep_gid);
-                    pending.push(CellUpdate(dep, None, None));
-                }
-            }
-        }
+        // for each cell in "current", increase "pending_dependencies" of cell's dependents, and push cell's dependents to next
+        // after each pass, swap
 
-        let mut scan_start = 0;
-        loop {
-            let scan_end = pending.len();
-            if scan_start >= scan_end {
-                break;
-            }
-            for i in scan_start..scan_end {
-                let cell_id = pending[i].0;
-                let gid = cell_id.grid_cell_id();
-                let deps = self.spreadsheet.sheets[cell_id.sheet_id as usize]
-                    .get_dependents(&gid)
-                    .cloned();
-                if let Some(deps) = deps {
-                    for dep in deps {
-                        let dep_gid = dep.grid_cell_id();
-                        let count = self.spreadsheet.sheets[dep.sheet_id as usize]
-                            .get_pending_dependency_count(&dep_gid);
-                        if count == 0 {
-                            pending.push(CellUpdate(dep, None, None));
+        let change_set: std::collections::HashSet<AbsoluteCellId> =
+            changes.iter().map(|CellUpdate(id, _, _)| *id).collect();
+        let mut current = changes.clone();
+        let mut next: Vec<CellUpdate> = Vec::new();
+        while !current.is_empty() {
+            for CellUpdate(cell_id, _, _) in &current {
+                let dependents = self.spreadsheet.get_dependents(cell_id).cloned();
+                if let Some(dependents) = dependents {
+                    for d in dependents {
+                        let count = self.spreadsheet.get_pending_dependencies(&d);
+                        if count == 0 && !change_set.contains(&d) {
+                            next.push(CellUpdate(d, None, None));
                         }
-                        self.spreadsheet.sheets[dep.sheet_id as usize]
-                            .increase_pending_dependency_count(&dep_gid);
+                        self.spreadsheet.increase_pending_dependencies(&d);
                     }
                 }
             }
-            scan_start = scan_end;
+
+            current.clear();
+            std::mem::swap(&mut current, &mut next);
+        }
+
+        // add cells, that have their dependencies already calculated into "wave"
+        let mut wave: Vec<CellUpdate> = Vec::new();
+        for CellUpdate(cell_id, _, _) in &changes {
+            if self.spreadsheet.get_pending_dependencies(cell_id) == 0 {
+                wave.push(CellUpdate(*cell_id, None, None));
+            }
         }
 
         let mut dep_duration = dep_time.elapsed();
         let mut eval_duration = std::time::Duration::ZERO;
         let mut eval_store: Vec<ExprAtom> = Vec::new();
 
+        // step 2.
+        //
+        // todo
+
         while let Some(CellUpdate(cell_id, _, _)) = wave.pop() {
-            let gid = cell_id.grid_cell_id();
-            let formula_id = self.spreadsheet.sheets[cell_id.sheet_id as usize]
-                .get_content(&gid)
+            let formula_id = self
+                .spreadsheet
+                .get_content(&cell_id)
                 .and_then(|c| c.defined_by_formula);
 
             if let Some(formula_id) = formula_id {
@@ -346,22 +330,17 @@ impl Engine {
                     };
                     eval_duration += t.elapsed();
 
-                    self.spreadsheet.sheets[cell_id.sheet_id as usize].set_value(&gid, new_value);
+                    self.spreadsheet.set_value(&cell_id, new_value);
                 }
             }
 
             // Decrement pending_dependencies_count of dependents, add to wave if ready
             let t = std::time::Instant::now();
-            let deps = self.spreadsheet.sheets[cell_id.sheet_id as usize]
-                .get_dependents(&gid)
-                .cloned();
+            let deps = self.spreadsheet.get_dependents(&cell_id).cloned();
             if let Some(deps) = deps {
                 for dep in deps {
-                    let dep_gid = dep.grid_cell_id();
-                    self.spreadsheet.sheets[dep.sheet_id as usize]
-                        .decrease_pending_dependency_count(&dep_gid);
-                    let count = self.spreadsheet.sheets[dep.sheet_id as usize]
-                        .get_pending_dependency_count(&dep_gid);
+                    self.spreadsheet.decrease_pending_dependencies(&dep);
+                    let count = self.spreadsheet.get_pending_dependencies(&dep);
                     if count == 0 {
                         wave.push(CellUpdate(dep, None, None));
                     }
@@ -408,14 +387,12 @@ impl Engine {
         let changes = entry.changes.clone();
         for CellUpdate(id, old, _) in &changes {
             self.remove_cell_from_dependents(id);
-            let gid = id.grid_cell_id();
             match old {
                 Some(content) => {
-                    self.spreadsheet.sheets[id.sheet_id as usize]
-                        .insert_content(&gid, content.clone());
+                    self.spreadsheet.insert_content(id, content.clone());
                     self.add_cell_to_dependents(id);
                 }
-                None => self.spreadsheet.sheets[id.sheet_id as usize].remove_content(&gid),
+                None => self.spreadsheet.remove_content(id),
             }
         }
         self.eval(changes);
@@ -432,14 +409,12 @@ impl Engine {
         self.history.log_position += 1;
         for CellUpdate(id, _, new) in &changes {
             self.remove_cell_from_dependents(id);
-            let gid = id.grid_cell_id();
             match new {
                 Some(content) => {
-                    self.spreadsheet.sheets[id.sheet_id as usize]
-                        .insert_content(&gid, content.clone());
+                    self.spreadsheet.insert_content(id, content.clone());
                     self.add_cell_to_dependents(id);
                 }
-                None => self.spreadsheet.sheets[id.sheet_id as usize].remove_content(&gid),
+                None => self.spreadsheet.remove_content(id),
             }
         }
         self.eval(changes);
@@ -488,12 +463,12 @@ impl Engine {
     }
 }
 
-/// Resolve an ExprAtom to a D256 number. If it's a single cell reference, look up the cell value.
+/// Resolve an ExprAtom to a Decimal number. If it's a single cell reference, look up the cell value.
 fn resolve_number(
     source_cell: &AbsoluteCellId,
     expr: &ExprAtom,
     sheets: &Sheets,
-) -> Result<D256, EvalError> {
+) -> Result<Decimal, EvalError> {
     match expr {
         ExprAtom::Number(n) => Ok(*n),
         ExprAtom::Reference(r) => match r {
@@ -511,7 +486,7 @@ fn resolve_number(
                         expected: AtomType::Number,
                         got: AtomType::Text,
                     }),
-                    None => Ok(D256::ZERO),
+                    None => Ok(Decimal::ZERO),
                 }
             }
             Reference::Range { .. } => Err(EvalError::TypeError {
@@ -606,7 +581,7 @@ fn eval_formula(
                 let (sheet_id, sr, sc, er, ec) =
                     resolve_range(source_cell, &eval_store[range_arg_idx], sheets)?;
                 let sheet = &sheets[sheet_id as usize];
-                let mut sum = D256::ZERO;
+                let mut sum = Decimal::ZERO;
                 for row in sr..=er {
                     for col in sc..=ec {
                         let gid = GridCellId { row, col };
@@ -622,7 +597,7 @@ fn eval_formula(
                 let (sheet_id, sr, sc, er, ec) =
                     resolve_range(source_cell, &eval_store[range_arg_idx], sheets)?;
                 let sheet = &sheets[sheet_id as usize];
-                let mut sum = D256::ZERO;
+                let mut sum = Decimal::ZERO;
                 let mut count: u64 = 0;
                 for row in sr..=er {
                     for col in sc..=ec {
@@ -634,9 +609,9 @@ fn eval_formula(
                     }
                 }
                 if count == 0 {
-                    ExprAtom::Number(D256::ZERO)
+                    ExprAtom::Number(Decimal::ZERO)
                 } else {
-                    ExprAtom::Number(sum / count as f64)
+                    ExprAtom::Number(sum / Decimal::from(count))
                 }
             }
             Expr::ExtrnalFunctionCall { .. } => todo!(),

@@ -27,5 +27,5 @@ bitcode = { version = "0.6", features = ["serde"] }
 thiserror = "2.0.18"
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
-fastnum = { version = "0.7", features = ["serde"] }
 flate2 = "1.1.9"
+rust_decimal = { version = "1.40.0", features = ["serde-with-str"] }
