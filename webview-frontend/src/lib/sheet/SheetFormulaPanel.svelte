@@ -36,7 +36,7 @@
             />
         </div>
 
-        <div class="separator"></div>
+        <div class="separator">|</div>
 
         <div class="content-group" onfocusin={handleFocus}>
             <div class="formula-label">ƒ(x)</div>
@@ -58,15 +58,15 @@
     .panel {
         display: flex;
         align-items: center;
-        height: 38px;
-        padding: 0 10px;
+        height: 1.875rem;
+        padding: 0 0.25rem;
         user-select: none;
     }
 
     .panel-content {
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: 0.625rem;
         width: 100%;
         height: 100%;
     }
@@ -77,23 +77,22 @@
     }
 
     .cell-ref-input {
-        width: 72px;
-        height: 26px;
-        padding: 2px 6px;
-        border: var(--wx-input-border, 1px solid #384047);
-        border-radius: var(--wx-input-border-radius, 3px);
-        background: var(--wx-input-background, #2a2b2d);
+        width: 4.5rem;
+        height: 1.5rem;
+        padding-left: 0.8rem;
+        padding-right: 0.8rem;
+        border: none;
+        background: transparent;
         color: var(--wx-input-font-color, rgba(255, 255, 255, 0.9));
         font-family: "JetBrains Mono", monospace;
-        font-size: 12px;
+        font-size: 0.75rem;
         font-weight: 500;
-        text-align: center;
+        text-align: left;
         cursor: default;
     }
 
     .cell-ref-input:focus {
         outline: none;
-        border: var(--wx-input-border-focus, 1px solid #7a67eb);
     }
 
     .cell-ref-input::placeholder {
@@ -101,23 +100,23 @@
     }
 
     .separator {
-        width: 1px;
-        height: 20px;
-        background: var(--wx-border-light, #384047);
+        color: var(--wx-border-light, #384047);
+        font-size: 1rem;
+        line-height: 1;
         opacity: 0.5;
     }
 
     .content-group {
         display: flex;
         align-items: center;
-        gap: 8px;
+        gap: 0.5rem;
         flex: 1;
         height: 100%;
     }
 
     .formula-label {
         font-family: var(--wx-font-family, sans-serif);
-        font-size: 13px;
+        font-size: 0.8125rem;
         font-weight: 500;
         color: var(--wx-color-font-alt, #9fa1ae);
         min-width: fit-content;
@@ -128,26 +127,21 @@
     .content-group :global(.top-panel-editor) {
         flex: 1;
         width: 0;
-        height: 26px;
-        background: var(--wx-input-background, #2a2b2d);
-        border: var(--wx-input-border, 1px solid #384047);
-        border-radius: var(--wx-input-border-radius, 3px);
+        height: 1.5rem;
+        background: transparent;
+        border: none;
         overflow: hidden;
     }
 
     .content-group :global(.top-panel-editor.disabled) {
-        background: color-mix(
-            in srgb,
-            var(--wx-input-background, #2a2b2d) 85%,
-            black
-        );
+        background: transparent;
     }
 
     .content-group :global(.top-panel-editor .editor) {
-        padding: 3px 10px;
+        padding: 0.1875rem 0.625rem;
     }
 
     .content-group :global(.top-panel-editor .backdrop) {
-        padding: 3px 10px;
+        padding: 0.1875rem 0.625rem;
     }
 </style>

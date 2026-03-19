@@ -53,6 +53,8 @@ impl CellContent {
     }
 }
 
+// todo: move out dependents and dependencies outside of cell
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Cell {
     #[serde(default, skip_serializing_if = "Option::is_none")]

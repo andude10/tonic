@@ -48,6 +48,7 @@ impl CellId {
 
 struct TonicState {
     engine: Engine,
+    current_buf: Vec<u8>,
     last_viewport_buf: Vec<u8>,
     last_viewport_range: (u32, u32, u32, u32),
     file_name: Option<String>,
@@ -58,6 +59,7 @@ impl TonicState {
     fn new() -> Self {
         Self {
             engine: Engine::new(),
+            current_buf: Vec::new(),
             last_viewport_buf: Vec::new(),
             last_viewport_range: (u32::MAX, u32::MAX, u32::MAX, u32::MAX),
             file_name: None,
@@ -177,9 +179,11 @@ fn get_cells_in_viewport(
         return tauri::ipc::Response::new(Vec::new());
     };
 
-    let mut state = state.lock().unwrap();
+    let state = &mut *state.lock().unwrap();
+    let buf = &mut state.current_buf;
+    let spreadsheet = &state.engine.spreadsheet;
 
-    let mut buf = Vec::new();
+    buf.clear();
     for row in row_start..=row_end {
         for col in col_start..=col_end {
             let id = AbsoluteCellId {
@@ -187,8 +191,8 @@ fn get_cells_in_viewport(
                 row,
                 col,
             };
-            let content = state.engine.spreadsheet.get_content(&id);
-            encode_cell(&mut buf, row, col, content);
+            let content = spreadsheet.get_content(&id);
+            encode_cell(buf, row, col, content);
         }
     }
 
@@ -198,11 +202,11 @@ fn get_cells_in_viewport(
 
     // return nothing if viewport range didn't change and
     // buffer that was sent previously is the same as the new buffer (no cell was updated in the current viewport)
-    if !viewport_changed && buf == state.last_viewport_buf {
+    if !viewport_changed && state.current_buf == state.last_viewport_buf {
         return tauri::ipc::Response::new(Vec::new());
     }
-    state.last_viewport_buf = buf.clone();
-    tauri::ipc::Response::new(buf)
+    std::mem::swap(&mut state.current_buf, &mut state.last_viewport_buf);
+    tauri::ipc::Response::new(state.last_viewport_buf.clone())
 }
 
 #[tauri::command(async)]

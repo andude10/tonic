@@ -12,7 +12,7 @@
         type UICell,
     } from "$lib/sheet/shared";
     import { invoke } from "@tauri-apps/api/core";
-    import SheetTopPanel from "./SheetTopPanel.svelte";
+    import SheetFormulaPanel from "./SheetFormulaPanel.svelte";
     import Cell from "./Cell.svelte";
     import { onMount, untrack } from "svelte";
     import { endTimer, startTimer } from "$lib/stats.svelte";
@@ -1374,6 +1374,7 @@
     function handleRequestData(
         ev: { row: { start: number; end: number } } & { [key: string]: any },
     ): void {
+        console.log("handle request data");
         const {
             row: { start, end },
         } = ev;
@@ -1384,7 +1385,7 @@
     }
 </script>
 
-<SheetTopPanel />
+<SheetFormulaPanel />
 
 <div
     class="grid-wrapper"
@@ -1460,8 +1461,7 @@
         flex: 1 1 auto;
         min-height: 0;
         min-width: 0;
-        margin-top: 0.25rem;
-        border-top: var(--wx-border, 1px solid #384047);
+        margin-top: 0;
         position: relative;
         overflow: hidden;
         outline: none;
@@ -1496,10 +1496,15 @@
         align-items: center;
         justify-content: center;
         user-select: none;
+        border-right: var(--wx-table-cell-border) !important;
         transition:
             background-color 30ms cubic-bezier(0, 0, 0.2, 1),
             box-shadow 30ms cubic-bezier(0, 0, 0.2, 1);
         -webkit-user-select: none;
+    }
+
+    :global(div[role="columnheader"][data-header-id="rowNumber"]) {
+        border-right: var(--wx-table-cell-border) !important;
     }
 
     :global(div[role="columnheader"]) {
