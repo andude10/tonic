@@ -10,8 +10,8 @@ use crate::file_api;
 use crate::parser::{lex_formula, parse_formula, FormulaState};
 use crate::storage::grid::{CellContent, CellValue, GridCellId};
 use crate::storage::types::{
-    AbsoluteCellId, AtomType, Expr, ExprAtom, Formula, FormulaId, Reference, SheetId, Sheets,
-    Spreadsheet,
+    AbsoluteCellId, AtomType, Expr, ExprAtom, Formula, FormulaId, Projection, Reference, SheetId,
+    Sheets, Spreadsheet,
 };
 
 /// A single cell mutation: (cell_id, old_value, new_value).
@@ -428,6 +428,68 @@ impl Engine {
             Some(self.history.log[self.history.log_position - 1].id)
         };
         current_id == self.history.last_saved_log_id
+    }
+
+    /// Update sorted_rows on an existing Sort projection.
+    /// `table_id` identifies the table, `projection_idx` the index in `self.spreadsheet.projections`.
+    pub fn sort_table_column(
+        &mut self,
+        table_id: u32,
+        projection_idx: usize,
+        sort_col: u32,
+        desc: bool,
+    ) -> Result<(), String> {
+        let table = self
+            .spreadsheet
+            .tables
+            .get(table_id)
+            .ok_or("Table not found")?;
+
+        let mut rows: Vec<u32> = (table.body_start.row..=table.body_end.row).collect();
+        rows.sort_by(|&a, &b| {
+            let va = self.spreadsheet.get_value(&AbsoluteCellId {
+                sheet_id: table.sheet_id,
+                row: a,
+                col: sort_col,
+            });
+            let vb = self.spreadsheet.get_value(&AbsoluteCellId {
+                sheet_id: table.sheet_id,
+                row: b,
+                col: sort_col,
+            });
+            // empty cells always sort to the end, regardless of direction
+            match (va, vb) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (Some(a_val), Some(b_val)) => {
+                    let cmp = match (a_val, b_val) {
+                        (CellValue::Number(n1), CellValue::Number(n2)) => n1.cmp(n2),
+                        (CellValue::Text(t1), CellValue::Text(t2)) => t1.cmp(t2),
+                        (CellValue::Number(_), _) => std::cmp::Ordering::Less,
+                        (_, CellValue::Number(_)) => std::cmp::Ordering::Greater,
+                        _ => std::cmp::Ordering::Equal,
+                    };
+                    if desc {
+                        cmp.reverse()
+                    } else {
+                        cmp
+                    }
+                }
+            }
+        });
+
+        let projection = self
+            .spreadsheet
+            .projections
+            .get_mut(projection_idx)
+            .ok_or("Projection not found")?;
+        if let Projection::Sort { sorted_rows, .. } = projection {
+            *sorted_rows = rows;
+        } else {
+            return Err("Projection is not a Sort".into());
+        }
+        Ok(())
     }
 
     /// Reset engine with an empty spreadsheet.

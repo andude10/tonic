@@ -9,6 +9,7 @@
         type CellId,
         type ChangeBounds,
         type SheetRow,
+        type TableData,
         type UICell,
     } from "$lib/sheet/shared";
     import { invoke } from "@tauri-apps/api/core";
@@ -29,17 +30,56 @@
     import FillOriginOverlay from "./overlays/FillOriginOverlay.svelte";
     import CloneSourceOverlay from "./overlays/CloneSourceOverlay.svelte";
     import RefOverlay from "./overlays/RefOverlay.svelte";
+    import TableOverlay from "./overlays/TableOverlay.svelte";
+    import { listen } from "@tauri-apps/api/event";
     import { ContextMenu, type IMenuOptionClick } from "@svar-ui/svelte-menu";
 
     const contextMenuOptions = [
         { id: "copy", text: "Copy", icon: "wxi wxi-content-copy" },
         { id: "paste", text: "Paste", icon: "wxi wxi-content-paste" },
+        { id: "create-table", text: "Create Table" },
     ];
 
     function handleContextMenuClick(ev: IMenuOptionClick) {
         if (!ev.option) return;
         if (ev.option.id === "copy") copySelection();
         else if (ev.option.id === "paste") pasteFromClipboard();
+        else if (ev.option.id === "create-table") createTableFromSelection();
+    }
+
+    function createTableFromSelection() {
+        const b = focusedRangeBounds;
+        if (!b || b.maxR - b.minR < 1) return; // need at least header + 1 body row
+        invoke<number>("create_table", {
+            firstHeader: { row: b.minR, col: b.minC },
+            lastHeader: { row: b.minR, col: b.maxC },
+            bodyStart: { row: b.minR + 1, col: b.minC },
+            bodyEnd: { row: b.maxR, col: b.maxC },
+        })
+            .then((id) => {
+                tables = [
+                    ...tables,
+                    {
+                        id,
+                        headerBounds: {
+                            minR: b.minR,
+                            maxR: b.minR,
+                            minC: b.minC,
+                            maxC: b.maxC,
+                        },
+                        bodyBounds: {
+                            minR: b.minR + 1,
+                            maxR: b.maxR,
+                            minC: b.minC,
+                            maxC: b.maxC,
+                        },
+                        title: `Table ${tables.length + 1}`,
+                        hasShadow: false,
+                    },
+                ];
+                requestAnimationFrame(() => repositionOverlays());
+            })
+            .catch(console.error);
     }
 
     function contextMenuResolver(_: any, event: MouseEvent) {
@@ -145,6 +185,32 @@
     }
 
     let focusedCell: CellId | null = $state(null);
+    let tables: TableData[] = $state([]);
+
+    // Map of "row,col" -> CSS class name for table cells
+    let tableCellStyles = $derived.by(() => {
+        const map = new Map<string, string>();
+        for (const t of tables) {
+            const hRow = t.headerBounds.minR;
+            for (let c = t.headerBounds.minC; c <= t.headerBounds.maxC; c++) {
+                const colId = columnIndexToLetter(c);
+                map.set(`${hRow + 1},${colId}`, "table-header-cell");
+            }
+            for (let r = t.bodyBounds.minR; r <= t.bodyBounds.maxR; r++) {
+                const bodyIdx = r - t.bodyBounds.minR;
+                const cls =
+                    bodyIdx % 2 === 0 ? "table-row-even" : "table-row-odd";
+                for (let c = t.bodyBounds.minC; c <= t.bodyBounds.maxC; c++) {
+                    map.set(`${r + 1},${columnIndexToLetter(c)}`, cls);
+                }
+            }
+        }
+        return map;
+    });
+
+    function cellStyle(row: any, col: any): string {
+        return tableCellStyles.get(`${row.id},${col.id}`) ?? "";
+    }
 
     const INITIAL_ROWS = 1000;
     const INITIAL_COLS = 26;
@@ -388,6 +454,9 @@
         },
         set editorInputWidth(v) {
             editorInputWidth = v;
+        },
+        get tables() {
+            return tables;
         },
         commitEdit,
     });
@@ -790,6 +859,19 @@
     }
 
     function handleMouseDown(ev: MouseEvent) {
+        // right-click inside current selection: let context menu handle it
+        if (ev.button === 2 && focusedRangeBounds && hoveredCell) {
+            const b = focusedRangeBounds;
+            if (
+                hoveredCell.row >= b.minR &&
+                hoveredCell.row <= b.maxR &&
+                hoveredCell.col >= b.minC &&
+                hoveredCell.col <= b.maxC
+            ) {
+                return;
+            }
+        }
+
         const target = ev.target as HTMLElement;
         const clickedCell = target.closest<HTMLElement>(".wx-cell");
 
@@ -1170,6 +1252,7 @@
     let fillOriginOverlay = $state<FillOriginOverlay>(null as any);
     let cloneSourceOverlay = $state<CloneSourceOverlay>(null as any);
     let refOverlays: RefOverlay[] = $state([]);
+    let tableOverlays: (TableOverlay | undefined)[] = $state([]);
     let overlayDebounceId: ReturnType<typeof setTimeout> | null = null;
     let gridWrapperEl: HTMLElement | null = null;
     let clipWrapperEl: HTMLElement | null = null;
@@ -1276,6 +1359,7 @@
         fillOriginOverlay?.reposition();
         cloneSourceOverlay?.reposition();
         for (const ref of refOverlays) ref?.reposition();
+        for (const t of tableOverlays) t?.reposition();
     }
 
     // when selection or formula bounds change, reposition overlays and apply header highlight
@@ -1365,9 +1449,30 @@
 
         restartPolling();
 
+        const unlistenCreated = listen<number>(
+            "created-table-projection",
+            (event) => {
+                const tableId = event.payload;
+                tables = tables.map((t) =>
+                    t.id === tableId ? { ...t, hasShadow: true } : t,
+                );
+            },
+        );
+        const unlistenRemoved = listen<number>(
+            "removed-table-projection",
+            (event) => {
+                const tableId = event.payload;
+                tables = tables.map((t) =>
+                    t.id === tableId ? { ...t, hasShadow: false } : t,
+                );
+            },
+        );
+
         return () => {
             resizeObs.disconnect();
             if (pollInterval !== undefined) clearInterval(pollInterval);
+            unlistenCreated.then((fn) => fn());
+            unlistenRemoved.then((fn) => fn());
         };
     });
 
@@ -1415,11 +1520,22 @@
             split={{ left }}
             {sizes}
             {select}
+            {cellStyle}
         />
     </ContextMenu>
     <div class="selection-overlays-clip" bind:this={clipWrapperEl}>
         <div class="selection-overlays" bind:this={overlaysEl}>
             {#if sos}
+                {#each tables as table, i}
+                    <TableOverlay
+                        bind:this={tableOverlays[i]}
+                        {sos}
+                        headerBounds={table.headerBounds}
+                        bodyBounds={table.bodyBounds}
+                        title={table.title}
+                        hasShadow={table.hasShadow}
+                    />
+                {/each}
                 <FillOriginOverlay
                     bind:this={fillOriginOverlay}
                     {sos}
@@ -1533,5 +1649,23 @@
 
     :global(.wx-cell:focus) {
         outline: 0px !important;
+    }
+
+    :global(.table-header-cell) {
+        background: #1a1a1a !important;
+        border-bottom: 1px solid #333 !important;
+        border-right: 0px !important;
+        font-weight: 500;
+        color: #a1a1aa;
+    }
+
+    :global(.table-row-even) {
+        background: #1e1f22 !important;
+        border-bottom: 1px solid #2a2a2a !important;
+    }
+
+    :global(.table-row-odd) {
+        background: #232527 !important;
+        border-bottom: 1px solid #2a2a2a !important;
     }
 </style>

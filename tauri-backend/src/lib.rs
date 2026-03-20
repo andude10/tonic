@@ -17,7 +17,7 @@ use tauri_plugin_log::log::{debug, error};
 use crate::engine::{ChangeBounds, Engine};
 use crate::parser::shift_formula_refs;
 use crate::storage::grid::{CellContent, CellValue, GridCellId};
-use crate::storage::types::AbsoluteCellId;
+use crate::storage::types::{AbsoluteCellId, Projection, Table};
 
 mod engine;
 mod file_api;
@@ -191,7 +191,7 @@ fn get_cells_in_viewport(
                 row,
                 col,
             };
-            let content = spreadsheet.get_content(&id);
+            let content = spreadsheet.get_projected_content(&id);
             encode_cell(buf, row, col, content);
         }
     }
@@ -473,6 +473,127 @@ fn get_file_info(state: tauri::State<'_, Mutex<TonicState>>) -> (Option<String>,
     (state.file_name.clone(), state.file_path.clone())
 }
 
+#[tauri::command(async)]
+fn create_table(
+    state: tauri::State<'_, Mutex<TonicState>>,
+    first_header: GridCellId,
+    last_header: GridCellId,
+    body_start: GridCellId,
+    body_end: GridCellId,
+) -> Result<u32, String> {
+    let mut state = state.lock().unwrap();
+
+    if first_header.row != last_header.row {
+        return Err("Header must be on a single row".into());
+    }
+    if body_start.row != first_header.row + 1 {
+        return Err("Body must start immediately below header".into());
+    }
+    if first_header.col != body_start.col || last_header.col != body_end.col {
+        return Err("Body columns must align with header".into());
+    }
+    if body_end.row < body_start.row || body_end.col < body_start.col {
+        return Err("Invalid body bounds".into());
+    }
+
+    // Check overlap with existing tables
+    for maybe_table in state.engine.spreadsheet.tables.iter() {
+        let Some(t) = maybe_table else { continue };
+        let h_overlap =
+            last_header.col >= t.first_header.col && first_header.col <= t.last_header.col;
+        let v_overlap = body_end.row >= t.first_header.row && first_header.row <= t.body_end.row;
+        if h_overlap && v_overlap {
+            return Err("Table overlaps with existing table".into());
+        }
+    }
+
+    let id = state.engine.spreadsheet.tables.insert(Table {
+        sheet_id: 0,
+        first_header,
+        last_header,
+        body_start,
+        body_end,
+    });
+    Ok(id)
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum TableProjectionParams {
+    Sort { header: GridCellId, desc: bool },
+    Filter { header: GridCellId },
+}
+
+#[tauri::command(async)]
+fn create_or_update_table_projection(
+    app: AppHandle,
+    state: tauri::State<'_, Mutex<TonicState>>,
+    params: TableProjectionParams,
+) -> Result<(), String> {
+    let mut state = state.lock().unwrap();
+    match params {
+        TableProjectionParams::Sort { header, desc } => {
+            let (table_id, table) = state
+                .engine
+                .spreadsheet
+                .find_table_by_header(&header)
+                .ok_or("Column header is not part of any table")?;
+            let table = table.clone();
+
+            let existing_idx = state
+                .engine
+                .spreadsheet
+                .find_sort_projection_for_table(&table);
+
+            let projection_idx = if let Some(idx) = existing_idx {
+                idx
+            } else {
+                // create new projection
+                state.engine.spreadsheet.projections.push(Projection::Sort {
+                    sheet_id: table.sheet_id,
+                    projection_start: table.body_start.clone(),
+                    projection_end: table.body_end.clone(),
+                    sorted_rows: (table.body_start.row..=table.body_end.row).collect(),
+                });
+                let _ = app.emit("created-table-projection", table_id);
+                state.engine.spreadsheet.projections.len() - 1
+            };
+
+            state
+                .engine
+                .sort_table_column(table_id, projection_idx, header.col, desc)?;
+            Ok(())
+        }
+        TableProjectionParams::Filter { .. } => Err("Filter not yet implemented".into()),
+    }
+}
+
+#[tauri::command(async)]
+fn remove_table_projection(
+    app: AppHandle,
+    state: tauri::State<'_, Mutex<TonicState>>,
+    header: GridCellId,
+) -> Result<(), String> {
+    let mut state = state.lock().unwrap();
+
+    let (table_id, table) = state
+        .engine
+        .spreadsheet
+        .find_table_by_header(&header)
+        .ok_or("Table not found")?;
+    let table = table.clone();
+
+    let idx = state
+        .engine
+        .spreadsheet
+        .find_sort_projection_for_table(&table)
+        .ok_or("No projection found for this table")?;
+
+    state.engine.spreadsheet.projections.remove(idx);
+    let _ = app.emit("removed-table-projection", table_id);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -501,6 +622,9 @@ pub fn run() {
             rename_current_file,
             undo_input,
             redo_input,
+            create_table,
+            create_or_update_table_projection,
+            remove_table_projection,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -12,6 +12,16 @@ export type ChangeBounds = {
     max_col: number;
 };
 
+import type { CellRange } from "./overlays/Overlays.svelte";
+
+export type TableData = {
+    id: number;
+    headerBounds: CellRange;
+    bodyBounds: CellRange;
+    title: string;
+    hasShadow: boolean;
+};
+
 export type SheetSharedState = {
     focusedCell: CellId | null;
     isEditing: boolean;
@@ -20,6 +30,7 @@ export type SheetSharedState = {
     readonly editorInputHtml: string;
     caretPosition: number;
     editorInputWidth: number;
+    tables: TableData[];
     commitEdit(): void;
 };
 

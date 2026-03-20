@@ -9,6 +9,12 @@ pub struct StableVec<T> {
     free: Vec<u32>,
 }
 
+impl<T> Default for StableVec<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> StableVec<T> {
     pub fn new() -> Self {
         Self {

@@ -69,7 +69,7 @@
 
     .formula-input {
         position: relative;
-        background: var(--wx-background);
+        background: inherit;
         width: 100%;
     }
 

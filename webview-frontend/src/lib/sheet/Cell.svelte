@@ -1,6 +1,8 @@
 <script lang="ts">
     import { tick } from "svelte";
     import type { IApi } from "@svar-ui/svelte-grid";
+    import { invoke } from "@tauri-apps/api/core";
+    import { DropDownMenu, type IMenuOptionClick } from "@svar-ui/svelte-menu";
     import InputCell from "./InputCell.svelte";
     import {
         columnLetterToIndex,
@@ -37,6 +39,40 @@
         const cell = row[column.id];
         return isCellData(cell) && cell.isFormula;
     });
+
+    const isTableHeader = $derived.by(() => {
+        const r = (row.id as number) - 1;
+        const c = columnLetterToIndex(column.id);
+        return shared.tables.some(
+            (t) =>
+                r === t.headerBounds.minR &&
+                c >= t.headerBounds.minC &&
+                c <= t.headerBounds.maxC,
+        );
+    });
+
+    const dropdownOptions = [
+        { id: "sort-asc", text: "Sort Ascending" },
+        {
+            id: "sort-desc",
+            text: "Sort Descending",
+        },
+    ];
+
+    function handleDropdownClick(ev: IMenuOptionClick) {
+        if (!ev.option) return;
+        const desc = ev.option.id === "sort-desc";
+        invoke("create_or_update_table_projection", {
+            params: {
+                type: "Sort",
+                header: {
+                    row: (row.id as number) - 1,
+                    col: columnLetterToIndex(column.id),
+                },
+                desc,
+            },
+        }).catch(console.error);
+    }
 
     let editingCellEl: HTMLDivElement | undefined = $state();
 
@@ -78,6 +114,17 @@
                 /></svg
             >
         {/if}
+        {#if isTableHeader}
+            <DropDownMenu
+                options={dropdownOptions}
+                onclick={handleDropdownClick}
+                at="bottom"
+            >
+                <button class="table-header-btn" aria-label="Sort column"
+                    ><i class="wxi wxi-angle-down"></i></button
+                >
+            </DropDownMenu>
+        {/if}
     </div>
 {/if}
 
@@ -96,7 +143,8 @@
         min-width: 100%;
         height: 100%;
         position: relative;
-        z-index: 6;
+        z-index: 4;
+        background: inherit;
     }
 
     .editing-cell::after {
@@ -131,5 +179,28 @@
         flex-shrink: 0;
         color: rgba(255, 255, 255, 0.15);
         border: var(--wx-border);
+    }
+
+    .display-cell > :global(span:has(.table-header-btn)) {
+        margin-left: auto;
+        flex-shrink: 0;
+    }
+
+    .table-header-btn {
+        padding: 0 0.15em;
+        background: none;
+        border: none;
+        color: rgba(255, 255, 255, 0.35);
+        cursor: pointer;
+        font-size: 0.875em;
+        flex-shrink: 0;
+        line-height: 1;
+        display: flex;
+        align-items: center;
+        pointer-events: auto;
+    }
+
+    .table-header-btn:hover {
+        color: rgba(255, 255, 255, 0.8);
     }
 </style>
