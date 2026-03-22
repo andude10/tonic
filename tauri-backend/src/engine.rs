@@ -10,8 +10,8 @@ use crate::file_api;
 use crate::parser::{lex_formula, parse_formula, FormulaState};
 use crate::storage::grid::{CellContent, CellValue, GridCellId};
 use crate::storage::types::{
-    AbsoluteCellId, AtomType, Expr, ExprAtom, Formula, FormulaId, Projection, Reference, SheetId,
-    Sheets, Spreadsheet,
+    AbsoluteCellId, AtomType, Expr, ExprAtom, Formula, FormulaId, ProjectionFilterOption,
+    Reference, SheetId, Sheets, Spreadsheet,
 };
 
 /// A single cell mutation: (cell_id, old_value, new_value).
@@ -257,8 +257,9 @@ impl Engine {
     }
 
     /// Recalculate all formulas affected by the given cell changes.
+    /// All changes should already be applied to the grid, and the dependency graph should be correct
     /// todo: write comments
-    fn eval(&mut self, changes: Vec<CellUpdate>) {
+    fn post_cell_changes_hook(&mut self, changes: Vec<CellUpdate>) {
         self.debug.eval_number += 1;
         debug!("Eval #{}", self.debug.eval_number);
         let dep_time = std::time::Instant::now();
@@ -346,6 +347,9 @@ impl Engine {
                     }
                 }
             }
+
+            self.update_table_on_cell_change(&cell_id);
+
             dep_duration += t.elapsed();
         }
 
@@ -374,7 +378,7 @@ impl Engine {
         });
         self.history.log_position = self.history.log.len();
 
-        self.eval(eval_changes);
+        self.post_cell_changes_hook(eval_changes);
     }
 
     pub fn undo(&mut self) -> Option<ChangeBounds> {
@@ -395,7 +399,7 @@ impl Engine {
                 None => self.spreadsheet.remove_content(id),
             }
         }
-        self.eval(changes);
+        self.post_cell_changes_hook(changes);
         Some(bounds)
     }
 
@@ -417,7 +421,7 @@ impl Engine {
                 None => self.spreadsheet.remove_content(id),
             }
         }
-        self.eval(changes);
+        self.post_cell_changes_hook(changes);
         Some(bounds)
     }
 
@@ -430,12 +434,30 @@ impl Engine {
         current_id == self.history.last_saved_log_id
     }
 
-    /// Update sorted_rows on an existing Sort projection.
-    /// `table_id` identifies the table, `projection_idx` the index in `self.spreadsheet.projections`.
+    /// Add new cell value to filter options if not already present.
+    fn update_table_on_cell_change(&mut self, cell_id: &AbsoluteCellId) {
+        if let Some((_, table)) = self.spreadsheet.find_table_containing_cell(cell_id) {
+            let proj_id = table.projection_id;
+            let col_idx = (cell_id.col - table.body_start.col) as usize;
+            if let Some(new_val) = self.spreadsheet.get_value(cell_id).cloned() {
+                let proj = self.spreadsheet.projections.get_mut(proj_id).unwrap();
+                if col_idx < proj.filter_options_per_column.len() {
+                    let opts = &mut proj.filter_options_per_column[col_idx];
+                    if !opts.iter().any(|o| o.val == new_val) {
+                        opts.push(ProjectionFilterOption {
+                            val: new_val,
+                            selected: true,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Sort table by column. Only one sort can be active at a time.
     pub fn sort_table_column(
         &mut self,
         table_id: u32,
-        projection_idx: usize,
         sort_col: u32,
         desc: bool,
     ) -> Result<(), String> {
@@ -444,26 +466,32 @@ impl Engine {
             .tables
             .get(table_id)
             .ok_or("Table not found")?;
+        let sheet = table.sheet_id as usize;
+        let proj_id = table.projection_id;
+        let col_idx = (sort_col - table.body_start.col) as usize;
 
-        let mut rows: Vec<u32> = (table.body_start.row..=table.body_end.row).collect();
-        rows.sort_by(|&a, &b| {
-            let va = self.spreadsheet.get_value(&AbsoluteCellId {
-                sheet_id: table.sheet_id,
+        let sheets = &self.spreadsheet.sheets;
+        let proj = self.spreadsheet.projections.get_mut(proj_id).unwrap();
+        for (i, opt) in proj.sorting_options_per_column.iter_mut().enumerate() {
+            opt.selected = i == col_idx;
+            opt.desc = if i == col_idx { desc } else { false };
+        }
+        proj.projected_rows.sort_by(|&a, &b| {
+            let va = sheets[sheet].get_value(&GridCellId {
                 row: a,
                 col: sort_col,
             });
-            let vb = self.spreadsheet.get_value(&AbsoluteCellId {
-                sheet_id: table.sheet_id,
+            let vb = sheets[sheet].get_value(&GridCellId {
                 row: b,
                 col: sort_col,
             });
-            // empty cells always sort to the end, regardless of direction
+            // empty cells always sink to the bottom, regardless of sort direction
             match (va, vb) {
                 (None, None) => std::cmp::Ordering::Equal,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
                 (Some(_), None) => std::cmp::Ordering::Less,
-                (Some(a_val), Some(b_val)) => {
-                    let cmp = match (a_val, b_val) {
+                (Some(va), Some(vb)) => {
+                    let ord = match (va, vb) {
                         (CellValue::Number(n1), CellValue::Number(n2)) => n1.cmp(n2),
                         (CellValue::Text(t1), CellValue::Text(t2)) => t1.cmp(t2),
                         (CellValue::Number(_), _) => std::cmp::Ordering::Less,
@@ -471,25 +499,115 @@ impl Engine {
                         _ => std::cmp::Ordering::Equal,
                     };
                     if desc {
-                        cmp.reverse()
+                        ord.reverse()
                     } else {
-                        cmp
+                        ord
                     }
                 }
             }
         });
-
-        let projection = self
-            .spreadsheet
-            .projections
-            .get_mut(projection_idx)
-            .ok_or("Projection not found")?;
-        if let Projection::Sort { sorted_rows, .. } = projection {
-            *sorted_rows = rows;
-        } else {
-            return Err("Projection is not a Sort".into());
-        }
+        proj.active = true;
         Ok(())
+    }
+
+    /// Toggle a filter value for a table column. Returns hidden_rows_count.
+    pub fn filter_table_column(
+        &mut self,
+        table_id: u32,
+        filter_col: u32,
+        filter_index: usize,
+    ) -> Result<u32, String> {
+        let table = self
+            .spreadsheet
+            .tables
+            .get(table_id)
+            .ok_or("Table not found")?;
+        let sheet = table.sheet_id as usize;
+        let col_start = table.body_start.col;
+        let body_start_row = table.body_start.row;
+        let body_end_row = table.body_end.row;
+        let proj_id = table.projection_id;
+
+        let sheets = &self.spreadsheet.sheets;
+        let proj = self.spreadsheet.projections.get_mut(proj_id).unwrap();
+        let col_idx = (filter_col - col_start) as usize;
+
+        if let Some(opt) = proj
+            .filter_options_per_column
+            .get_mut(col_idx)
+            .and_then(|opts| opts.get_mut(filter_index))
+        {
+            opt.selected = !opt.selected;
+        }
+
+        // Rebuild projected_rows from all body rows with current filters
+        let mut rows: Vec<u32> = (body_start_row..=body_end_row).collect();
+        for (i, filter_opts) in proj.filter_options_per_column.iter().enumerate() {
+            if filter_opts.iter().all(|o| o.selected) {
+                continue;
+            }
+            let col = col_start + i as u32;
+            let selected: Vec<&CellValue> = filter_opts
+                .iter()
+                .filter(|o| o.selected)
+                .map(|o| &o.val)
+                .collect();
+            rows.retain(|&row| {
+                sheets[sheet]
+                    .get_value(&GridCellId { row, col })
+                    .map_or(true, |v| selected.contains(&v))
+            });
+        }
+
+        // Re-apply sort if active
+        if let Some((i, sort_opt)) = proj
+            .sorting_options_per_column
+            .iter()
+            .enumerate()
+            .find(|(_, o)| o.selected)
+        {
+            let sort_col = col_start + i as u32;
+            let desc = sort_opt.desc;
+            rows.sort_by(|&a, &b| {
+                let va = sheets[sheet].get_value(&GridCellId {
+                    row: a,
+                    col: sort_col,
+                });
+                let vb = sheets[sheet].get_value(&GridCellId {
+                    row: b,
+                    col: sort_col,
+                });
+                match (va, vb) {
+                    (None, None) => std::cmp::Ordering::Equal,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (Some(va), Some(vb)) => {
+                        let ord = match (va, vb) {
+                            (CellValue::Number(n1), CellValue::Number(n2)) => n1.cmp(n2),
+                            (CellValue::Text(t1), CellValue::Text(t2)) => t1.cmp(t2),
+                            (CellValue::Number(_), _) => std::cmp::Ordering::Less,
+                            (_, CellValue::Number(_)) => std::cmp::Ordering::Greater,
+                            _ => std::cmp::Ordering::Equal,
+                        };
+                        if desc {
+                            ord.reverse()
+                        } else {
+                            ord
+                        }
+                    }
+                }
+            });
+        }
+
+        let total = (body_end_row - body_start_row + 1) as u32;
+        proj.hidden_rows_count = total - rows.len() as u32;
+        proj.projected_rows = rows;
+        proj.active = proj.sorting_options_per_column.iter().any(|o| o.selected)
+            || proj
+                .filter_options_per_column
+                .iter()
+                .any(|col| col.iter().any(|o| !o.selected));
+        Ok(proj.hidden_rows_count)
     }
 
     /// Reset engine with an empty spreadsheet.

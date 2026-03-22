@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::storage::types::{AbsoluteCellId, SheetId};
+use crate::storage::types::{AbsoluteCellId, SheetId, TableId};
 
 #[derive(Serialize, Deserialize)]
 pub struct SpreadsheetNames {
@@ -11,6 +11,11 @@ pub struct SpreadsheetNames {
 
     pub cell_names: HashMap<String, AbsoluteCellId>,
     pub cell_names_lookup: HashMap<AbsoluteCellId, String>,
+
+    #[serde(default)]
+    pub table_names: HashMap<String, TableId>,
+    #[serde(default)]
+    pub table_names_lookup: HashMap<TableId, String>,
     // todo:
     // pub user_function_names: HashMap<String, UserFuncId>,
     // pub user_function_names_lookup: HashMap<UserFuncId, String>,
@@ -23,6 +28,8 @@ impl SpreadsheetNames {
             sheet_names_lookup: HashMap::new(),
             cell_names: HashMap::new(),
             cell_names_lookup: HashMap::new(),
+            table_names: HashMap::new(),
+            table_names_lookup: HashMap::new(),
         }
     }
 

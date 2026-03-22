@@ -1,24 +1,45 @@
 <script lang="ts">
+    import { invoke } from "@tauri-apps/api/core";
     import {
         cellRangeToPixels,
         type CellRange,
         type SheetObjectsState,
         type PixelRect,
     } from "./Overlays.svelte";
+    import type { TableData } from "$lib/sheet/shared";
 
     let {
         sos,
-        headerBounds,
-        bodyBounds,
-        title = "Table",
-        hasShadow = false,
+        table,
     }: {
         sos: SheetObjectsState;
-        headerBounds: CellRange;
-        bodyBounds: CellRange;
-        title?: string;
-        hasShadow?: boolean;
+        table: TableData;
     } = $props();
+
+    function handleTitleBlur(e: Event) {
+        const el = e.target as HTMLElement;
+        const newName = (el.textContent ?? "").trim();
+        if (!newName || newName === table.title) {
+            el.textContent = table.title;
+            return;
+        }
+        const oldName = table.title;
+        invoke("change_table_name", { oldName, newName })
+            .then(() => {
+                table.title = newName;
+            })
+            .catch((err) => {
+                console.error("Rename table failed:", err);
+                el.textContent = table.title;
+            });
+    }
+
+    function handleTitleKeyDown(e: KeyboardEvent) {
+        if (e.key === "Enter") {
+            e.preventDefault();
+            (e.target as HTMLElement).blur();
+        }
+    }
 
     let borderRect: PixelRect | null = $state(null);
     let titleRect: PixelRect | null = $state(null);
@@ -26,10 +47,10 @@
     const TITLE_HEIGHT = 18;
 
     let fullBounds: CellRange = $derived({
-        minR: headerBounds.minR,
-        maxR: bodyBounds.maxR,
-        minC: Math.min(headerBounds.minC, bodyBounds.minC),
-        maxC: Math.max(headerBounds.maxC, bodyBounds.maxC),
+        minR: table.headerBounds.minR,
+        maxR: table.bodyBounds.maxR,
+        minC: Math.min(table.headerBounds.minC, table.bodyBounds.minC),
+        maxC: Math.max(table.headerBounds.maxC, table.bodyBounds.maxC),
     });
 
     export function reposition() {
@@ -54,16 +75,6 @@
     }
 </script>
 
-{#if borderRect}
-    <div
-        class="table-border"
-        class:has-shadow={hasShadow}
-        style:left="{borderRect.left}px"
-        style:top="{borderRect.top}px"
-        style:width="{borderRect.width}px"
-        style:height="{borderRect.height}px"
-    ></div>
-{/if}
 {#if titleRect}
     <div
         class="table-title"
@@ -72,8 +83,26 @@
         style:width="{titleRect.width}px"
         style:height="{titleRect.height}px"
     >
-        <span class="title-text">{title}</span>
+        <span
+            class="title-text"
+            contenteditable="true"
+            role="textbox"
+            tabindex="0"
+            style="outline: none"
+            onblur={handleTitleBlur}
+            onkeydown={handleTitleKeyDown}>{table.title}</span
+        >
     </div>
+{/if}
+{#if borderRect}
+    <div
+        class="table-border"
+        class:has-projection={table.hasProjection}
+        style:left="{borderRect.left}px"
+        style:top="{borderRect.top}px"
+        style:width="{borderRect.width}px"
+        style:height="{borderRect.height}px"
+    ></div>
 {/if}
 
 <style>
@@ -92,6 +121,33 @@
             0 0 0 transparent;
     }
 
+    .table-border.has-projection::after {
+        content: "";
+        position: absolute;
+        inset: -2px;
+        border-radius: 4px;
+        background:
+            linear-gradient(90deg, var(--wx-color-primary) 50%, transparent 0) 0
+                0 / 20px 1px repeat-x,
+            linear-gradient(90deg, var(--wx-color-primary) 50%, transparent 0) 0
+                100% / 20px 1px repeat-x,
+            linear-gradient(0deg, var(--wx-color-primary) 50%, transparent 0) 0
+                0 / 1px 20px repeat-y,
+            linear-gradient(0deg, var(--wx-color-primary) 50%, transparent 0)
+                100% 0 / 1px 20px repeat-y;
+        animation: table-ants 0.8s linear infinite;
+    }
+
+    @keyframes table-ants {
+        100% {
+            background-position:
+                20px 0,
+                -20px 100%,
+                0 -20px,
+                100% 20px;
+        }
+    }
+
     .table-title {
         position: absolute;
         color: #a1a1aa;
@@ -100,7 +156,7 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        pointer-events: none;
+        pointer-events: auto;
         overflow: hidden;
         white-space: nowrap;
         background: #1a1a1a;
@@ -111,7 +167,7 @@
         overflow: hidden;
     }
 
-    .table-border.has-shadow {
+    .table-border.has-projection {
         box-shadow:
         /* tight outline */
             0 0 0 1px rgba(255, 255, 255, 0.06),

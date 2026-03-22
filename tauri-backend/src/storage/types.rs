@@ -99,31 +99,42 @@ pub struct Formula {
 }
 
 pub type TableId = u32;
+pub type ProjectionId = u32;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Table {
     pub sheet_id: SheetId,
+    pub name: String,
     pub first_header: GridCellId,
     pub last_header: GridCellId,
     pub body_start: GridCellId,
     pub body_end: GridCellId,
+    #[serde(default)]
+    pub projection_id: ProjectionId,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub enum Projection {
-    Sort {
-        sheet_id: SheetId,
-        projection_start: GridCellId,
-        projection_end: GridCellId,
-        sorted_rows: Vec<u32>,
-    },
-    Filter {
-        sheet_id: SheetId,
-        projection_start: GridCellId,
-        projection_end: GridCellId,
-        matched_rows: Vec<u32>,
-        hidden_rows_count: u32,
-    },
+pub struct ProjectionFilterOption {
+    pub val: CellValue,
+    pub selected: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ProjectionSortOption {
+    pub selected: bool,
+    pub desc: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Projection {
+    pub sheet_id: SheetId,
+    pub projection_start: GridCellId,
+    pub projection_end: GridCellId,
+    pub projected_rows: Vec<u32>,
+    pub active: bool,
+    pub filter_options_per_column: Vec<Vec<ProjectionFilterOption>>,
+    pub sorting_options_per_column: Vec<ProjectionSortOption>,
+    pub hidden_rows_count: u32,
 }
 
 pub type Sheets = Vec<Grid>;
@@ -135,18 +146,18 @@ pub struct Spreadsheet {
     pub(crate) names: SpreadsheetNames,
     #[serde(default)]
     pub(crate) tables: StableVec<Table>,
-    #[serde(default, skip)]
-    pub(crate) projections: Vec<Projection>,
+    #[serde(default)]
+    pub(crate) projections: StableVec<Projection>,
 }
 
 impl Spreadsheet {
     pub fn new() -> Self {
         Self {
-            sheets: vec![Grid::new(12_500, 2)],
+            sheets: vec![Grid::default()],
             formulas: StableVec::new(),
             names: SpreadsheetNames::new(),
             tables: StableVec::new(),
-            projections: Vec::new(),
+            projections: StableVec::new(),
         }
     }
 
@@ -163,41 +174,33 @@ impl Spreadsheet {
             })
     }
 
-    /// Find the index of a Sort projection whose bounds match the given table body.
-    pub fn find_sort_projection_for_table(&self, table: &Table) -> Option<usize> {
-        self.projections.iter().position(|p| {
-            matches!(p, Projection::Sort { projection_start, projection_end, .. }
-                if *projection_start == table.body_start && *projection_end == table.body_end)
-        })
+    /// Find the table whose body contains `cell`, returning (table_id, &Table).
+    pub fn find_table_containing_cell(&self, cell: &AbsoluteCellId) -> Option<(u32, &Table)> {
+        self.tables
+            .iter()
+            .enumerate()
+            .filter_map(|(id, t)| t.as_ref().map(|t| (id as u32, t)))
+            .find(|(_, t)| {
+                t.sheet_id == cell.sheet_id
+                    && cell.row >= t.body_start.row
+                    && cell.row <= t.body_end.row
+                    && cell.col >= t.body_start.col
+                    && cell.col <= t.body_end.col
+            })
     }
 
     pub fn get_projected_content(&self, id: &AbsoluteCellId) -> Option<&CellContent> {
-        for projection in &self.projections {
-            match projection {
-                Projection::Sort {
-                    sheet_id,
-                    projection_start,
-                    projection_end,
-                    sorted_rows,
-                } => {
-                    if id.sheet_id == *sheet_id
-                        && id.row >= projection_start.row
-                        && id.row <= projection_end.row
-                        && id.col >= projection_start.col
-                        && id.col <= projection_end.col
-                    {
-                        let visual_idx = (id.row - projection_start.row) as usize;
-                        if visual_idx < sorted_rows.len() {
-                            let actual_id = AbsoluteCellId {
-                                sheet_id: id.sheet_id,
-                                row: sorted_rows[visual_idx],
-                                col: id.col,
-                            };
-                            return self.get_content(&actual_id);
-                        }
-                    }
+        if let Some((_, table)) = self.find_table_containing_cell(id) {
+            let projection = self.projections.get(table.projection_id).unwrap();
+            if projection.active {
+                let visual_idx = (id.row - projection.projection_start.row) as usize;
+                if visual_idx < projection.projected_rows.len() {
+                    return self.get_content(&AbsoluteCellId {
+                        sheet_id: id.sheet_id,
+                        row: projection.projected_rows[visual_idx],
+                        col: id.col,
+                    });
                 }
-                Projection::Filter { .. } => continue,
             }
         }
         self.get_content(id)

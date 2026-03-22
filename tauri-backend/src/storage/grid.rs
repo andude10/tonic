@@ -6,7 +6,7 @@ use tauri_plugin_log::log::debug;
 
 use crate::storage::types::{AbsoluteCellId, FormulaId};
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct GridCellId {
     pub row: u32,
     pub col: u32,
@@ -135,19 +135,29 @@ impl GridCellId {
     }
 }
 
-impl Grid {
-    /// Creates a new sparse grid with the given max number of blocks and stride
-    /// (number of block-columns). Cells are addressed up to
-    /// `stride * 32` columns and `(max_blocks / stride) * 32` rows.
-    pub fn new(max_blocks: usize, stride: usize) -> Self {
-        let mut blocks = Vec::with_capacity(max_blocks);
-        blocks.resize_with(max_blocks, || None);
-        Self { blocks, stride }
-    }
+impl Default for Grid {
+    fn default() -> Self {
+        // todo: show errors to user when exceeding max size
+        // todo: allow setting max cols/rows?
 
+        // stride=22 block-columns -> 22*32 = 704 columns (covers A–ZZ = 702)
+        // 1_375_000 / 22 = 62_500 row-blocks -> 62_500*32 = 2_000_000 rows
+        const STRIDE: usize = 22;
+        const MAX_BLOCKS: usize = 62_500 * STRIDE;
+        let mut blocks = Vec::with_capacity(MAX_BLOCKS);
+        blocks.resize_with(MAX_BLOCKS, || None);
+        Self {
+            blocks,
+            stride: STRIDE,
+        }
+    }
+}
+
+impl Grid {
     /// Returns a reference to the cell content, or `None` if the cell has no content.
     pub fn get_content(&self, id: &GridCellId) -> Option<&CellContent> {
-        let block = self.blocks[id.block_idx(self.stride)].as_ref()?;
+        let idx = id.block_idx(self.stride);
+        let block = self.blocks.get(idx)?.as_ref()?;
         let (r, c) = id.local();
         block.cells[r][c].as_ref()?.content.as_ref()
     }
@@ -325,7 +335,7 @@ mod tests {
 
     #[test]
     fn insert_and_get() {
-        let mut grid = Grid::new(1024, 32);
+        let mut grid = Grid::default();
         grid.insert_content(&id(0, 0), content(CellValue::Text("hello".into())));
         grid.insert_content(&id(100, 200), content(CellValue::Number(Decimal::from(42))));
 
@@ -340,14 +350,14 @@ mod tests {
 
     #[test]
     fn get_empty_returns_none() {
-        let grid = Grid::new(1024, 32);
+        let grid = Grid::default();
         assert!(grid.get_content(&id(0, 0)).is_none());
         assert!(grid.get_content(&id(500, 500)).is_none());
     }
 
     #[test]
     fn remove_cell() {
-        let mut grid = Grid::new(1024, 32);
+        let mut grid = Grid::default();
         grid.insert_content(&id(3, 3), content(CellValue::Error(String::new())));
         assert!(grid.get_content(&id(3, 3)).is_some());
         grid.remove_content(&id(3, 3));
@@ -356,7 +366,7 @@ mod tests {
 
     #[test]
     fn remove_frees_empty_block() {
-        let mut grid = Grid::new(1024, 32);
+        let mut grid = Grid::default();
         grid.insert_content(&id(0, 0), content(CellValue::Error(String::new())));
         let idx = id(0, 0).block_idx(grid.stride);
         assert!(grid.blocks[idx].is_some());
@@ -366,7 +376,7 @@ mod tests {
 
     #[test]
     fn block_not_freed_while_cells_remain() {
-        let mut grid = Grid::new(1024, 32);
+        let mut grid = Grid::default();
         grid.insert_content(&id(0, 0), content(CellValue::Error(String::new())));
         grid.insert_content(&id(1, 1), content(CellValue::Error(String::new())));
         grid.remove_content(&id(0, 0));
@@ -376,7 +386,7 @@ mod tests {
 
     #[test]
     fn insert_overwrites_existing() {
-        let mut grid = Grid::new(1024, 32);
+        let mut grid = Grid::default();
         grid.insert_content(&id(0, 0), content(CellValue::Text("first".into())));
         grid.insert_content(&id(0, 0), content(CellValue::Text("second".into())));
         assert!(
@@ -388,7 +398,7 @@ mod tests {
 
     #[test]
     fn cells_across_block_boundaries() {
-        let mut grid = Grid::new(1024, 32);
+        let mut grid = Grid::default();
         grid.insert_content(&id(31, 31), content(CellValue::Text("a".into())));
         grid.insert_content(&id(32, 32), content(CellValue::Text("b".into())));
         let idx_a = id(31, 31).block_idx(grid.stride);
@@ -404,7 +414,7 @@ mod tests {
 
     #[test]
     fn block_not_freed_while_dependants_exist() {
-        let mut grid = Grid::new(1024, 32);
+        let mut grid = Grid::default();
         let dep = AbsoluteCellId {
             sheet_id: 0,
             row: 5,
@@ -423,7 +433,7 @@ mod tests {
 
     #[test]
     fn dependants_preserved_on_value_update() {
-        let mut grid = Grid::new(1024, 32);
+        let mut grid = Grid::default();
         let dep = AbsoluteCellId {
             sheet_id: 0,
             row: 5,

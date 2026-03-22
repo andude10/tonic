@@ -14,12 +14,14 @@ export type ChangeBounds = {
 
 import type { CellRange } from "./overlays/Overlays.svelte";
 
+export type FilterOption = { val: string; selected: boolean };
+
 export type TableData = {
     id: number;
     headerBounds: CellRange;
     bodyBounds: CellRange;
     title: string;
-    hasShadow: boolean;
+    hasProjection: boolean;
 };
 
 export type SheetSharedState = {

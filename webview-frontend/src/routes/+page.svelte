@@ -230,6 +230,27 @@
         align-items: center !important;
     }
 
+    /* Filter MultiCombo in dropdown */
+    :global(.filter-option .wx-multicombo) {
+        font-size: 12px !important;
+        --wx-input-height: 24px;
+        --wx-input-font-size: 12px;
+        --wx-input-padding: 0 4px;
+        --wx-input-icon-size: 14px;
+    }
+    :global(.filter-option .wx-multicombo .wx-wrapper) {
+        min-height: 0 !important;
+    }
+    :global(.wx-multicombo .wx-dropdown) {
+        --wx-input-padding: 2px 8px;
+        --wx-input-font-size: 12px;
+        --wx-checkbox-size: 14px;
+        --wx-checkbox-height: 14px;
+    }
+    :global(.wx-multicombo .wx-dropdown .wx-checkbox) {
+        margin-right: 4px !important;
+    }
+
     /* Menu bar icons */
     :global([data-wx-menu] .wx-icon) {
         display: flex !important;

@@ -36,6 +36,11 @@
 
     const contextMenuOptions = [
         { id: "copy", text: "Copy", icon: "wxi wxi-content-copy" },
+        {
+            id: "copy-values",
+            text: "Copy Values",
+            icon: "wxi wxi-content-copy",
+        },
         { id: "paste", text: "Paste", icon: "wxi wxi-content-paste" },
         { id: "create-table", text: "Create Table" },
     ];
@@ -43,6 +48,7 @@
     function handleContextMenuClick(ev: IMenuOptionClick) {
         if (!ev.option) return;
         if (ev.option.id === "copy") copySelection();
+        else if (ev.option.id === "copy-values") copySelectionValues();
         else if (ev.option.id === "paste") pasteFromClipboard();
         else if (ev.option.id === "create-table") createTableFromSelection();
     }
@@ -50,7 +56,9 @@
     function createTableFromSelection() {
         const b = focusedRangeBounds;
         if (!b || b.maxR - b.minR < 1) return; // need at least header + 1 body row
+        const tableName = `Table ${tables.length + 1}`;
         invoke<number>("create_table", {
+            tableName,
             firstHeader: { row: b.minR, col: b.minC },
             lastHeader: { row: b.minR, col: b.maxC },
             bodyStart: { row: b.minR + 1, col: b.minC },
@@ -73,8 +81,8 @@
                             minC: b.minC,
                             maxC: b.maxC,
                         },
-                        title: `Table ${tables.length + 1}`,
-                        hasShadow: false,
+                        title: tableName,
+                        hasProjection: false,
                     },
                 ];
                 requestAnimationFrame(() => repositionOverlays());
@@ -285,14 +293,10 @@
         columnCount = newCount;
     }
 
-    /** Ensure columns fill the visible width plus a buffer, and update visible column bounds. */
-    function ensureColumnsFillWidth() {
-        gridWrapperEl ??= document.querySelector<HTMLElement>(".grid-wrapper");
-        if (!gridWrapperEl) return;
-        const needed = Math.ceil(gridWrapperEl.clientWidth / COL_WIDTH) + 5;
-        if (needed > columnCount) expandColumns(needed);
-        updateVisibleColumns();
-    }
+    let addRowsCount = $state(1000);
+    let addColsCount = $state(50);
+    let showAddRows = $state(false);
+    let showAddCols = $state(false);
 
     function updateVisibleColumns() {
         const scroller = getScrollContainer();
@@ -644,6 +648,54 @@
         ]);
     }
 
+    function copySelectionValues() {
+        let numCols = 1;
+        let numRows = 1;
+        let cells: { row: number; col: number }[] = [];
+
+        if (focusedRangeBounds) {
+            numRows = focusedRangeBounds.maxR - focusedRangeBounds.minR + 1;
+            numCols = focusedRangeBounds.maxC - focusedRangeBounds.minC + 1;
+            for (
+                let r = focusedRangeBounds.minR;
+                r <= focusedRangeBounds.maxR;
+                r++
+            ) {
+                for (
+                    let c = focusedRangeBounds.minC;
+                    c <= focusedRangeBounds.maxC;
+                    c++
+                ) {
+                    cells.push({ row: r, col: c });
+                }
+            }
+        } else if (focusedCell) {
+            cells.push(focusedCell);
+        } else {
+            return;
+        }
+
+        const hasRange = !!focusedRangeBounds;
+        let text: string;
+        if (hasRange) {
+            const rows: string[] = [];
+            for (let r = 0; r < numRows; r++) {
+                const cols: string[] = [];
+                for (let c = 0; c < numCols; c++) {
+                    const cell = getCell(cells[r * numCols + c]);
+                    cols.push(cell?.computedValue ?? "");
+                }
+                rows.push(cols.join("\t"));
+            }
+            text = rows.join("\n");
+        } else {
+            const cell = getCell(cells[0]);
+            text = cell?.computedValue ?? "";
+        }
+
+        navigator.clipboard.writeText(text);
+    }
+
     async function pasteFromClipboard() {
         if (!focusedCell) return;
         const text = await navigator.clipboard.readText();
@@ -723,12 +775,8 @@
         rowHeight: 28,
     };
 
-    /** Check if 0-indexed row/col is within the grid, expanding if needed. */
     function isInBounds(row: number, col: number): boolean {
-        if (row < 0 || col < 0) return false;
-        if (row >= rowCount) expandRows(row + 200);
-        if (col >= columnCount) expandColumns(col + 10);
-        return true;
+        return row >= 0 && col >= 0 && row < rowCount && col < columnCount;
     }
 
     function clearFocus() {
@@ -878,7 +926,8 @@
         if (!clickedCell) return;
         const { rowId, colId } = clickedCell.dataset;
 
-        //if clicked on already focused cell, start editing it
+        // if clicked on already focused cell (and not on any interactive element inside the cell),
+        // then start editing it
         if (
             focusedCell &&
             rowId &&
@@ -886,8 +935,15 @@
             focusedCell.row === Number(rowId) - 1 &&
             focusedCell.col === columnLetterToIndex(colId)
         ) {
-            isEditing = true;
-            moveFocusToInlineEditor(focusedCell);
+            // checks that clicked just on the cell, not on any interactive element inside the cell
+            // todo: remove this check?
+            if (
+                target === clickedCell ||
+                target.classList.contains("display-cell")
+            ) {
+                isEditing = true;
+                moveFocusToInlineEditor(focusedCell);
+            }
             return;
         }
 
@@ -1001,6 +1057,9 @@
     }
 
     function handleKeyDown(ev: KeyboardEvent) {
+        // let overlay elements (e.g. editable table title) handle their own keys
+        if (overlaysEl?.contains(ev.target as Node)) return;
+
         if (ev.ctrlKey && ev.shiftKey && ev.key === "Z") {
             commitRedo();
             return;
@@ -1008,6 +1067,12 @@
 
         if (ev.ctrlKey && !ev.shiftKey && ev.key === "z") {
             commitUndo();
+            return;
+        }
+
+        if (ev.ctrlKey && ev.shiftKey && ev.key === "C" && !isEditing) {
+            ev.preventDefault();
+            copySelectionValues();
             return;
         }
 
@@ -1237,6 +1302,9 @@
     }
 
     function handleKeyUp(ev: KeyboardEvent) {
+        // let overlay elements (e.g. editable table title) handle their own keys
+        if (overlaysEl?.contains(ev.target as Node)) return;
+
         if (ev.key === "Shift") {
             shiftClickedOnce = false;
             if (!isEditing) {
@@ -1296,12 +1364,13 @@
         const scroller = ev.target as HTMLElement;
         syncScroll(sos, scroller.scrollLeft, scroller.scrollTop);
         updateVisibleColumns();
-        if (
-            scroller.scrollLeft + scroller.clientWidth >
-            scroller.scrollWidth - 200
-        ) {
-            expandColumns(columnCount + 10);
-        }
+        const THRESHOLD = 50;
+        showAddRows =
+            scroller.scrollTop + scroller.clientHeight >=
+            scroller.scrollHeight - THRESHOLD;
+        showAddCols =
+            scroller.scrollLeft + scroller.clientWidth >=
+            scroller.scrollWidth - THRESHOLD;
         if (overlayDebounceId) clearTimeout(overlayDebounceId);
         overlayDebounceId = setTimeout(() => {
             applyHeaderHighlights();
@@ -1399,7 +1468,7 @@
         const el = getScrollContainer();
         if (el) el.scrollTop = 0;
 
-        ensureColumnsFillWidth();
+        updateVisibleColumns();
         restartPolling();
     }
 
@@ -1441,38 +1510,32 @@
 
     onMount(() => {
         initOverlays();
-
-        // add more columns if window can fit more
-        ensureColumnsFillWidth();
-        const resizeObs = new ResizeObserver(() => ensureColumnsFillWidth());
-        if (gridWrapperEl) resizeObs.observe(gridWrapperEl);
-
+        updateVisibleColumns();
         restartPolling();
 
-        const unlistenCreated = listen<number>(
-            "created-table-projection",
+        const unlistenEnabled = listen<number>(
+            "enable-table-projection",
             (event) => {
                 const tableId = event.payload;
                 tables = tables.map((t) =>
-                    t.id === tableId ? { ...t, hasShadow: true } : t,
+                    t.id === tableId ? { ...t, hasProjection: true } : t,
                 );
             },
         );
-        const unlistenRemoved = listen<number>(
-            "removed-table-projection",
+        const unlistenDisabled = listen<number>(
+            "disable-table-projection",
             (event) => {
                 const tableId = event.payload;
                 tables = tables.map((t) =>
-                    t.id === tableId ? { ...t, hasShadow: false } : t,
+                    t.id === tableId ? { ...t, hasProjection: false } : t,
                 );
             },
         );
 
         return () => {
-            resizeObs.disconnect();
             if (pollInterval !== undefined) clearInterval(pollInterval);
-            unlistenCreated.then((fn) => fn());
-            unlistenRemoved.then((fn) => fn());
+            unlistenEnabled.then((fn) => fn());
+            unlistenDisabled.then((fn) => fn());
         };
     });
 
@@ -1483,7 +1546,6 @@
         const {
             row: { start, end },
         } = ev;
-        if (end > rowCount - 100) expandRows(rowCount + 200);
         gridRows = baseRows.slice(start, end + 1);
         viewportRowStart = start;
         viewportRowEnd = end;
@@ -1523,18 +1585,29 @@
             {cellStyle}
         />
     </ContextMenu>
+    {#if showAddRows}
+        <div class="add-rows-bar">
+            <button onclick={() => expandRows(rowCount + addRowsCount)}
+                >Add</button
+            >
+            <input type="number" bind:value={addRowsCount} min="1" />
+            <span>rows</span>
+        </div>
+    {/if}
+    {#if showAddCols}
+        <div class="add-cols-bar">
+            <button onclick={() => expandColumns(columnCount + addColsCount)}
+                >Add</button
+            >
+            <input type="number" bind:value={addColsCount} min="1" />
+            <span>columns</span>
+        </div>
+    {/if}
     <div class="selection-overlays-clip" bind:this={clipWrapperEl}>
         <div class="selection-overlays" bind:this={overlaysEl}>
             {#if sos}
                 {#each tables as table, i}
-                    <TableOverlay
-                        bind:this={tableOverlays[i]}
-                        {sos}
-                        headerBounds={table.headerBounds}
-                        bodyBounds={table.bodyBounds}
-                        title={table.title}
-                        hasShadow={table.hasShadow}
-                    />
+                    <TableOverlay bind:this={tableOverlays[i]} {sos} {table} />
                 {/each}
                 <FillOriginOverlay
                     bind:this={fillOriginOverlay}
@@ -1586,6 +1659,83 @@
     .grid-wrapper > :global(.wx-grid) {
         width: 100%;
         height: 100%;
+    }
+
+    .add-rows-bar,
+    .add-cols-bar {
+        position: absolute;
+        z-index: 6;
+        display: flex;
+        align-items: center;
+        gap: 0.5em;
+        padding: 0.75em 1.5em;
+        font-size: 0.8rem;
+        background: var(--wx-table-header-background);
+        border-radius: 0.4em;
+    }
+
+    .add-rows-bar button,
+    .add-cols-bar button,
+    .add-rows-bar input,
+    .add-cols-bar input {
+        all: unset;
+        font: inherit;
+        color: inherit;
+        padding: 0.35em 0.6em;
+        border-radius: 0.25em;
+        background: rgba(255, 255, 255, 0.07);
+    }
+
+    .add-rows-bar button,
+    .add-cols-bar button {
+        cursor: pointer;
+    }
+
+    .add-rows-bar button:hover,
+    .add-cols-bar button:hover {
+        background: rgba(255, 255, 255, 0.13);
+    }
+
+    .add-rows-bar input,
+    .add-cols-bar input {
+        width: 4em;
+        text-align: center;
+    }
+
+    .add-rows-bar {
+        bottom: 0.8em;
+        left: 50%;
+        transform: translateX(-50%);
+        animation: fade-in-up 150ms ease-out;
+    }
+
+    .add-cols-bar {
+        right: 0.8em;
+        top: 50%;
+        transform: translateY(-50%);
+        animation: fade-in-left 150ms ease-out;
+    }
+
+    @keyframes fade-in-up {
+        from {
+            opacity: 0;
+            transform: translateX(-50%) translateY(6px);
+        }
+        to {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+        }
+    }
+
+    @keyframes fade-in-left {
+        from {
+            opacity: 0;
+            transform: translateY(-50%) translateX(6px);
+        }
+        to {
+            opacity: 1;
+            transform: translateY(-50%) translateX(0);
+        }
     }
 
     /* Static clip wrapper — prevents overlays from rendering over headers/row numbers */

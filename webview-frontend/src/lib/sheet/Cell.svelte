@@ -1,15 +1,22 @@
 <script lang="ts">
-    import { tick } from "svelte";
     import type { IApi } from "@svar-ui/svelte-grid";
     import { invoke } from "@tauri-apps/api/core";
-    import { DropDownMenu, type IMenuOptionClick } from "@svar-ui/svelte-menu";
+    import {
+        DropDownMenu,
+        registerMenuItem,
+        type IMenuOptionClick,
+    } from "@svar-ui/svelte-menu";
     import InputCell from "./InputCell.svelte";
+    import FilterMenuItem from "./FilterMenuItem.svelte";
     import {
         columnLetterToIndex,
         getSheetSharedState,
         isCellData,
         type CellData,
+        type FilterOption,
     } from "$lib/sheet/shared";
+
+    registerMenuItem("filter", FilterMenuItem);
 
     let {
         row,
@@ -51,27 +58,67 @@
         );
     });
 
-    const dropdownOptions = [
+    function headerCellId() {
+        return {
+            row: (row.id as number) - 1,
+            col: columnLetterToIndex(column.id),
+        };
+    }
+
+    let filterOptions: FilterOption[] = $state([]);
+
+    let filterComboOptions = $derived(
+        filterOptions.map((o, i) => ({ id: i + 1, label: o.val })),
+    );
+    let filterComboValue = $derived(
+        filterOptions
+            .map((o, i) => (o.selected ? i + 1 : -1))
+            .filter((i) => i >= 0),
+    );
+
+    function handleFilterChange(ev: { value: (string | number)[] }) {
+        const next = new Set(ev.value);
+        const i = filterOptions.findIndex(
+            (o, i) => o.selected !== next.has(i + 1),
+        );
+        if (i < 0) return;
+        filterOptions[i].selected = !filterOptions[i].selected;
+        invoke("toggle_table_filter", {
+            header: headerCellId(),
+            filterIndex: i,
+        }).catch(console.error);
+    }
+
+    let dropdownOptions = $derived([
         { id: "sort-asc", text: "Sort Ascending" },
+        { id: "sort-desc", text: "Sort Descending" },
         {
-            id: "sort-desc",
-            text: "Sort Descending",
+            id: "filter",
+            type: "filter",
+            css: "filter-option",
+            comboOptions: filterComboOptions,
+            comboValue: filterComboValue,
+            onchange: handleFilterChange,
         },
-    ];
+    ]);
 
     function handleDropdownClick(ev: IMenuOptionClick) {
         if (!ev.option) return;
         const desc = ev.option.id === "sort-desc";
-        invoke("create_or_update_table_projection", {
-            params: {
-                type: "Sort",
-                header: {
-                    row: (row.id as number) - 1,
-                    col: columnLetterToIndex(column.id),
-                },
-                desc,
-            },
+        invoke("toggle_table_sort", {
+            header: headerCellId(),
+            desc,
         }).catch(console.error);
+    }
+
+    function handleDropdownOpen() {
+        invoke<FilterOption[]>("get_filter_options_for_table_column", {
+            header: headerCellId(),
+        })
+            .then((opts) => {
+                filterOptions = opts;
+            })
+            .catch(console.error);
     }
 
     let editingCellEl: HTMLDivElement | undefined = $state();
@@ -120,7 +167,10 @@
                 onclick={handleDropdownClick}
                 at="bottom"
             >
-                <button class="table-header-btn" aria-label="Sort column"
+                <button
+                    class="table-header-btn"
+                    aria-label="Column options"
+                    onclick={handleDropdownOpen}
                     ><i class="wxi wxi-angle-down"></i></button
                 >
             </DropDownMenu>
