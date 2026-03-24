@@ -13,7 +13,6 @@
         isFilling,
         isEditing = false,
         editorInputWidth = 0,
-        showFillHandle = true,
         showBorder = true,
         showBackground = false,
         zIndex = 2,
@@ -25,7 +24,6 @@
         isFilling: boolean;
         isEditing?: boolean;
         editorInputWidth?: number;
-        showFillHandle?: boolean;
         showBorder?: boolean;
         showBackground?: boolean;
         zIndex?: number;
@@ -59,7 +57,7 @@
             : "transparent"}
         style:z-index={zIndex}
     >
-        {#if showFillHandle}
+        {#if showBorder}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <div
                 class="fill-handle"

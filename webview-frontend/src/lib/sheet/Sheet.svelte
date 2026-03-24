@@ -35,6 +35,14 @@
     import TableOverlay from "./overlays/TableOverlay.svelte";
     import { listen } from "@tauri-apps/api/event";
     import { ContextMenu, type IMenuOptionClick } from "@svar-ui/svelte-menu";
+    import { initNotice } from "$lib/notice";
+    import { showError } from "$lib/notice";
+    import { getContext } from "svelte";
+
+    const helpers = getContext<{ showNotice: (msg: any) => void }>(
+        "wx-helpers",
+    );
+    if (helpers) initNotice(helpers.showNotice);
 
     const contextMenuOptions = [
         { id: "copy", text: "Copy", icon: "wxi wxi-content-copy" },
@@ -90,7 +98,7 @@
                 ];
                 requestAnimationFrame(() => repositionOverlays());
             })
-            .catch(console.error);
+            .catch((e) => showError(String(e)));
     }
 
     function contextMenuResolver(_: any, event: MouseEvent) {
@@ -228,6 +236,7 @@
     const INITIAL_ROWS = 1000;
     const INITIAL_COLS = 26;
     const COL_WIDTH = 90;
+    const ROW_NUMBER_WIDTH = 50;
 
     let rowCount = $state(INITIAL_ROWS);
     let columnCount = $state(INITIAL_COLS);
@@ -252,7 +261,7 @@
     let gridColumns: IColumnConfig[] = $state(
         (() => {
             const cols: IColumnConfig[] = [
-                { id: "rowNumber", width: 50, resize: true },
+                { id: "rowNumber", width: ROW_NUMBER_WIDTH, resize: true },
             ];
             for (let i = 0; i < INITIAL_COLS; i++) {
                 const id = columnIndexToLetter(i);
@@ -327,6 +336,8 @@
     let fillOriginalBounds: CellRange | null = $state(null);
     let clonedFormulaBounds: CellRange | null = $state(null);
     let isEditing = $state(false);
+    let isEditingCellName = $state(false);
+    let cellName = $state("");
     let editorInput = $state("");
     let caretPosition = $state(0);
 
@@ -441,6 +452,12 @@
         set isEditing(v) {
             isEditing = v;
         },
+        get isEditingCellName() {
+            return isEditingCellName;
+        },
+        set isEditingCellName(v) {
+            isEditingCellName = v;
+        },
         get editorInputIsFormula() {
             return editorInputIsFormula;
         },
@@ -464,6 +481,12 @@
         },
         set editorInputWidth(v) {
             editorInputWidth = v;
+        },
+        get cellName() {
+            return cellName;
+        },
+        set cellName(v) {
+            cellName = v;
         },
         get tables() {
             return tables;
@@ -1509,10 +1532,7 @@
 
         const columnWidths: Record<string, number> = {};
         for (const col of columns) {
-            if (col.id === "rowNumber") continue;
-            if (col.width !== COL_WIDTH) {
-                columnWidths[col.id] = col.width;
-            }
+            columnWidths[col.id] = col.width;
         }
 
         // todo: row heights
@@ -1565,20 +1585,26 @@
                 expandRows(dec.rowCount);
             if (dec.columnCount && dec.columnCount > columnCount)
                 expandColumns(dec.columnCount);
-            if (dec.columnWidths) {
-                for (const col of gridColumns) {
-                    if (
-                        typeof col.id === "string" &&
-                        col.id !== "rowNumber" &&
-                        col.id in dec.columnWidths
-                    ) {
-                        col.width = dec.columnWidths[col.id];
-                    }
-                }
-                gridColumns = gridColumns;
-            }
         } else {
             tables = [];
+        }
+
+        // reset all column widths to default, then apply saved widths
+        const savedWidths = decorationsJson
+            ? JSON.parse(decorationsJson).columnWidths
+            : undefined;
+        if (gridApi) {
+            for (const col of gridApi.getState()._columns ?? []) {
+                const defaultW =
+                    col.id === "rowNumber" ? ROW_NUMBER_WIDTH : COL_WIDTH;
+                const targetW = savedWidths?.[col.id!] ?? defaultW;
+                if (col.width !== targetW) {
+                    gridApi.exec("resize-column", {
+                        id: col.id!,
+                        width: targetW,
+                    });
+                }
+            }
         }
 
         updateVisibleColumns();
@@ -1612,6 +1638,17 @@
                     }).then((response) => {
                         if (!isEditing) {
                             editorInput = decodeEditorValue(
+                                new Uint8Array(response),
+                            );
+                        }
+                    });
+                }
+                if (focusedCell && !isEditingCellName) {
+                    invoke<ArrayBuffer>("get_name_for_cell", {
+                        cellId: focusedCell,
+                    }).then((response) => {
+                        if (!isEditingCellName) {
+                            cellName = new TextDecoder().decode(
                                 new Uint8Array(response),
                             );
                         }

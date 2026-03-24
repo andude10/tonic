@@ -1,8 +1,45 @@
 <script lang="ts">
+    import { invoke } from "@tauri-apps/api/core";
     import InputCell from "./InputCell.svelte";
-    import { getSheetSharedState, type UICell } from "$lib/sheet/shared";
+    import { getSheetSharedState } from "$lib/sheet/shared";
+    import { showError } from "$lib/notice";
 
     const shared = getSheetSharedState();
+
+    let cellNameInput = $state("");
+    let cellNameTarget: { row: number; col: number } | null = null;
+
+    $effect(() => {
+        if (!shared.isEditingCellName) cellNameInput = shared.cellName;
+    });
+
+    function handleCellNameFocus(): void {
+        shared.commitEdit();
+        shared.isEditing = false;
+        shared.isEditingCellName = true;
+        cellNameTarget = shared.focusedCell ? { ...shared.focusedCell } : null;
+    }
+
+    async function handleCellNameBlur(): Promise<void> {
+        shared.isEditingCellName = false;
+        const target = cellNameTarget;
+        cellNameTarget = null;
+        if (!target) return;
+        const name = cellNameInput.trim();
+        if (name === shared.cellName) return;
+        try {
+            await invoke("rename_cell", { cellId: target, name });
+        } catch (e) {
+            showError("Rename failed: " + e);
+        }
+    }
+
+    function handleCellNameKeyDown(ev: KeyboardEvent): void {
+        if (ev.key === "Enter" || ev.key === "Escape") {
+            if (ev.key === "Escape") cellNameInput = shared.cellName;
+            document.querySelector<HTMLElement>(".grid-wrapper")?.focus();
+        }
+    }
 
     function handleInput(ev: Event): void {
         shared.isEditing = true;
@@ -31,7 +68,10 @@
                 id="cell-ref"
                 type="text"
                 class="cell-ref-input"
-                readonly
+                bind:value={cellNameInput}
+                onfocus={handleCellNameFocus}
+                onblur={handleCellNameBlur}
+                onkeydown={handleCellNameKeyDown}
                 placeholder="—"
             />
         </div>
@@ -92,7 +132,8 @@
     }
 
     .cell-ref-input:focus {
-        outline: none;
+        outline: 1px solid var(--wx-color-primary, #5a8dee);
+        cursor: text;
     }
 
     .cell-ref-input::placeholder {

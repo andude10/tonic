@@ -15,6 +15,7 @@
         type CellData,
         type FilterOption,
     } from "$lib/sheet/shared";
+    import { showError } from "$lib/notice";
 
     registerMenuItem("filter", FilterMenuItem);
 
@@ -82,20 +83,20 @@
         invoke("toggle_table_filter", {
             header: headerCellId(),
             filterOptionId: changed.id,
-        }).catch(console.error);
+        }).catch((e) => showError(String(e)));
     }
 
     function handleFilterSelectAll() {
         for (const o of filterOptions) o.selected = true;
         invoke("select_all_table_filters", { header: headerCellId() }).catch(
-            console.error,
+            (e) => showError(String(e)),
         );
     }
 
     function handleFilterClear() {
         for (const o of filterOptions) o.selected = false;
         invoke("clear_all_table_filters", { header: headerCellId() }).catch(
-            console.error,
+            (e) => showError(String(e)),
         );
     }
 
@@ -120,7 +121,7 @@
         invoke("toggle_table_sort", {
             header: headerCellId(),
             desc,
-        }).catch(console.error);
+        }).catch((e) => showError(String(e)));
     }
 
     function handleDropdownOpen() {
@@ -134,7 +135,7 @@
                     label: o.val,
                 }));
             })
-            .catch(console.error);
+            .catch((e) => showError(String(e)));
     }
 
     let editingCellEl: HTMLDivElement | undefined = $state();

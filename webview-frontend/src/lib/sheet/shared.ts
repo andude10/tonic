@@ -27,7 +27,9 @@ export type TableData = {
 
 export type SheetSharedState = {
     focusedCell: CellId | null;
+    cellName: string;
     isEditing: boolean;
+    isEditingCellName: boolean;
     readonly editorInputIsFormula: boolean;
     editorInput: string;
     readonly editorInputHtml: string;

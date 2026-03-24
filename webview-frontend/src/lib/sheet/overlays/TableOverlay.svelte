@@ -2,6 +2,7 @@
     import { invoke } from "@tauri-apps/api/core";
     import { fade } from "svelte/transition";
     import { Icon } from "@svar-ui/svelte-core";
+    import { showError } from "$lib/notice";
     import {
         cellRangeToPixels,
         type CellRange,
@@ -31,7 +32,7 @@
                 table.title = newName;
             })
             .catch((err) => {
-                console.error("Rename table failed:", err);
+                showError("Rename table failed: " + err);
                 el.textContent = table.title;
             });
     }
@@ -45,13 +46,13 @@
 
     function handleApply() {
         invoke("apply_table_projection", { tableName: table.title }).catch(
-            console.error,
+            (e) => showError(String(e)),
         );
     }
 
     function handleCancel() {
         invoke("disable_table_projection", { tableName: table.title }).catch(
-            console.error,
+            (e) => showError(String(e)),
         );
     }
 

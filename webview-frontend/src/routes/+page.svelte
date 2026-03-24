@@ -1,11 +1,13 @@
 <script lang="ts">
     import { WillowDark } from "@svar-ui/svelte-grid";
+    import { Globals } from "@svar-ui/svelte-core";
     import { MenuBar } from "@svar-ui/svelte-menu";
     import { menu_options } from "$lib/data";
     import WindowBar from "$lib/WindowBar.svelte";
     import Sheet from "$lib/sheet/Sheet.svelte";
     import DevBottomPanel from "$lib/DevBottomPanel.svelte";
     import { trackFps } from "$lib/stats.svelte";
+    import { showError } from "$lib/notice";
     import type { IApi } from "@svar-ui/svelte-grid";
     import { attachConsole } from "@tauri-apps/plugin-log";
     import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -110,7 +112,7 @@
             await syncFileInfo();
             el.textContent = fileTitle ?? "";
         } catch (e) {
-            console.error("Rename failed:", e);
+            showError("Rename failed: " + e);
             el.textContent = fileTitle ?? "";
         }
     }
@@ -153,78 +155,81 @@
 
 <div class="root noselect" onkeydowncapture={handleKeyDown}>
     <WillowDark>
-        <div class="layout-container">
-            <WindowBar>
-                <span class="file-title">
-                    <span
-                        contenteditable="true"
-                        role="textbox"
-                        tabindex="0"
-                        style="outline: none"
-                        onblur={onTitleChange}
-                        onkeydown={onTitleKeyDown}>{fileTitle}</span
-                    >
-                    {#if isSaving}
-                        <svg
-                            class="file-status save-icon spinning"
-                            viewBox="0 0 16 16"
-                            xmlns="http://www.w3.org/2000/svg"
-                            fill="none"
+        <Globals>
+            <div class="layout-container">
+                <WindowBar>
+                    <span class="file-title">
+                        <span
+                            contenteditable="true"
+                            role="textbox"
+                            tabindex="0"
+                            style="outline: none"
+                            onblur={onTitleChange}
+                            onkeydown={onTitleKeyDown}>{fileTitle}</span
                         >
-                            <g
-                                fill="#aaa"
-                                fill-rule="evenodd"
-                                clip-rule="evenodd"
+                        {#if isSaving}
+                            <svg
+                                class="file-status save-icon spinning"
+                                viewBox="0 0 16 16"
+                                xmlns="http://www.w3.org/2000/svg"
+                                fill="none"
                             >
+                                <g
+                                    fill="#aaa"
+                                    fill-rule="evenodd"
+                                    clip-rule="evenodd"
+                                >
+                                    <path
+                                        d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM0 8a8 8 0 1116 0A8 8 0 010 8z"
+                                        opacity=".2"
+                                    />
+                                    <path
+                                        d="M7.25.75A.75.75 0 018 0a8 8 0 018 8 .75.75 0 01-1.5 0A6.5 6.5 0 008 1.5a.75.75 0 01-.75-.75z"
+                                    />
+                                </g>
+                            </svg>
+                        {:else if isSaved}
+                            <svg
+                                class="file-status save-icon"
+                                viewBox="0 0 60 60"
+                                xmlns="http://www.w3.org/2000/svg"
+                            >
+                                <title>All changes are saved</title>
                                 <path
-                                    d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM0 8a8 8 0 1116 0A8 8 0 010 8z"
-                                    opacity=".2"
+                                    fill="#699f4c"
+                                    fill-rule="evenodd"
+                                    d="M30 0a30 30 0 110 60 30 30 0 010-60zm-16.986 36.765a3.484 3.484 0 010-4.9l1.766-1.756a3.185 3.185 0 014.574.051l3.12 3.237a1.592 1.592 0 002.311 0l15.9-16.39a3.187 3.187 0 014.6-.027L47 18.714a3.482 3.482 0 010 4.846l-21.109 21.451a3.185 3.185 0 01-4.552.03z"
                                 />
+                            </svg>
+                        {:else}
+                            <svg
+                                class="file-status save-icon"
+                                viewBox="0 0 60 60"
+                                xmlns="http://www.w3.org/2000/svg"
+                            >
+                                <title>Changes are not saved</title>
                                 <path
-                                    d="M7.25.75A.75.75 0 018 0a8 8 0 018 8 .75.75 0 01-1.5 0A6.5 6.5 0 008 1.5a.75.75 0 01-.75-.75z"
+                                    fill="#9f4c4c"
+                                    fill-rule="evenodd"
+                                    d="M940,510a30,30,0,1,1,30-30A30,30,0,0,1,940,510Zm15-20.047A3.408,3.408,0,0,1,955,494.77l-0.221.22a3.42,3.42,0,0,1-4.833,0l-8.764-8.755a1.71,1.71,0,0,0-2.417,0l-8.741,8.747a3.419,3.419,0,0,1-4.836,0l-0.194-.193a3.408,3.408,0,0,1,.017-4.842l8.834-8.735a1.7,1.7,0,0,0,0-2.43l-8.831-8.725a3.409,3.409,0,0,1-.018-4.844l0.193-.193a3.413,3.413,0,0,1,2.418-1c0.944,0,3.255,1.835,3.872,2.455l7.286,7.287a1.708,1.708,0,0,0,2.417,0l8.764-8.748a3.419,3.419,0,0,1,4.832,0L955,465.243a3.408,3.408,0,0,1,0,4.818l-8.727,8.737a1.7,1.7,0,0,0,0,2.407Z"
+                                    transform="translate(-910 -450)"
                                 />
-                            </g>
-                        </svg>
-                    {:else if isSaved}
-                        <svg
-                            class="file-status save-icon"
-                            viewBox="0 0 60 60"
-                            xmlns="http://www.w3.org/2000/svg"
-                        >
-                            <title>All changes are saved</title>
-                            <path
-                                fill="#699f4c"
-                                fill-rule="evenodd"
-                                d="M30 0a30 30 0 110 60 30 30 0 010-60zm-16.986 36.765a3.484 3.484 0 010-4.9l1.766-1.756a3.185 3.185 0 014.574.051l3.12 3.237a1.592 1.592 0 002.311 0l15.9-16.39a3.187 3.187 0 014.6-.027L47 18.714a3.482 3.482 0 010 4.846l-21.109 21.451a3.185 3.185 0 01-4.552.03z"
-                            />
-                        </svg>
-                    {:else}
-                        <svg
-                            class="file-status save-icon"
-                            viewBox="0 0 60 60"
-                            xmlns="http://www.w3.org/2000/svg"
-                        >
-                            <title>Changes are not saved</title>
-                            <path
-                                fill="#9f4c4c"
-                                fill-rule="evenodd"
-                                d="M940,510a30,30,0,1,1,30-30A30,30,0,0,1,940,510Zm15-20.047A3.408,3.408,0,0,1,955,494.77l-0.221.22a3.42,3.42,0,0,1-4.833,0l-8.764-8.755a1.71,1.71,0,0,0-2.417,0l-8.741,8.747a3.419,3.419,0,0,1-4.836,0l-0.194-.193a3.408,3.408,0,0,1,.017-4.842l8.834-8.735a1.7,1.7,0,0,0,0-2.43l-8.831-8.725a3.409,3.409,0,0,1-.018-4.844l0.193-.193a3.413,3.413,0,0,1,2.418-1c0.944,0,3.255,1.835,3.872,2.455l7.286,7.287a1.708,1.708,0,0,0,2.417,0l8.764-8.748a3.419,3.419,0,0,1,4.832,0L955,465.243a3.408,3.408,0,0,1,0,4.818l-8.727,8.737a1.7,1.7,0,0,0,0,2.407Z"
-                                transform="translate(-910 -450)"
-                            />
-                        </svg>
-                    {/if}
-                </span>
-                <MenuBar options={menu_options} onclick={onMenuClick}></MenuBar>
-            </WindowBar>
+                            </svg>
+                        {/if}
+                    </span>
+                    <MenuBar options={menu_options} onclick={onMenuClick}
+                    ></MenuBar>
+                </WindowBar>
 
-            <Sheet bind:this={sheet} />
-            {#if dialogOpen}<div class="dialog-overlay"></div>{/if}
-            {#if isLoading}<div class="dialog-overlay">
-                    <div class="loading-text"></div>
-                </div>{/if}
+                <Sheet bind:this={sheet} />
+                {#if dialogOpen}<div class="dialog-overlay"></div>{/if}
+                {#if isLoading}<div class="dialog-overlay">
+                        <div class="loading-text"></div>
+                    </div>{/if}
 
-            <DevBottomPanel />
-        </div>
+                <DevBottomPanel />
+            </div>
+        </Globals>
     </WillowDark>
 </div>
 
@@ -517,5 +522,11 @@
         --wx-color-disabled-alt: #464849;
 
         background: var(--wx-background);
+
+        /* Notice overrides */
+        --wx-notice-background: #363839;
+        --wx-notice-border: 1px solid #3e4042;
+        --wx-notice-border-radius: 6px;
+        --wx-notice-type-icon-color: white;
     }
 </style>

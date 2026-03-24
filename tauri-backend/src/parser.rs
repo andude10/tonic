@@ -533,6 +533,28 @@ pub fn shift_formula_refs(
     result
 }
 
+/// Returns true if the string matches a regular cell name like "A1", "Z10", "AA5", "ZZ100".
+pub fn string_is_regular_cell_name(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    let mut i = 0;
+    while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+        i += 1;
+    }
+    if i == 0 || i == bytes.len() {
+        return false;
+    }
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit() {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

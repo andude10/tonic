@@ -155,6 +155,33 @@ fn get_editor_value_for_cell(
 }
 
 #[tauri::command(async)]
+fn get_name_for_cell(
+    state: tauri::State<'_, Mutex<TonicState>>,
+    cell_id: CellId,
+) -> tauri::ipc::Response {
+    let state = state.lock().unwrap();
+    let abs_id = cell_id.to_absolute();
+    let name = state.engine.spreadsheet.names.cell_id_to_name(&abs_id);
+    tauri::ipc::Response::new(name.into_bytes())
+}
+
+#[tauri::command(async)]
+fn rename_cell(
+    state: tauri::State<'_, Mutex<TonicState>>,
+    cell_id: CellId,
+    name: String,
+) -> Result<(), String> {
+    let mut state = state.lock().unwrap();
+    let abs_id = cell_id.to_absolute();
+    state
+        .engine
+        .spreadsheet
+        .names
+        .create_cell_name(&name, &abs_id)
+        .ok_or_else(|| format!("Name '{}' is not available", name))
+}
+
+#[tauri::command(async)]
 fn get_editor_value_for_cells(
     state: tauri::State<'_, Mutex<TonicState>>,
     cells: Vec<CellId>,
@@ -1000,6 +1027,8 @@ pub fn run() {
             get_cells_in_viewport,
             get_editor_value_for_cell,
             get_editor_value_for_cells,
+            get_name_for_cell,
+            rename_cell,
             save_file,
             open_file,
             new_file,

@@ -2,7 +2,10 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::storage::types::{AbsoluteCellId, SheetId, TableId};
+use crate::{
+    parser::string_is_regular_cell_name,
+    storage::types::{AbsoluteCellId, SheetId, TableId},
+};
 
 #[derive(Serialize, Deserialize)]
 pub struct SpreadsheetNames {
@@ -40,6 +43,36 @@ impl SpreadsheetNames {
             return name.clone();
         }
         col_to_letters(id.col) + &(id.row + 1).to_string()
+    }
+
+    /// Assign a custom name to a cell.
+    pub fn create_cell_name(&mut self, name: &str, id: &AbsoluteCellId) -> Option<()> {
+        // empty name: remove existing custom name
+        if name.is_empty() {
+            if let Some(old_name) = self.cell_names_lookup.remove(id) {
+                self.cell_names.remove(&old_name);
+            }
+            return Some(());
+        }
+
+        // reject names that look like regular cell references
+        if string_is_regular_cell_name(name) {
+            return None;
+        }
+
+        // reject if another cell already has this name
+        if let Some(_) = self.cell_names.get(name) {
+            return None;
+        }
+
+        // remove old name for this cell if it had one
+        if let Some(old_name) = self.cell_names_lookup.remove(id) {
+            self.cell_names.remove(&old_name);
+        }
+
+        self.cell_names.insert(name.to_string(), *id);
+        self.cell_names_lookup.insert(*id, name.to_string());
+        Some(())
     }
 }
 
