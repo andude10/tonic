@@ -76,6 +76,23 @@ fn emit_save_status(app: &AppHandle, state: &TonicState) {
     let _ = app.emit("save-status", state.engine.is_saved());
 }
 
+fn emit_table_projection_events(
+    app: &AppHandle,
+    table_id: u32,
+    was_active: bool,
+    is_active: bool,
+    hidden_rows: Option<u32>,
+) {
+    if !was_active && is_active {
+        let _ = app.emit("enable-table-projection", table_id);
+    } else if was_active && !is_active {
+        let _ = app.emit("disable-table-projection", table_id);
+    }
+    if let Some(hidden) = hidden_rows {
+        let _ = app.emit("update-table-hidden-rows", (table_id, hidden));
+    }
+}
+
 /// Encode a single cell into the binary buffer.
 /// Format: [row: u32 LE][col: u32 LE][is_formula: u8][display_len: u32 LE][display_bytes]
 fn encode_cell(buf: &mut Vec<u8>, row: u32, col: u32, content: Option<&CellContent>) {
@@ -276,32 +293,47 @@ fn fill_cells(
         }
     };
 
-    // compute extrapolation steps
-    let first_val = get_num(&state, orig_min_row, orig_min_col);
-    let row_step = if orig_max_row > orig_min_row {
-        match (first_val, get_num(&state, orig_min_row + 1, orig_min_col)) {
-            (Some(a), Some(b)) => Some(b - a),
-            _ => None,
+    // compute per-column row-step for extrapolation
+    // each column independently checks if it has a numeric linear pattern
+    let orig_height = orig_max_row - orig_min_row + 1;
+    let orig_width = orig_max_col - orig_min_col + 1;
+    let mut col_row_steps: Vec<Option<(Decimal, Decimal)>> =
+        Vec::with_capacity(orig_width as usize);
+    for c in orig_min_col..=orig_max_col {
+        if orig_height >= 2 {
+            match (
+                get_num(&state, orig_min_row, c),
+                get_num(&state, orig_min_row + 1, c),
+            ) {
+                (Some(a), Some(b)) => col_row_steps.push(Some((a, b - a))),
+                _ => col_row_steps.push(None),
+            }
+        } else if let Some(v) = get_num(&state, orig_min_row, c) {
+            // single row: value is known but no step
+            col_row_steps.push(Some((v, Decimal::ZERO)));
+        } else {
+            col_row_steps.push(None);
         }
-    } else {
-        None
-    };
-    let col_step = if orig_max_col > orig_min_col {
-        match (first_val, get_num(&state, orig_min_row, orig_min_col + 1)) {
-            (Some(a), Some(b)) => Some(b - a),
-            _ => None,
-        }
-    } else {
-        None
-    };
-    let cross_step = match (first_val, row_step, col_step) {
-        (Some(fv), Some(rs), Some(cs)) => {
-            get_num(&state, orig_min_row + 1, orig_min_col + 1).map(|d| d - fv - rs - cs)
-        }
-        _ => None,
-    };
+    }
 
-    let can_extrapolate = first_val.is_some() && (row_step.is_some() || col_step.is_some());
+    // compute per-row col-step for extrapolation
+    let mut row_col_steps: Vec<Option<(Decimal, Decimal)>> =
+        Vec::with_capacity(orig_height as usize);
+    for r in orig_min_row..=orig_max_row {
+        if orig_width >= 2 {
+            match (
+                get_num(&state, r, orig_min_col),
+                get_num(&state, r, orig_min_col + 1),
+            ) {
+                (Some(a), Some(b)) => row_col_steps.push(Some((a, b - a))),
+                _ => row_col_steps.push(None),
+            }
+        } else if let Some(v) = get_num(&state, r, orig_min_col) {
+            row_col_steps.push(Some((v, Decimal::ZERO)));
+        } else {
+            row_col_steps.push(None);
+        }
+    }
 
     let t = state.engine.start_batch();
     for i in 0..dests.len() {
@@ -322,15 +354,26 @@ fn fill_cells(
             }
         }
 
-        if can_extrapolate {
-            let fv = first_val.unwrap();
-            let dr = Decimal::from(dest.row.abs_diff(orig_min_row));
-            let dc = Decimal::from(dest.col.abs_diff(orig_min_col));
-            let dest_val = fv
-                + row_step.unwrap_or(Decimal::ZERO) * dr
-                + col_step.unwrap_or(Decimal::ZERO) * dc
-                + cross_step.unwrap_or(Decimal::ZERO) * dr * dc;
-            state.engine.insert_number(&t, dest.to_absolute(), dest_val);
+        let col_idx = (source.col - orig_min_col) as usize;
+        let row_idx = (source.row - orig_min_row) as usize;
+        let row_offset = dest.row as i64 - source.row as i64;
+        let col_offset = dest.col as i64 - source.col as i64;
+
+        // per-column extrapolation (vertical fill) + per-row extrapolation (horizontal fill)
+        let mut extrapolated = None;
+        if row_offset != 0 {
+            if let Some((first_val, step)) = col_row_steps.get(col_idx).copied().flatten() {
+                extrapolated = Some(first_val + step * Decimal::from(dest.row - orig_min_row));
+            }
+        }
+        if col_offset != 0 {
+            if let Some((first_val, step)) = row_col_steps.get(row_idx).copied().flatten() {
+                extrapolated = Some(first_val + step * Decimal::from(dest.col - orig_min_col));
+            }
+        }
+
+        if let Some(val) = extrapolated {
+            state.engine.insert_number(&t, dest.to_absolute(), val);
         } else if let Some(content) = source_content {
             let text = content.val.to_string();
             state
@@ -488,7 +531,7 @@ fn create_table(
     body_end: GridCellId,
 ) -> Result<u32, String> {
     let mut state = state.lock().unwrap();
-    let ss = &mut state.engine.spreadsheet;
+    let sp = &mut state.engine.spreadsheet;
 
     if first_header.row != last_header.row {
         return Err("Header must be on a single row".into());
@@ -502,14 +545,14 @@ fn create_table(
     if body_end.row < body_start.row || body_end.col < body_start.col {
         return Err("Invalid body bounds".into());
     }
-    if ss.names.table_names.contains_key(&table_name) {
+    if sp.names.table_names.contains_key(&table_name) {
         return Err(format!("Table '{}' already exists", table_name));
     }
 
     // todo: remove code duplication with post_table_cells_change_hook and filter methods
 
     // check overlap with existing tables
-    for maybe_table in ss.tables.iter() {
+    for maybe_table in sp.tables.iter() {
         let Some(t) = maybe_table else { continue };
         let h_overlap =
             last_header.col >= t.first_header.col && first_header.col <= t.last_header.col;
@@ -529,7 +572,7 @@ fn create_table(
             let col = body_start.col + col_offset as u32;
             let mut opts: BTreeMap<CellValue, ProjectionFilterOption> = BTreeMap::new();
             for &row in &rows {
-                if let Some(val) = ss.sheets[0].get_value(&GridCellId { row, col }) {
+                if let Some(val) = sp.sheets[0].get_value(&GridCellId { row, col }) {
                     opts.entry(val.clone())
                         .and_modify(|o| o.count += 1)
                         .or_insert_with(|| {
@@ -547,7 +590,7 @@ fn create_table(
         })
         .collect();
 
-    let proj_id = ss.projections.insert(Projection {
+    let proj_id = sp.projections.insert(Projection {
         sheet_id: 0,
         projection_start: body_start,
         projection_end: body_end,
@@ -566,7 +609,7 @@ fn create_table(
         next_filter_option_id: next_id,
     });
 
-    let id = ss.tables.insert(Table {
+    let id = sp.tables.insert(Table {
         sheet_id: 0,
         name: table_name.clone(),
         first_header,
@@ -576,8 +619,8 @@ fn create_table(
         projection_id: proj_id,
     });
 
-    ss.names.table_names.insert(table_name.clone(), id);
-    ss.names.table_names_lookup.insert(id, table_name);
+    sp.names.table_names.insert(table_name.clone(), id);
+    sp.names.table_names_lookup.insert(id, table_name);
     Ok(id)
 }
 
@@ -588,9 +631,9 @@ fn change_table_name(
     new_name: String,
 ) -> Result<(), String> {
     let mut state = state.lock().unwrap();
-    let ss = &mut state.engine.spreadsheet;
+    let sp = &mut state.engine.spreadsheet;
 
-    let id = *ss
+    let id = *sp
         .names
         .table_names
         .get(&old_name)
@@ -599,19 +642,19 @@ fn change_table_name(
     if old_name == new_name {
         return Ok(());
     }
-    if ss.names.table_names.contains_key(&new_name) {
+    if sp.names.table_names.contains_key(&new_name) {
         return Err(format!("Table '{}' already exists", new_name));
     }
 
-    let table = ss
+    let table = sp
         .tables
         .get_mut(id)
         .ok_or_else(|| format!("Table '{}' not found", old_name))?;
     table.name = new_name.clone();
 
-    ss.names.table_names.remove(&old_name);
-    ss.names.table_names.insert(new_name.clone(), id);
-    ss.names.table_names_lookup.insert(id, new_name);
+    sp.names.table_names.remove(&old_name);
+    sp.names.table_names.insert(new_name.clone(), id);
+    sp.names.table_names_lookup.insert(id, new_name);
     Ok(())
 }
 
@@ -622,14 +665,18 @@ fn toggle_table_sort(
     header: GridCellId,
     desc: bool,
 ) -> Result<(), String> {
-    let mut state = state.lock().unwrap();
-    let ss = &state.engine.spreadsheet;
+    let timer = std::time::Instant::now();
 
-    let (table_id, table) = ss
+    // todo: remove code duplication with other sort and filter commands
+
+    let mut state = state.lock().unwrap();
+    let sp = &state.engine.spreadsheet;
+
+    let (table_id, table) = sp
         .find_table_by_header(&header)
         .ok_or("Column header is not part of any table")?;
     let proj_id = table.projection_id;
-    let was_active = ss.projections.get(proj_id).map_or(false, |p| p.active);
+    let was_active = sp.projections.get(proj_id).map_or(false, |p| p.active);
 
     state.engine.sort_table_column(table_id, header.col, desc)?;
 
@@ -639,11 +686,9 @@ fn toggle_table_sort(
         .projections
         .get(proj_id)
         .map_or(false, |p| p.active);
-    if !was_active && is_active {
-        let _ = app.emit("enable-table-projection", table_id);
-    } else if was_active && !is_active {
-        let _ = app.emit("disable-table-projection", table_id);
-    }
+    emit_table_projection_events(&app, table_id, was_active, is_active, None);
+
+    debug!("toggle_table_sort took: {:?}", timer.elapsed());
     Ok(())
 }
 
@@ -654,14 +699,16 @@ fn toggle_table_filter(
     header: GridCellId,
     filter_option_id: u32,
 ) -> Result<(), String> {
-    let mut state = state.lock().unwrap();
-    let ss = &state.engine.spreadsheet;
+    let timer = std::time::Instant::now();
 
-    let (table_id, table) = ss
+    let mut state = state.lock().unwrap();
+    let sp = &state.engine.spreadsheet;
+
+    let (table_id, table) = sp
         .find_table_by_header(&header)
         .ok_or("Column header is not part of any table")?;
     let proj_id = table.projection_id;
-    let was_active = ss.projections.get(proj_id).map_or(false, |p| p.active);
+    let was_active = sp.projections.get(proj_id).map_or(false, |p| p.active);
 
     let hidden = state
         .engine
@@ -673,13 +720,75 @@ fn toggle_table_filter(
         .projections
         .get(proj_id)
         .map_or(false, |p| p.active);
+    emit_table_projection_events(&app, table_id, was_active, is_active, Some(hidden));
 
-    if !was_active && is_active {
-        let _ = app.emit("enable-table-projection", table_id);
-    } else if was_active && !is_active {
-        let _ = app.emit("disable-table-projection", table_id);
-    }
-    let _ = app.emit("update-table-hidden-rows", (table_id, hidden));
+    debug!("toggle_table_filter took: {:?}", timer.elapsed());
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn select_all_table_filters(
+    app: AppHandle,
+    state: tauri::State<'_, Mutex<TonicState>>,
+    header: GridCellId,
+) -> Result<(), String> {
+    let timer = std::time::Instant::now();
+
+    let mut state = state.lock().unwrap();
+    let sp = &state.engine.spreadsheet;
+
+    let (table_id, table) = sp
+        .find_table_by_header(&header)
+        .ok_or("Column header is not part of any table")?;
+    let proj_id = table.projection_id;
+    let was_active = sp.projections.get(proj_id).map_or(false, |p| p.active);
+
+    let hidden = state
+        .engine
+        .select_all_column_filters(table_id, header.col)?;
+
+    let is_active = state
+        .engine
+        .spreadsheet
+        .projections
+        .get(proj_id)
+        .map_or(false, |p| p.active);
+    emit_table_projection_events(&app, table_id, was_active, is_active, Some(hidden));
+
+    debug!("select_all_table_filters took: {:?}", timer.elapsed());
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn clear_all_table_filters(
+    app: AppHandle,
+    state: tauri::State<'_, Mutex<TonicState>>,
+    header: GridCellId,
+) -> Result<(), String> {
+    let timer = std::time::Instant::now();
+
+    let mut state = state.lock().unwrap();
+    let sp = &state.engine.spreadsheet;
+
+    let (table_id, table) = sp
+        .find_table_by_header(&header)
+        .ok_or("Column header is not part of any table")?;
+    let proj_id = table.projection_id;
+    let was_active = sp.projections.get(proj_id).map_or(false, |p| p.active);
+
+    let hidden = state
+        .engine
+        .clear_all_column_filters(table_id, header.col)?;
+
+    let is_active = state
+        .engine
+        .spreadsheet
+        .projections
+        .get(proj_id)
+        .map_or(false, |p| p.active);
+    emit_table_projection_events(&app, table_id, was_active, is_active, Some(hidden));
+
+    debug!("clear_all_table_filters took: {:?}", timer.elapsed());
     Ok(())
 }
 
@@ -691,16 +800,16 @@ fn apply_table_projection(
 ) -> Result<(), String> {
     let timer = std::time::Instant::now();
     let mut state = state.lock().unwrap();
-    let ss = &state.engine.spreadsheet;
+    let sp = &state.engine.spreadsheet;
 
-    let &table_id = ss
+    let &table_id = sp
         .names
         .table_names
         .get(&table_name)
         .ok_or_else(|| format!("Table '{}' not found", table_name))?;
-    let table = ss.tables.get(table_id).ok_or("Table not found")?;
+    let table = sp.tables.get(table_id).ok_or("Table not found")?;
     let proj_id = table.projection_id;
-    let proj = ss.projections.get(proj_id).ok_or("Projection not found")?;
+    let proj = sp.projections.get(proj_id).ok_or("Projection not found")?;
     if !proj.active {
         return Err("Projection is not active".into());
     }
@@ -718,7 +827,7 @@ fn apply_table_projection(
             projected_rows
                 .iter()
                 .map(|&row| {
-                    ss.sheets[sheet_id as usize]
+                    sp.sheets[sheet_id as usize]
                         .get_value(&GridCellId { row, col })
                         .cloned()
                 })
@@ -779,21 +888,21 @@ fn disable_table_projection(
     table_name: String,
 ) -> Result<(), String> {
     let mut state = state.lock().unwrap();
-    let ss = &mut state.engine.spreadsheet;
+    let sp = &mut state.engine.spreadsheet;
 
-    let &table_id = ss
+    let &table_id = sp
         .names
         .table_names
         .get(&table_name)
         .ok_or_else(|| format!("Table '{}' not found", table_name))?;
-    let table = ss.tables.get(table_id).ok_or("Table not found")?;
+    let table = sp.tables.get(table_id).ok_or("Table not found")?;
     let proj_id = table.projection_id;
     let col_start = table.body_start.col;
     let col_end = table.body_end.col;
     let body_start_row = table.body_start.row;
     let body_end_row = table.body_end.row;
 
-    let proj = ss
+    let proj = sp
         .projections
         .get_mut(proj_id)
         .ok_or("Projection not found")?;
@@ -829,15 +938,16 @@ fn get_filter_options_for_table_column(
     state: tauri::State<'_, Mutex<TonicState>>,
     header: GridCellId,
 ) -> Result<Vec<FilterOptionResponse>, String> {
+    let timer = std::time::Instant::now();
     let state = state.lock().unwrap();
-    let ss = &state.engine.spreadsheet;
+    let sp = &state.engine.spreadsheet;
 
-    let (_, table) = ss
+    let (_, table) = sp
         .find_table_by_header(&header)
         .ok_or("Column header is not part of any table")?;
     let col_idx = (header.col - table.first_header.col) as usize;
 
-    let proj = ss
+    let proj = sp
         .projections
         .get(table.projection_id)
         .ok_or("Projection not found")?;
@@ -860,6 +970,12 @@ fn get_filter_options_for_table_column(
                 selected: o.selected,
             }),
     );
+
+    debug!(
+        "get_filter_options_for_table_column took: {:?}",
+        timer.elapsed()
+    );
+
     Ok(result)
 }
 
@@ -895,6 +1011,8 @@ pub fn run() {
             change_table_name,
             toggle_table_sort,
             toggle_table_filter,
+            select_all_table_filters,
+            clear_all_table_filters,
             get_filter_options_for_table_column,
             apply_table_projection,
             disable_table_projection,

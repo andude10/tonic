@@ -4,6 +4,7 @@
         columnIndexToLetter,
         columnLetterToIndex,
         isCellData,
+        parseSvarID,
         setSheetSharedState,
         type CellData,
         type CellId,
@@ -101,7 +102,7 @@
 
         // ... ignore if clicked outside of grid (row or column headers)
         const { rowId, colId } = el.dataset;
-        if (!rowId || !colId || colId === "rowNumber") return null;
+        if (!rowId || !colId || parseSvarID(colId) === "rowNumber") return null;
         const clicked = domToCellId(rowId, colId);
 
         // if right-clicked cell is outside the current selection, move focus there
@@ -190,7 +191,10 @@
 
     /** Convert SVAR data attributes (1-indexed row, letter col) to CellId (0-indexed). */
     function domToCellId(rowId: string, colId: string): CellId {
-        return { row: Number(rowId) - 1, col: columnLetterToIndex(colId) };
+        return {
+            row: (parseSvarID(rowId) as number) - 1,
+            col: columnLetterToIndex(parseSvarID(colId) as string),
+        };
     }
 
     let focusedCell: CellId | null = $state(null);
@@ -796,7 +800,7 @@
         requestAnimationFrame(() => {
             document
                 .querySelector<HTMLInputElement>(
-                    `.wx-cell[data-row-id="${ui.row}"][data-col-id="${ui.column}"] .editor`,
+                    `.wx-cell[data-row-id="${ui.row}"][data-col-id=":${ui.column}"] .editor`,
                 )
                 ?.focus();
         });
@@ -855,7 +859,7 @@
         const { rowId, colId } = clickedCell.dataset;
 
         // ignore row number column for hover tracking
-        if (colId == "rowNumber") {
+        if (parseSvarID(colId) === "rowNumber") {
             hoveredCell = null;
             return;
         }
@@ -933,8 +937,9 @@
             focusedCell &&
             rowId &&
             colId &&
-            focusedCell.row === Number(rowId) - 1 &&
-            focusedCell.col === columnLetterToIndex(colId)
+            focusedCell.row === (parseSvarID(rowId) as number) - 1 &&
+            focusedCell.col ===
+                columnLetterToIndex(parseSvarID(colId) as string)
         ) {
             // checks that clicked just on the cell, not on any interactive element inside the cell
             // todo: remove this check?
@@ -1051,7 +1056,7 @@
 
         // if clicked on headers, clear focus
         const isHeader = target.closest("[role='columnheader']");
-        if (colId == "rowNumber" || isHeader) {
+        if ((colId && parseSvarID(colId) === "rowNumber") || isHeader) {
             clearFocus();
             return;
         }
@@ -1389,7 +1394,9 @@
         for (const col of wrapper.querySelectorAll<HTMLElement>(
             "[data-header-id]",
         )) {
-            const colIdx = columnLetterToIndex(col.dataset.headerId!);
+            const colIdx = columnLetterToIndex(
+                parseSvarID(col.dataset.headerId!) as string,
+            );
             if (focusedRangeBounds) {
                 col.classList.toggle(
                     "highlight-col",
@@ -1404,9 +1411,9 @@
         }
 
         for (const cell of wrapper.querySelectorAll<HTMLElement>(
-            '.wx-cell[data-col-id="rowNumber"]',
+            '.wx-cell[data-col-id=":rowNumber"]',
         )) {
-            const rowIdx = Number(cell.dataset.rowId) - 1;
+            const rowIdx = (parseSvarID(cell.dataset.rowId!) as number) - 1;
             if (
                 focusedRangeBounds &&
                 rowIdx >= focusedRangeBounds.minR &&
@@ -1813,7 +1820,7 @@
         will-change: transform;
     }
 
-    :global(.wx-cell[data-col-id="rowNumber"]) {
+    :global(.wx-cell[data-col-id=":rowNumber"]) {
         background: var(--wx-table-header-background) !important;
         font-weight: var(--wx-header-font-weight) !important;
         text-align: center;
@@ -1828,7 +1835,7 @@
         -webkit-user-select: none;
     }
 
-    :global(div[role="columnheader"][data-header-id="rowNumber"]) {
+    :global(div[role="columnheader"][data-header-id=":rowNumber"]) {
         border-right: var(--wx-table-cell-border) !important;
     }
 

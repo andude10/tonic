@@ -23,6 +23,7 @@
     <MultiCombo
         checkboxes={true}
         options={option.comboOptions}
+        dropdown={{ virtualized: true, inline: true }}
         value={option.comboValue}
         onchange={option.onchange}
         placeholder="Filter..."

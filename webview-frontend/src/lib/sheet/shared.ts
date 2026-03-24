@@ -67,6 +67,16 @@ export function columnIndexToLetter(index: number): string {
     return s;
 }
 
+export function parseSvarID(
+    raw: string | undefined,
+): string | number | undefined {
+    if (!raw) return raw;
+    if (raw.startsWith(":")) return raw.substring(1);
+    const n = Number(raw);
+    if (!isNaN(n)) return n;
+    return raw;
+}
+
 export function isCellData(val: CellData | number): val is CellData {
     return (
         typeof val === "object" && "computedValue" in val && "isFormula" in val

@@ -66,10 +66,8 @@
     }
 
     let filterOptions: FilterOption[] = $state([]);
+    let filterComboOptions: { id: number; label: string }[] = $state([]);
 
-    let filterComboOptions = $derived(
-        filterOptions.map((o) => ({ id: o.id + 1, label: o.val })),
-    );
     let filterComboValue = $derived(
         filterOptions.filter((o) => o.selected).map((o) => o.id + 1),
     );
@@ -88,29 +86,17 @@
     }
 
     function handleFilterSelectAll() {
-        const header = headerCellId();
-        for (const o of filterOptions) {
-            if (!o.selected) {
-                o.selected = true;
-                invoke("toggle_table_filter", {
-                    header,
-                    filterOptionId: o.id,
-                }).catch(console.error);
-            }
-        }
+        for (const o of filterOptions) o.selected = true;
+        invoke("select_all_table_filters", { header: headerCellId() }).catch(
+            console.error,
+        );
     }
 
     function handleFilterClear() {
-        const header = headerCellId();
-        for (const o of filterOptions) {
-            if (o.selected) {
-                o.selected = false;
-                invoke("toggle_table_filter", {
-                    header,
-                    filterOptionId: o.id,
-                }).catch(console.error);
-            }
-        }
+        for (const o of filterOptions) o.selected = false;
+        invoke("clear_all_table_filters", { header: headerCellId() }).catch(
+            console.error,
+        );
     }
 
     let dropdownOptions = $derived([
@@ -143,6 +129,10 @@
         })
             .then((opts) => {
                 filterOptions = opts;
+                filterComboOptions = opts.map((o) => ({
+                    id: o.id + 1,
+                    label: o.val,
+                }));
             })
             .catch(console.error);
     }

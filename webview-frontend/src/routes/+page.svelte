@@ -290,26 +290,28 @@
         min-height: 0 !important;
         border-radius: 6px !important;
     }
-    :global(.wx-multicombo .wx-dropdown) {
+    :global(.wx-dropdown .wx-list) {
         --wx-input-padding: 4px 8px;
         --wx-input-font-size: 12px;
         --wx-checkbox-size: 14px;
         --wx-checkbox-height: 14px;
+    }
+    :global(.wx-dropdown) {
         border-radius: 6px !important;
     }
-    :global(.wx-multicombo .wx-dropdown .wx-checkbox) {
+    :global(.wx-dropdown .wx-list .wx-checkbox) {
         margin-right: 6px !important;
         accent-color: var(--wx-color-primary);
     }
-    :global(.wx-multicombo .wx-dropdown .wx-item) {
+    :global(.wx-dropdown .wx-list .wx-item) {
         border-radius: 4px !important;
         padding: 2px 6px !important;
     }
-    :global(.wx-multicombo .wx-dropdown .wx-item.wx-focus) {
+    :global(.wx-dropdown .wx-list .wx-item.wx-focus) {
         background: transparent !important;
     }
 
-    :global(.wx-multicombo .wx-dropdown .wx-item:hover) {
+    :global(.wx-dropdown .wx-list .wx-item:hover) {
         background: rgba(126, 93, 171, 0.12) !important;
     }
     .dialog-overlay {
@@ -442,6 +444,7 @@
     }
 
     .layout-container {
+        color-scheme: normal;
         font-size: 12px;
         display: flex;
         flex-direction: column;

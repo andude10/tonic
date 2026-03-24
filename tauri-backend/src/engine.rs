@@ -568,17 +568,11 @@ impl Engine {
             .tables
             .get(table_id)
             .ok_or("Table not found")?;
-        let sheet = table.sheet_id as usize;
         let col_start = table.body_start.col;
-        let body_start_row = table.body_start.row;
-        let body_end_row = table.body_end.row;
         let proj_id = table.projection_id;
-
-        let sheets = &self.spreadsheet.sheets;
         let proj = self.spreadsheet.projections.get_mut(proj_id).unwrap();
         let col_idx = (filter_col - col_start) as usize;
 
-        // filter_index 0 = toggle blanks visibility for this column
         if filter_option_id == 0 {
             proj.filter_show_blanks[col_idx] = !proj.filter_show_blanks[col_idx];
         } else if let Some(opt) = proj.filter_options_per_column[col_idx]
@@ -587,6 +581,73 @@ impl Engine {
         {
             opt.selected = !opt.selected;
         }
+
+        self.rebuild_table_projection(table_id)
+    }
+
+    /// Select all filter options for a table column. Returns hidden_rows_count.
+    pub fn select_all_column_filters(
+        &mut self,
+        table_id: u32,
+        filter_col: u32,
+    ) -> Result<u32, String> {
+        let table = self
+            .spreadsheet
+            .tables
+            .get(table_id)
+            .ok_or("Table not found")?;
+        let col_start = table.body_start.col;
+        let proj_id = table.projection_id;
+        let proj = self.spreadsheet.projections.get_mut(proj_id).unwrap();
+        let col_idx = (filter_col - col_start) as usize;
+
+        proj.filter_show_blanks[col_idx] = true;
+        for opt in proj.filter_options_per_column[col_idx].values_mut() {
+            opt.selected = true;
+        }
+
+        self.rebuild_table_projection(table_id)
+    }
+
+    /// Clear all filter options for a table column. Returns hidden_rows_count.
+    pub fn clear_all_column_filters(
+        &mut self,
+        table_id: u32,
+        filter_col: u32,
+    ) -> Result<u32, String> {
+        let table = self
+            .spreadsheet
+            .tables
+            .get(table_id)
+            .ok_or("Table not found")?;
+        let col_start = table.body_start.col;
+        let proj_id = table.projection_id;
+        let proj = self.spreadsheet.projections.get_mut(proj_id).unwrap();
+        let col_idx = (filter_col - col_start) as usize;
+
+        proj.filter_show_blanks[col_idx] = false;
+        for opt in proj.filter_options_per_column[col_idx].values_mut() {
+            opt.selected = false;
+        }
+
+        self.rebuild_table_projection(table_id)
+    }
+
+    /// Rebuild projected_rows for a table from current filter/sort state. Returns hidden_rows_count.
+    fn rebuild_table_projection(&mut self, table_id: u32) -> Result<u32, String> {
+        let table = self
+            .spreadsheet
+            .tables
+            .get(table_id)
+            .ok_or("Table not found")?;
+        let sheet = table.sheet_id as usize;
+        let col_start = table.body_start.col;
+        let body_start_row = table.body_start.row;
+        let body_end_row = table.body_end.row;
+        let proj_id = table.projection_id;
+
+        let sheets = &self.spreadsheet.sheets;
+        let proj = self.spreadsheet.projections.get_mut(proj_id).unwrap();
 
         // rebuild projected_rows from all body rows with current filters
         let mut rows: Vec<u32> = (body_start_row..=body_end_row).collect();
