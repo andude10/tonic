@@ -38,38 +38,9 @@
 <style>
     .clone-source-overlay {
         position: absolute;
-        border: 2px solid var(--wx-color-primary);
+        border: 2px dashed var(--wx-color-primary);
         border-radius: 4px;
         will-change: left, top, width, height;
         pointer-events: none;
-        --transition-base:
-            left 30ms cubic-bezier(0, 0, 0.2, 1),
-            top 30ms cubic-bezier(0, 0, 0.2, 1),
-            width 30ms cubic-bezier(0, 0, 0.2, 1),
-            height 30ms cubic-bezier(0, 0, 0.2, 1);
-        transition: var(--transition-base);
-        box-shadow:
-            0 0 3px 1px
-                color-mix(in srgb, var(--wx-color-primary) 40%, transparent),
-            0 0 8px 2px
-                color-mix(in srgb, var(--wx-color-primary) 20%, transparent);
-        animation: clone-glow 1.8s ease-in-out infinite alternate;
-    }
-
-    @keyframes clone-glow {
-        0% {
-            box-shadow:
-                0 0 3px 1px
-                    color-mix(in srgb, var(--wx-color-primary) 40%, transparent),
-                0 0 8px 2px
-                    color-mix(in srgb, var(--wx-color-primary) 20%, transparent);
-        }
-        100% {
-            box-shadow:
-                0 0 5px 2px
-                    color-mix(in srgb, var(--wx-color-primary) 50%, transparent),
-                0 0 12px 4px
-                    color-mix(in srgb, var(--wx-color-primary) 30%, transparent);
-        }
     }
 </style>

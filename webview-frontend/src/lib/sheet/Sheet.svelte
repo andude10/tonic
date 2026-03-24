@@ -27,6 +27,7 @@
         type CellRange,
         type SheetObjectsState,
     } from "./overlays/Overlays.svelte";
+    import SelectionOverlay from "./overlays/SelectionOverlay.svelte";
     import FocusOverlay from "./overlays/FocusOverlay.svelte";
     import FillOriginOverlay from "./overlays/FillOriginOverlay.svelte";
     import CloneSourceOverlay from "./overlays/CloneSourceOverlay.svelte";
@@ -55,7 +56,7 @@
     }
 
     function createTableFromSelection() {
-        const b = focusedRangeBounds;
+        const b = primarySelection;
         if (!b || b.maxR - b.minR < 1) return; // need at least header + 1 body row
         const tableName = `Table ${tables.length + 1}`;
         invoke<number>("create_table", {
@@ -106,16 +107,15 @@
         const clicked = domToCellId(rowId, colId);
 
         // if right-clicked cell is outside the current selection, move focus there
-        const b = focusedRangeBounds;
         const inRange =
-            b &&
-            clicked.row >= b.minR &&
-            clicked.row <= b.maxR &&
-            clicked.col >= b.minC &&
-            clicked.col <= b.maxC;
+            isCellInAnyRange(clicked, selections) ||
+            (!!focusedCell &&
+                clicked.row === focusedCell.row &&
+                clicked.col === focusedCell.col);
         if (!inRange) {
             focusedCell = clicked;
-            focusedRangeStart = clicked;
+            hoveredCell = clicked;
+            selections = [];
         }
         return clicked;
     }
@@ -319,9 +319,10 @@
 
     // tracks which cell the mouse is currently over (ignoring row number column)
     let hoveredCell: CellId | null = $state(null);
-    let focusedRangeStart: CellId | null = $state(null);
-    let isSelecting = $state(false); // is true during mouse drag or while shift is held
-    let shiftClickedOnce = $state(false); // true after first shift-click (waiting for second to complete range)
+    let selections: CellRange[] = $state([]);
+    let isSelecting = $state(false);
+    let appendSelectionOnMouseUp = $state(false);
+    let isSingleCellSelectionOnMouseUp = $state(false);
     let isFilling = $state(false);
     let fillOriginalBounds: CellRange | null = $state(null);
     let clonedFormulaBounds: CellRange | null = $state(null);
@@ -479,16 +480,102 @@
         });
     });
 
-    // bounding box of the selection range (0-indexed)
-    let focusedRangeBounds = $derived.by(() => {
-        if (!focusedRangeStart || !focusedCell) return null;
-
+    function cellToRange(cell: CellId): CellRange {
         return {
-            minR: Math.min(focusedRangeStart.row, focusedCell.row),
-            maxR: Math.max(focusedRangeStart.row, focusedCell.row),
-            minC: Math.min(focusedRangeStart.col, focusedCell.col),
-            maxC: Math.max(focusedRangeStart.col, focusedCell.col),
+            minR: cell.row,
+            maxR: cell.row,
+            minC: cell.col,
+            maxC: cell.col,
         };
+    }
+
+    function rangeFromCells(a: CellId, b: CellId): CellRange {
+        return {
+            minR: Math.min(a.row, b.row),
+            maxR: Math.max(a.row, b.row),
+            minC: Math.min(a.col, b.col),
+            maxC: Math.max(a.col, b.col),
+        };
+    }
+
+    function rangeFromBoundsAndCell(
+        bounds: CellRange,
+        cell: CellId,
+    ): CellRange {
+        return {
+            minR: Math.min(bounds.minR, cell.row),
+            maxR: Math.max(bounds.maxR, cell.row),
+            minC: Math.min(bounds.minC, cell.col),
+            maxC: Math.max(bounds.maxC, cell.col),
+        };
+    }
+
+    function isCellInRange(cell: CellId, bounds: CellRange): boolean {
+        return (
+            cell.row >= bounds.minR &&
+            cell.row <= bounds.maxR &&
+            cell.col >= bounds.minC &&
+            cell.col <= bounds.maxC
+        );
+    }
+
+    function isCellInAnyRange(cell: CellId, boundsList: CellRange[]): boolean {
+        return boundsList.some((bounds) => isCellInRange(cell, bounds));
+    }
+
+    function getSelectedCells(): CellId[] {
+        const map = new Map<string, CellId>();
+        for (const bounds of selections) {
+            for (const cell of cellsInBounds(bounds)) {
+                map.set(`${cell.row}:${cell.col}`, cell);
+            }
+        }
+        return [...map.values()];
+    }
+
+    let primarySelection = $derived.by(() => {
+        if (selections.length) return selections[selections.length - 1];
+        if (focusedCell) return cellToRange(focusedCell);
+        return null;
+    });
+
+    let focusedCellBounds = $derived(
+        focusedCell ? cellToRange(focusedCell) : null,
+    );
+
+    function isSingleCellRange(bounds: CellRange | null): boolean {
+        return (
+            !!bounds &&
+            bounds.minR === bounds.maxR &&
+            bounds.minC === bounds.maxC
+        );
+    }
+
+    let activeSelectionBounds = $derived.by(() => {
+        if (isFilling && fillOriginalBounds && hoveredCell) {
+            return rangeFromBoundsAndCell(fillOriginalBounds, hoveredCell);
+        }
+        if (focusedCell && isSelecting && hoveredCell) {
+            return rangeFromCells(focusedCell, hoveredCell);
+        }
+        if (selections.length) {
+            return selections[selections.length - 1];
+        }
+        return focusedCellBounds;
+    });
+
+    let activeFocusHasBorder = $derived.by(() => {
+        if (!activeSelectionBounds) return false;
+        if (isFilling) return true;
+        if (isSelecting) return isSingleCellRange(activeSelectionBounds);
+        return true;
+    });
+
+    let activeFocusHasBackground = $derived.by(() => {
+        if (!activeSelectionBounds) return false;
+        if (isFilling) return false;
+        if (isSelecting) return !isSingleCellRange(activeSelectionBounds);
+        return !isSingleCellRange(activeSelectionBounds);
     });
 
     // insert new reference (single cell or range) when user edits formula
@@ -581,49 +668,45 @@
     async function commitUndo() {
         const bounds: ChangeBounds | null = await invoke("undo_input");
         if (!bounds) return;
-        focusedRangeStart = { row: bounds.min_row, col: bounds.min_col };
         focusedCell = { row: bounds.max_row, col: bounds.max_col };
+        hoveredCell = { ...focusedCell };
+        selections = [
+            {
+                minR: bounds.min_row,
+                maxR: bounds.max_row,
+                minC: bounds.min_col,
+                maxC: bounds.max_col,
+            },
+        ];
         scrollToRow(bounds.min_row);
     }
 
     async function commitRedo() {
         const bounds: ChangeBounds | null = await invoke("redo_input");
         if (!bounds) return;
-        focusedRangeStart = { row: bounds.min_row, col: bounds.min_col };
         focusedCell = { row: bounds.max_row, col: bounds.max_col };
+        hoveredCell = { ...focusedCell };
+        selections = [
+            {
+                minR: bounds.min_row,
+                maxR: bounds.max_row,
+                minC: bounds.min_col,
+                maxC: bounds.max_col,
+            },
+        ];
         scrollToRow(bounds.min_row);
     }
 
     // --- copy / paste ---
 
     function copySelection() {
-        const cellIds: CellId[] = [];
-        let numCols = 1;
-        let numRows = 1;
+        const bounds = primarySelection;
+        if (!bounds) return;
 
-        if (focusedRangeBounds) {
-            numRows = focusedRangeBounds.maxR - focusedRangeBounds.minR + 1;
-            numCols = focusedRangeBounds.maxC - focusedRangeBounds.minC + 1;
-            for (
-                let r = focusedRangeBounds.minR;
-                r <= focusedRangeBounds.maxR;
-                r++
-            ) {
-                for (
-                    let c = focusedRangeBounds.minC;
-                    c <= focusedRangeBounds.maxC;
-                    c++
-                ) {
-                    cellIds.push({ row: r, col: c });
-                }
-            }
-        } else if (focusedCell) {
-            cellIds.push(focusedCell);
-        } else {
-            return;
-        }
-
-        const hasRange = !!focusedRangeBounds;
+        const cellIds = cellsInBounds(bounds);
+        const numRows = bounds.maxR - bounds.minR + 1;
+        const numCols = bounds.maxC - bounds.minC + 1;
+        const hasRange = numRows > 1 || numCols > 1;
 
         const blobPromise = invoke<ArrayBuffer>("get_editor_value_for_cells", {
             cells: cellIds,
@@ -654,33 +737,13 @@
     }
 
     function copySelectionValues() {
-        let numCols = 1;
-        let numRows = 1;
-        let cells: { row: number; col: number }[] = [];
+        const bounds = primarySelection;
+        if (!bounds) return;
 
-        if (focusedRangeBounds) {
-            numRows = focusedRangeBounds.maxR - focusedRangeBounds.minR + 1;
-            numCols = focusedRangeBounds.maxC - focusedRangeBounds.minC + 1;
-            for (
-                let r = focusedRangeBounds.minR;
-                r <= focusedRangeBounds.maxR;
-                r++
-            ) {
-                for (
-                    let c = focusedRangeBounds.minC;
-                    c <= focusedRangeBounds.maxC;
-                    c++
-                ) {
-                    cells.push({ row: r, col: c });
-                }
-            }
-        } else if (focusedCell) {
-            cells.push(focusedCell);
-        } else {
-            return;
-        }
-
-        const hasRange = !!focusedRangeBounds;
+        const cells = cellsInBounds(bounds);
+        const numRows = bounds.maxR - bounds.minR + 1;
+        const numCols = bounds.maxC - bounds.minC + 1;
+        const hasRange = numRows > 1 || numCols > 1;
         let text: string;
         if (hasRange) {
             const rows: string[] = [];
@@ -706,11 +769,15 @@
         const text = await navigator.clipboard.readText();
         if (!text) return;
 
+        const bounds = primarySelection;
+        const hasRange =
+            !!bounds &&
+            (bounds.maxR !== bounds.minR || bounds.maxC !== bounds.minC);
+
         // parse clipboard as TSV grid
         const clipRows = text.split("\n").map((line) => line.split("\t"));
         const isSingleClipValue =
             clipRows.length === 1 && clipRows[0].length === 1;
-        const hasRange = !!focusedRangeBounds;
         const pairs: [CellId, string][] = [];
 
         // single value into single focused cell
@@ -719,18 +786,10 @@
         }
 
         // single value into focused range: fill all cells
-        if (isSingleClipValue && hasRange) {
+        if (isSingleClipValue && bounds && hasRange) {
             const val = clipRows[0][0];
-            for (
-                let r = focusedRangeBounds!.minR;
-                r <= focusedRangeBounds!.maxR;
-                r++
-            ) {
-                for (
-                    let c = focusedRangeBounds!.minC;
-                    c <= focusedRangeBounds!.maxC;
-                    c++
-                ) {
+            for (let r = bounds.minR; r <= bounds.maxR; r++) {
+                for (let c = bounds.minC; c <= bounds.maxC; c++) {
                     pairs.push([{ row: r, col: c }, val]);
                 }
             }
@@ -739,12 +798,8 @@
         // range into single focused cell or focused range:
         // start from focusedCell (or top-left of range), expand right and down
         if (!isSingleClipValue) {
-            const startRow = hasRange
-                ? focusedRangeBounds!.minR
-                : focusedCell.row;
-            const startCol = hasRange
-                ? focusedRangeBounds!.minC
-                : focusedCell.col;
+            const startRow = bounds && hasRange ? bounds.minR : focusedCell.row;
+            const startCol = bounds && hasRange ? bounds.minC : focusedCell.col;
             const clipWidth = Math.max(...clipRows.map((r) => r.length));
             for (let r = 0; r < clipRows.length; r++) {
                 for (let c = 0; c < clipRows[r].length; c++) {
@@ -757,12 +812,19 @@
                     ]);
                 }
             }
-            // select the pasted region
-            focusedRangeStart = { row: startRow, col: startCol };
-            focusedCell = {
-                row: Math.min(startRow + clipRows.length - 1, rowCount - 1),
-                col: Math.min(startCol + clipWidth - 1, columnCount - 1),
-            };
+            focusedCell = { row: startRow, col: startCol };
+            hoveredCell = { row: startRow, col: startCol };
+            selections = [
+                {
+                    minR: startRow,
+                    maxR: Math.min(
+                        startRow + clipRows.length - 1,
+                        rowCount - 1,
+                    ),
+                    minC: startCol,
+                    maxC: Math.min(startCol + clipWidth - 1, columnCount - 1),
+                },
+            ];
         }
 
         if (!pairs.length) return;
@@ -775,6 +837,7 @@
 
     let left = 1; // pin first column (row numbers) to the left
     let select = false; // disable Grid's built-in selection, we handle it ourselves
+    let filterValues = {};
     let sizes = {
         headerHeight: 28,
         rowHeight: 28,
@@ -787,11 +850,17 @@
     function clearFocus() {
         commitEdit();
         focusedCell = null;
+        hoveredCell = null;
+        selections = [];
+        fillOriginalBounds = null;
         editorInput = "";
         isEditing = false;
+        isSelecting = false;
+        appendSelectionOnMouseUp = false;
+        isSingleCellSelectionOnMouseUp = false;
         gridApi?.exec("focus-cell", {
-            row: null,
-            column: null,
+            row: undefined,
+            column: undefined,
         });
     }
 
@@ -852,7 +921,9 @@
         const clickedCell = target.closest<HTMLElement>(".wx-cell");
 
         if (!clickedCell) {
-            hoveredCell = null;
+            if (!isSelecting && !editorInsertReference) {
+                hoveredCell = null;
+            }
             return;
         }
 
@@ -860,7 +931,9 @@
 
         // ignore row number column for hover tracking
         if (parseSvarID(colId) === "rowNumber") {
-            hoveredCell = null;
+            if (!isSelecting && !editorInsertReference) {
+                hoveredCell = null;
+            }
             return;
         }
 
@@ -874,10 +947,6 @@
             }
         }
 
-        // if selecting, then extend selection range (while dragging)
-        if (isSelecting && hoveredCell && focusedCell !== hoveredCell) {
-            focusedCell = { ...hoveredCell };
-        }
         // if inserting reference into formula, then extend reference range
         if (
             editorInsertReference &&
@@ -890,39 +959,25 @@
 
     function handleFillStart(ev: MouseEvent) {
         ev.stopPropagation();
-        if (!focusedCell) return;
+        const bounds = primarySelection;
+        if (!bounds) return;
         isFilling = true;
         isSelecting = true;
-        fillOriginalBounds = focusedRangeBounds
-            ? { ...focusedRangeBounds }
-            : null;
-        // Pin focusedRangeStart to top-left and focusedCell to bottom-right
-        // of the current range so that dragging extends it correctly without
-        // jumping the selection box.
-        if (focusedRangeBounds) {
-            focusedRangeStart = {
-                row: focusedRangeBounds.minR,
-                col: focusedRangeBounds.minC,
-            };
-            focusedCell = {
-                row: focusedRangeBounds.maxR,
-                col: focusedRangeBounds.maxC,
-            };
-        }
+        fillOriginalBounds = { ...bounds };
+        hoveredCell = { row: bounds.maxR, col: bounds.maxC };
     }
 
     function handleMouseDown(ev: MouseEvent) {
         // right-click inside current selection: let context menu handle it
-        if (ev.button === 2 && focusedRangeBounds && hoveredCell) {
-            const b = focusedRangeBounds;
-            if (
-                hoveredCell.row >= b.minR &&
-                hoveredCell.row <= b.maxR &&
-                hoveredCell.col >= b.minC &&
-                hoveredCell.col <= b.maxC
-            ) {
-                return;
-            }
+        if (
+            ev.button === 2 &&
+            hoveredCell &&
+            (isCellInAnyRange(hoveredCell, selections) ||
+                (!!focusedCell &&
+                    hoveredCell.row === focusedCell.row &&
+                    hoveredCell.col === focusedCell.col))
+        ) {
+            return;
         }
 
         const target = ev.target as HTMLElement;
@@ -930,19 +985,21 @@
 
         if (!clickedCell) return;
         const { rowId, colId } = clickedCell.dataset;
+        if (!rowId || !colId || parseSvarID(colId) === "rowNumber") return;
+
+        const clicked = domToCellId(rowId, colId);
+        hoveredCell = clicked;
 
         // if clicked on already focused cell (and not on any interactive element inside the cell),
         // then start editing it
         if (
+            !ev.ctrlKey &&
+            !ev.shiftKey &&
+            !ev.altKey &&
             focusedCell &&
-            rowId &&
-            colId &&
-            focusedCell.row === (parseSvarID(rowId) as number) - 1 &&
-            focusedCell.col ===
-                columnLetterToIndex(parseSvarID(colId) as string)
+            focusedCell.row === clicked.row &&
+            focusedCell.col === clicked.col
         ) {
-            // checks that clicked just on the cell, not on any interactive element inside the cell
-            // todo: remove this check?
             if (
                 target === clickedCell ||
                 target.classList.contains("display-cell")
@@ -953,59 +1010,65 @@
             return;
         }
 
-        // if clicked on different cell ...
-        if (hoveredCell) {
-            // if clicked while holding alt, move focus
-            if (ev.altKey) {
-                if (isEditing) {
-                    commitEdit();
-                }
-                shiftClickedOnce = false;
-                focusedRangeStart = { ...hoveredCell };
-                focusedCell = { ...hoveredCell };
-                return;
-            }
-
-            // ... while editing formula, then insert reference into editor
-            if (isEditing && editorInputIsFormula) {
-                ev.preventDefault(); // prevent focus from leaving the editor
-                editorInsertReference = true;
-                if (ev.shiftKey && shiftClickedOnce) {
-                    // second shift-click: keep reference start, move end to complete the range
-                    shiftClickedOnce = false;
-                } else {
-                    // first shift-click or no shift: set reference start to clicked cell
-                    editorInsertReferenceStart = { ...hoveredCell };
-                    shiftClickedOnce = ev.shiftKey;
-                }
-                editorInsertReferenceEnd = { ...hoveredCell };
-                return;
-            }
-            // ... while editing not formula, then commit cell (before switching focus)
-            if (isEditing && !editorInputIsFormula) {
+        // if clicked while holding alt, move focus only
+        if (ev.altKey) {
+            if (isEditing) {
                 commitEdit();
             }
-            // switch focus (and start selection)
-            isSelecting = true;
-            isEditing = false;
-
-            if (ev.shiftKey && shiftClickedOnce) {
-                // second shift-click: keep range start, move focus to complete the range
-                shiftClickedOnce = false;
-            } else {
-                // first shift-click or no shift: set range start to clicked cell
-                focusedRangeStart = { ...hoveredCell };
-                shiftClickedOnce = ev.shiftKey;
+            focusedCell = clicked;
+            hoveredCell = clicked;
+            isSelecting = false;
+            appendSelectionOnMouseUp = false;
+            isSingleCellSelectionOnMouseUp = false;
+            if (!ev.ctrlKey) {
+                selections = [];
             }
-            focusedCell = { ...hoveredCell };
+            return;
         }
+
+        // while editing formula, insert reference from clicked cell and extend via drag
+        if (isEditing && editorInputIsFormula) {
+            ev.preventDefault();
+            editorInsertReference = true;
+            editorInsertReferenceStart = { ...clicked };
+            editorInsertReferenceEnd = { ...clicked };
+            return;
+        }
+
+        if (isEditing) {
+            commitEdit();
+        }
+
+        isEditing = false;
+        isSelecting = true;
+        appendSelectionOnMouseUp = ev.ctrlKey;
+        isSingleCellSelectionOnMouseUp = ev.ctrlKey;
+
+        if (ev.shiftKey && focusedCell) {
+            appendSelectionOnMouseUp = false;
+            isSingleCellSelectionOnMouseUp = false;
+            return;
+        }
+
+        if (ev.ctrlKey && focusedCell) {
+            const prevFocusedCell = { ...focusedCell };
+            if (!isCellInAnyRange(prevFocusedCell, selections)) {
+                selections = [...selections, cellToRange(prevFocusedCell)];
+            }
+        }
+
+        focusedCell = clicked;
+        hoveredCell = clicked;
     }
 
     function handleMouseUp(ev: MouseEvent) {
         // fill cells on release
-        if (isFilling && focusedRangeStart && focusedRangeBounds) {
-            const bounds = focusedRangeBounds;
-            const orig = fillOriginalBounds ?? bounds;
+        if (isFilling && fillOriginalBounds && hoveredCell) {
+            const bounds = rangeFromBoundsAndCell(
+                fillOriginalBounds,
+                hoveredCell,
+            );
+            const orig = fillOriginalBounds;
 
             const sources: CellId[] = [];
             const dests: CellId[] = [];
@@ -1030,18 +1093,35 @@
                 commitCellFill(sources, dests, orig);
             }
 
-            // delete cells that were in original bounds but not in final bounds (shrinking)
-            if (fillOriginalBounds) {
-                const deleteCells = cellsOutside(orig, bounds);
-                if (deleteCells.length) commitDelete(deleteCells);
-            }
+            const deleteCells = cellsOutside(orig, bounds);
+            if (deleteCells.length) commitDelete(deleteCells);
 
+            selections = [bounds];
             isFilling = false;
             fillOriginalBounds = null;
+        } else if (isSelecting && focusedCell) {
+            const bounds = rangeFromCells(
+                focusedCell,
+                hoveredCell ?? focusedCell,
+            );
+            const isSingleCell =
+                bounds.minR === bounds.maxR && bounds.minC === bounds.maxC;
+
+            if (appendSelectionOnMouseUp) {
+                if (!isSingleCell || isSingleCellSelectionOnMouseUp) {
+                    selections = [...selections, bounds];
+                }
+            } else if (!isSingleCell) {
+                selections = [bounds];
+            } else {
+                selections = [];
+            }
         }
 
         // stop selecting and inserting on mouse button release
         isSelecting = false;
+        appendSelectionOnMouseUp = false;
+        isSingleCellSelectionOnMouseUp = false;
         editorInsertReference = false;
 
         const target = ev.target as HTMLElement;
@@ -1098,18 +1178,7 @@
                 const src = clonedFormulaBounds;
                 const srcHeight = src.maxR - src.minR + 1;
                 const srcWidth = src.maxC - src.minC + 1;
-
-                let destBounds: CellRange | null = null;
-                if (focusedRangeBounds) {
-                    destBounds = { ...focusedRangeBounds };
-                } else if (focusedCell) {
-                    destBounds = {
-                        minR: focusedCell.row,
-                        maxR: focusedCell.row,
-                        minC: focusedCell.col,
-                        maxC: focusedCell.col,
-                    };
-                }
+                const destBounds = primarySelection;
 
                 if (destBounds) {
                     const sources: CellId[] = [];
@@ -1156,16 +1225,12 @@
             }
 
             // otherwise, capture current selection as clone source (enter clone mode)
-            if (focusedRangeBounds) {
-                clonedFormulaBounds = { ...focusedRangeBounds };
-            } else if (focusedCell) {
-                clonedFormulaBounds = {
-                    minR: focusedCell.row,
-                    maxR: focusedCell.row,
-                    minC: focusedCell.col,
-                    maxC: focusedCell.col,
-                };
+            if (primarySelection) {
+                clonedFormulaBounds = { ...primarySelection };
             }
+
+            clearFocus();
+
             return;
         }
 
@@ -1173,16 +1238,7 @@
             isEditing = false;
             clonedFormulaBounds = null;
             clearFocus();
-            focusedRangeStart = null;
-            isSelecting = false;
             return;
-        }
-
-        // select range if pressing shift key
-        if (ev.shiftKey) {
-            isSelecting = true;
-        } else {
-            isSelecting = false;
         }
 
         let pressedArrowButton =
@@ -1210,8 +1266,10 @@
             if (ev.key === "ArrowLeft") colDelta = -1;
             if (ev.key === "ArrowRight") colDelta = 1;
 
-            let nextRow = focusedCell.row + rowDelta;
-            let nextCol = focusedCell.col + colDelta;
+            const current =
+                ev.shiftKey && hoveredCell ? hoveredCell : focusedCell;
+            const nextRow = current.row + rowDelta;
+            const nextCol = current.col + colDelta;
 
             // if pressing alt + arrow key in edit mode ...
             if (isEditing && ev.altKey) {
@@ -1219,41 +1277,25 @@
                 commitEdit();
                 isEditing = false;
                 if (!isInBounds(nextRow, nextCol)) return;
-                // todo: move focus logic from below to here
             }
 
-            // if a multi-cell range is selected (and not in selection mode),
-            // move the entire range in the direction of the arrow
-            const hasMultiCellRange =
-                focusedRangeStart &&
-                focusedRangeBounds &&
-                (focusedRangeStart.row !== focusedCell.row ||
-                    focusedRangeStart.col !== focusedCell.col);
-
-            if (hasMultiCellRange && focusedRangeStart && !isSelecting) {
-                let nextAnchorRow = focusedRangeStart.row + rowDelta;
-                let nextAnchorCol = focusedRangeStart.col + colDelta;
-
-                if (!isInBounds(nextAnchorRow, nextAnchorCol)) {
-                    return;
-                }
-                focusedCell = { row: nextRow, col: nextCol };
-                focusedRangeStart = { row: nextAnchorRow, col: nextAnchorCol };
+            if (!isInBounds(nextRow, nextCol)) {
                 return;
             }
 
-            // shift+arrow: extend selection by moving focusedCell, keep selectionAnchor anchored
-            if (isInBounds(nextRow, nextCol) && isSelecting) {
-                focusedCell = { row: nextRow, col: nextCol };
+            if (ev.shiftKey) {
+                const nextHoveredCell = { row: nextRow, col: nextCol };
+                hoveredCell = nextHoveredCell;
+                isSelecting = true;
+                selections = [rangeFromCells(focusedCell, nextHoveredCell)];
                 return;
             }
 
-            // normal single-cell navigation (no multi-cell range, not selecting)
-            if (isInBounds(nextRow, nextCol) && !isSelecting) {
-                focusedCell = { row: nextRow, col: nextCol };
-                focusedRangeStart = { row: nextRow, col: nextCol };
-                return;
-            }
+            isSelecting = false;
+            focusedCell = { row: nextRow, col: nextCol };
+            hoveredCell = { row: nextRow, col: nextCol };
+            selections = [];
+            return;
         }
 
         if (focusedCell) {
@@ -1272,15 +1314,17 @@
                     commitEdit();
                     isEditing = false;
                     focusedCell = { row: nextRow, col: focusedCell.col };
-                    focusedRangeStart = { row: nextRow, col: focusedCell.col };
+                    hoveredCell = { row: nextRow, col: focusedCell.col };
+                    selections = [];
                 }
             }
             // on delete, clear value in focus or in selected range
             else if (ev.key === "Delete") {
                 ev.preventDefault();
 
-                if (focusedRangeBounds) {
-                    commitDelete(cellsInBounds(focusedRangeBounds));
+                const selectedCells = getSelectedCells();
+                if (selectedCells.length) {
+                    commitDelete(selectedCells);
                 } else {
                     commitDelete([focusedCell]);
                 }
@@ -1311,11 +1355,8 @@
         // let overlay elements (e.g. editable table title) handle their own keys
         if (overlaysEl?.contains(ev.target as Node)) return;
 
-        if (ev.key === "Shift") {
-            shiftClickedOnce = false;
-            if (!isEditing) {
-                isSelecting = false;
-            }
+        if (ev.key === "Shift" && !isEditing) {
+            isSelecting = false;
         }
     }
 
@@ -1323,6 +1364,7 @@
 
     let sos: SheetObjectsState = $state(null as any);
     let focusOverlay = $state<FocusOverlay>(null as any);
+    let selectionOverlays: (SelectionOverlay | undefined)[] = $state([]);
     let fillOriginOverlay = $state<FillOriginOverlay>(null as any);
     let cloneSourceOverlay = $state<CloneSourceOverlay>(null as any);
     let refOverlays: RefOverlay[] = $state([]);
@@ -1342,6 +1384,18 @@
             el.scrollTop = top;
         } else if (top + sizes.rowHeight > el.scrollTop + el.clientHeight) {
             el.scrollTop = top + sizes.rowHeight - el.clientHeight;
+        }
+    }
+
+    /** Scroll the grid so that the given 0-indexed column is visible. */
+    function scrollToColumn(col: number) {
+        const el = getScrollContainer();
+        if (!el) return;
+        const left = col * COL_WIDTH;
+        if (left < el.scrollLeft) {
+            el.scrollLeft = left;
+        } else if (left + COL_WIDTH > el.scrollLeft + el.clientWidth) {
+            el.scrollLeft = left + COL_WIDTH - el.clientWidth;
         }
     }
 
@@ -1386,10 +1440,15 @@
     }
 
     function applyHeaderHighlights() {
-        if (!focusedCell && !focusedRangeBounds) return;
         const wrapper = document.querySelector(".grid-wrapper");
         if (!wrapper) return;
-        const focused = focusedCell;
+        const highlightBounds = [
+            ...selections,
+            ...(focusedCellBounds ? [focusedCellBounds] : []),
+            ...(isSelecting && activeSelectionBounds
+                ? [activeSelectionBounds]
+                : []),
+        ];
 
         for (const col of wrapper.querySelectorAll<HTMLElement>(
             "[data-header-id]",
@@ -1397,34 +1456,24 @@
             const colIdx = columnLetterToIndex(
                 parseSvarID(col.dataset.headerId!) as string,
             );
-            if (focusedRangeBounds) {
-                col.classList.toggle(
-                    "highlight-col",
-                    colIdx >= focusedRangeBounds.minC &&
-                        colIdx <= focusedRangeBounds.maxC,
-                );
-            } else if (focused) {
-                col.classList.toggle("highlight-col", colIdx === focused.col);
-            } else {
-                col.classList.remove("highlight-col");
-            }
+            col.classList.toggle(
+                "highlight-col",
+                highlightBounds.some(
+                    (bounds) => colIdx >= bounds.minC && colIdx <= bounds.maxC,
+                ),
+            );
         }
 
         for (const cell of wrapper.querySelectorAll<HTMLElement>(
             '.wx-cell[data-col-id=":rowNumber"]',
         )) {
             const rowIdx = (parseSvarID(cell.dataset.rowId!) as number) - 1;
-            if (
-                focusedRangeBounds &&
-                rowIdx >= focusedRangeBounds.minR &&
-                rowIdx <= focusedRangeBounds.maxR
-            ) {
-                cell.classList.add("highlight-row");
-            } else if (focused && rowIdx === focused.row) {
-                cell.classList.add("highlight-row");
-            } else {
-                cell.classList.remove("highlight-row");
-            }
+            cell.classList.toggle(
+                "highlight-row",
+                highlightBounds.some(
+                    (bounds) => rowIdx >= bounds.minR && rowIdx <= bounds.maxR,
+                ),
+            );
         }
     }
 
@@ -1433,6 +1482,7 @@
         const scroller = getScrollContainer();
         reposition(sos, scroller?.scrollLeft ?? 0, scroller?.scrollTop ?? 0);
         focusOverlay?.reposition();
+        for (const selection of selectionOverlays) selection?.reposition();
         fillOriginOverlay?.reposition();
         cloneSourceOverlay?.reposition();
         for (const ref of refOverlays) ref?.reposition();
@@ -1441,8 +1491,12 @@
 
     // when selection or formula bounds change, reposition overlays and apply header highlight
     $effect(() => {
-        focusedRangeBounds;
-        focusedCell;
+        focusedCellBounds;
+        activeSelectionBounds;
+        activeFocusHasBorder;
+        activeFocusHasBackground;
+        selections;
+        fillOriginalBounds;
         clonedFormulaBounds;
         parsedFormulaReferencesHighlights;
         applyHeaderHighlights();
@@ -1484,10 +1538,11 @@
 
         // reset selection and editing state
         focusedCell = null;
-        focusedRangeStart = null;
         hoveredCell = null;
+        selections = [];
         isSelecting = false;
-        shiftClickedOnce = false;
+        appendSelectionOnMouseUp = false;
+        isSingleCellSelectionOnMouseUp = false;
         isFilling = false;
         fillOriginalBounds = null;
         clonedFormulaBounds = null;
@@ -1512,7 +1567,11 @@
                 expandColumns(dec.columnCount);
             if (dec.columnWidths) {
                 for (const col of gridColumns) {
-                    if (col.id !== "rowNumber" && col.id in dec.columnWidths) {
+                    if (
+                        typeof col.id === "string" &&
+                        col.id !== "rowNumber" &&
+                        col.id in dec.columnWidths
+                    ) {
                         col.width = dec.columnWidths[col.id];
                     }
                 }
@@ -1648,24 +1707,47 @@
             split={{ left }}
             {sizes}
             {select}
+            {filterValues}
             {cellStyle}
         />
     </ContextMenu>
     {#if showAddRows}
         <div class="add-rows-bar">
-            <button onclick={() => expandRows(rowCount + addRowsCount)}
-                >Add</button
+            <button
+                onclick={() => {
+                    const newRowCount = rowCount + addRowsCount;
+                    expandRows(newRowCount);
+                    requestAnimationFrame(() => {
+                        scrollToRow(newRowCount);
+                    });
+                }}>Add</button
             >
-            <input type="number" bind:value={addRowsCount} min="1" />
+            <input
+                inputmode="numeric"
+                pattern="[0-9]*"
+                bind:value={addRowsCount}
+                min="1"
+            />
             <span>rows</span>
         </div>
     {/if}
     {#if showAddCols}
         <div class="add-cols-bar">
-            <button onclick={() => expandColumns(columnCount + addColsCount)}
-                >Add</button
+            <button
+                onclick={() => {
+                    const newColumnCount = columnCount + addColsCount;
+                    expandColumns(newColumnCount);
+                    requestAnimationFrame(() => {
+                        scrollToColumn(newColumnCount);
+                    });
+                }}>Add</button
             >
-            <input type="number" bind:value={addColsCount} min="1" />
+            <input
+                inputmode="numeric"
+                pattern="[0-9]*"
+                bind:value={addColsCount}
+                min="1"
+            />
             <span>columns</span>
         </div>
     {/if}
@@ -1674,6 +1756,14 @@
             {#if sos}
                 {#each tables as table, i}
                     <TableOverlay bind:this={tableOverlays[i]} {sos} {table} />
+                {/each}
+                {#each selections as bounds, i}
+                    <SelectionOverlay
+                        bind:this={selectionOverlays[i]}
+                        {sos}
+                        {bounds}
+                        visible={true}
+                    />
                 {/each}
                 <FillOriginOverlay
                     bind:this={fillOriginOverlay}
@@ -1699,11 +1789,13 @@
                 <FocusOverlay
                     bind:this={focusOverlay}
                     {sos}
-                    bounds={focusedRangeBounds}
-                    visible={!!focusedRangeBounds}
+                    bounds={activeSelectionBounds}
+                    visible={!!activeSelectionBounds}
                     {isFilling}
                     {isEditing}
                     {editorInputWidth}
+                    showBorder={activeFocusHasBorder}
+                    showBackground={activeFocusHasBackground}
                     onfillstart={handleFillStart}
                 />
             {/if}
@@ -1804,7 +1896,7 @@
         }
     }
 
-    /* Static clip wrapper — prevents overlays from rendering over headers/row numbers */
+    /* Static clip wrapper - prevents overlays from rendering over headers/row numbers */
     .selection-overlays-clip {
         position: absolute;
         inset: 0;

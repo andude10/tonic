@@ -45,7 +45,7 @@ export type SheetRow = {
     rowNumber: number;
 } & Record<string, CellData | number>;
 
-/** "A" → 0, "B" → 1, "Z" → 25, "AA" → 26 */
+/** "A" -> 0, "B" -> 1, "Z" -> 25, "AA" -> 26 */
 export function columnLetterToIndex(id: string): number {
     let n = 0;
     for (let i = 0; i < id.length; i++) {
@@ -54,7 +54,7 @@ export function columnLetterToIndex(id: string): number {
     return n - 1;
 }
 
-/** 0 → "A", 1 → "B", 25 → "Z", 26 → "AA" */
+/** 0 -> "A", 1 -> "B", 25 -> "Z", 26 -> "AA" */
 export function columnIndexToLetter(index: number): string {
     if (index < 26) return String.fromCharCode(65 + index);
     let s = "";

@@ -13,6 +13,10 @@
         isFilling,
         isEditing = false,
         editorInputWidth = 0,
+        showFillHandle = true,
+        showBorder = true,
+        showBackground = false,
+        zIndex = 2,
         onfillstart,
     }: {
         sos: SheetObjectsState;
@@ -21,6 +25,10 @@
         isFilling: boolean;
         isEditing?: boolean;
         editorInputWidth?: number;
+        showFillHandle?: boolean;
+        showBorder?: boolean;
+        showBackground?: boolean;
+        zIndex?: number;
         onfillstart: (ev: MouseEvent) => void;
     } = $props();
 
@@ -43,21 +51,32 @@
             isEditing ? editorInputWidth : 0,
         )}px"
         style:height="{rect!.height}px"
+        style:border-color={showBorder
+            ? "var(--wx-color-primary)"
+            : "transparent"}
+        style:background={showBackground
+            ? "color-mix(in srgb, var(--wx-color-primary), transparent 88%)"
+            : "transparent"}
+        style:z-index={zIndex}
     >
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div
-            class="fill-handle"
-            class:filling={isFilling}
-            onmousedown={onfillstart}
-        ></div>
+        {#if showFillHandle}
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div
+                class="fill-handle"
+                class:filling={isFilling}
+                onmousedown={onfillstart}
+            ></div>
+        {/if}
     </div>
 {/if}
 
 <style>
     .focus-overlay {
         position: absolute;
-        border: 2px solid var(--wx-color-primary);
+        border: 2px solid transparent;
         border-radius: 4px;
+        background: transparent;
+        box-sizing: border-box;
         will-change: left, top, width, height;
         pointer-events: none;
         --transition-base:
