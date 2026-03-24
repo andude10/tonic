@@ -68,25 +68,49 @@
     let filterOptions: FilterOption[] = $state([]);
 
     let filterComboOptions = $derived(
-        filterOptions.map((o, i) => ({ id: i + 1, label: o.val })),
+        filterOptions.map((o) => ({ id: o.id + 1, label: o.val })),
     );
     let filterComboValue = $derived(
-        filterOptions
-            .map((o, i) => (o.selected ? i + 1 : -1))
-            .filter((i) => i >= 0),
+        filterOptions.filter((o) => o.selected).map((o) => o.id + 1),
     );
 
     function handleFilterChange(ev: { value: (string | number)[] }) {
         const next = new Set(ev.value);
-        const i = filterOptions.findIndex(
-            (o, i) => o.selected !== next.has(i + 1),
+        const changed = filterOptions.find(
+            (o) => o.selected !== next.has(o.id + 1),
         );
-        if (i < 0) return;
-        filterOptions[i].selected = !filterOptions[i].selected;
+        if (!changed) return;
+        changed.selected = !changed.selected;
         invoke("toggle_table_filter", {
             header: headerCellId(),
-            filterIndex: i,
+            filterOptionId: changed.id,
         }).catch(console.error);
+    }
+
+    function handleFilterSelectAll() {
+        const header = headerCellId();
+        for (const o of filterOptions) {
+            if (!o.selected) {
+                o.selected = true;
+                invoke("toggle_table_filter", {
+                    header,
+                    filterOptionId: o.id,
+                }).catch(console.error);
+            }
+        }
+    }
+
+    function handleFilterClear() {
+        const header = headerCellId();
+        for (const o of filterOptions) {
+            if (o.selected) {
+                o.selected = false;
+                invoke("toggle_table_filter", {
+                    header,
+                    filterOptionId: o.id,
+                }).catch(console.error);
+            }
+        }
     }
 
     let dropdownOptions = $derived([
@@ -99,6 +123,8 @@
             comboOptions: filterComboOptions,
             comboValue: filterComboValue,
             onchange: handleFilterChange,
+            onSelectAll: handleFilterSelectAll,
+            onClear: handleFilterClear,
         },
     ]);
 
@@ -161,6 +187,8 @@
                 /></svg
             >
         {/if}
+
+        <!-- todo: refactor, make state flow (tables) clear -->
         {#if isTableHeader}
             <DropDownMenu
                 options={dropdownOptions}

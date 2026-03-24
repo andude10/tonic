@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_log::log::{debug, error};
 
+use std::collections::BTreeMap;
+
 use crate::engine::{ChangeBounds, Engine};
 use crate::parser::shift_formula_refs;
 use crate::storage::grid::{CellContent, CellValue, GridCellId};
@@ -400,6 +402,7 @@ fn save_file(
     app: AppHandle,
     state: tauri::State<'_, Mutex<TonicState>>,
     path: &str,
+    ui_decorations_json: &str,
 ) -> Result<(), String> {
     let path = if path.ends_with(".tcs") {
         path.to_string()
@@ -407,7 +410,7 @@ fn save_file(
         format!("{}.tcs", path)
     };
     let mut state = state.lock().unwrap();
-    if let Err(e) = state.engine.save_spreadsheet(&path) {
+    if let Err(e) = state.engine.save_spreadsheet(&path, ui_decorations_json) {
         error!("Failed to save file '{}': {}", path, e);
         return Err(e.to_string());
     }
@@ -447,9 +450,9 @@ fn open_file(
     app: AppHandle,
     state: tauri::State<'_, Mutex<TonicState>>,
     path: &str,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let mut state = state.lock().unwrap();
-    state.engine.open_spreadsheet(path).map_err(|e| {
+    let decorations = state.engine.open_spreadsheet(path).map_err(|e| {
         error!("Failed to open file '{}': {}", path, e);
         e.to_string()
     })?;
@@ -457,7 +460,7 @@ fn open_file(
     state.last_viewport_range = (u32::MAX, u32::MAX, u32::MAX, u32::MAX);
     update_file_info(&mut state, path);
     emit_save_status(&app, &state);
-    Ok(())
+    Ok(decorations)
 }
 
 #[tauri::command(async)]
@@ -485,6 +488,7 @@ fn create_table(
     body_end: GridCellId,
 ) -> Result<u32, String> {
     let mut state = state.lock().unwrap();
+    let ss = &mut state.engine.spreadsheet;
 
     if first_header.row != last_header.row {
         return Err("Header must be on a single row".into());
@@ -498,18 +502,14 @@ fn create_table(
     if body_end.row < body_start.row || body_end.col < body_start.col {
         return Err("Invalid body bounds".into());
     }
-    if state
-        .engine
-        .spreadsheet
-        .names
-        .table_names
-        .contains_key(&table_name)
-    {
+    if ss.names.table_names.contains_key(&table_name) {
         return Err(format!("Table '{}' already exists", table_name));
     }
 
+    // todo: remove code duplication with post_table_cells_change_hook and filter methods
+
     // check overlap with existing tables
-    for maybe_table in state.engine.spreadsheet.tables.iter() {
+    for maybe_table in ss.tables.iter() {
         let Some(t) = maybe_table else { continue };
         let h_overlap =
             last_header.col >= t.first_header.col && first_header.col <= t.last_header.col;
@@ -522,30 +522,32 @@ fn create_table(
     let num_cols = (last_header.col - first_header.col + 1) as usize;
     let rows: Vec<u32> = (body_start.row..=body_end.row).collect();
 
-    // collect unique values per column for filter options
-    let filter_options = (0..num_cols)
+    // collect unique values per column for filter options, tracking counts
+    let mut next_id: u32 = 1; // 0 is reserved for the "(Blanks)" filter option
+    let filter_options: Vec<BTreeMap<CellValue, ProjectionFilterOption>> = (0..num_cols)
         .map(|col_offset| {
             let col = body_start.col + col_offset as u32;
-            let mut seen = Vec::new();
+            let mut opts: BTreeMap<CellValue, ProjectionFilterOption> = BTreeMap::new();
             for &row in &rows {
-                if let Some(val) =
-                    state.engine.spreadsheet.sheets[0].get_value(&GridCellId { row, col })
-                {
-                    if !seen.contains(val) {
-                        seen.push(val.clone());
-                    }
+                if let Some(val) = ss.sheets[0].get_value(&GridCellId { row, col }) {
+                    opts.entry(val.clone())
+                        .and_modify(|o| o.count += 1)
+                        .or_insert_with(|| {
+                            let id = next_id;
+                            next_id += 1;
+                            ProjectionFilterOption {
+                                id,
+                                selected: true,
+                                count: 1,
+                            }
+                        });
                 }
             }
-            seen.into_iter()
-                .map(|val| ProjectionFilterOption {
-                    val,
-                    selected: true,
-                })
-                .collect()
+            opts
         })
         .collect();
 
-    let proj_id = state.engine.spreadsheet.projections.insert(Projection {
+    let proj_id = ss.projections.insert(Projection {
         sheet_id: 0,
         projection_start: body_start,
         projection_end: body_end,
@@ -560,9 +562,11 @@ fn create_table(
             num_cols
         ],
         hidden_rows_count: 0,
+        filter_show_blanks: vec![true; num_cols],
+        next_filter_option_id: next_id,
     });
 
-    let id = state.engine.spreadsheet.tables.insert(Table {
+    let id = ss.tables.insert(Table {
         sheet_id: 0,
         name: table_name.clone(),
         first_header,
@@ -572,18 +576,8 @@ fn create_table(
         projection_id: proj_id,
     });
 
-    state
-        .engine
-        .spreadsheet
-        .names
-        .table_names
-        .insert(table_name.clone(), id);
-    state
-        .engine
-        .spreadsheet
-        .names
-        .table_names_lookup
-        .insert(id, table_name);
+    ss.names.table_names.insert(table_name.clone(), id);
+    ss.names.table_names_lookup.insert(id, table_name);
     Ok(id)
 }
 
@@ -594,10 +588,9 @@ fn change_table_name(
     new_name: String,
 ) -> Result<(), String> {
     let mut state = state.lock().unwrap();
+    let ss = &mut state.engine.spreadsheet;
 
-    let id = *state
-        .engine
-        .spreadsheet
+    let id = *ss
         .names
         .table_names
         .get(&old_name)
@@ -606,38 +599,19 @@ fn change_table_name(
     if old_name == new_name {
         return Ok(());
     }
-
-    if state
-        .engine
-        .spreadsheet
-        .names
-        .table_names
-        .contains_key(&new_name)
-    {
+    if ss.names.table_names.contains_key(&new_name) {
         return Err(format!("Table '{}' already exists", new_name));
     }
 
-    let table = state
-        .engine
-        .spreadsheet
+    let table = ss
         .tables
         .get_mut(id)
         .ok_or_else(|| format!("Table '{}' not found", old_name))?;
     table.name = new_name.clone();
 
-    state.engine.spreadsheet.names.table_names.remove(&old_name);
-    state
-        .engine
-        .spreadsheet
-        .names
-        .table_names
-        .insert(new_name.clone(), id);
-    state
-        .engine
-        .spreadsheet
-        .names
-        .table_names_lookup
-        .insert(id, new_name);
+    ss.names.table_names.remove(&old_name);
+    ss.names.table_names.insert(new_name.clone(), id);
+    ss.names.table_names_lookup.insert(id, new_name);
     Ok(())
 }
 
@@ -649,20 +623,13 @@ fn toggle_table_sort(
     desc: bool,
 ) -> Result<(), String> {
     let mut state = state.lock().unwrap();
+    let ss = &state.engine.spreadsheet;
 
-    let (table_id, table) = state
-        .engine
-        .spreadsheet
+    let (table_id, table) = ss
         .find_table_by_header(&header)
         .ok_or("Column header is not part of any table")?;
     let proj_id = table.projection_id;
-
-    let was_active = state
-        .engine
-        .spreadsheet
-        .projections
-        .get(proj_id)
-        .map_or(false, |p| p.active);
+    let was_active = ss.projections.get(proj_id).map_or(false, |p| p.active);
 
     state.engine.sort_table_column(table_id, header.col, desc)?;
 
@@ -672,7 +639,6 @@ fn toggle_table_sort(
         .projections
         .get(proj_id)
         .map_or(false, |p| p.active);
-
     if !was_active && is_active {
         let _ = app.emit("enable-table-projection", table_id);
     } else if was_active && !is_active {
@@ -686,27 +652,20 @@ fn toggle_table_filter(
     app: AppHandle,
     state: tauri::State<'_, Mutex<TonicState>>,
     header: GridCellId,
-    filter_index: usize,
-) -> Result<u32, String> {
+    filter_option_id: u32,
+) -> Result<(), String> {
     let mut state = state.lock().unwrap();
+    let ss = &state.engine.spreadsheet;
 
-    let (table_id, table) = state
-        .engine
-        .spreadsheet
+    let (table_id, table) = ss
         .find_table_by_header(&header)
         .ok_or("Column header is not part of any table")?;
     let proj_id = table.projection_id;
-
-    let was_active = state
-        .engine
-        .spreadsheet
-        .projections
-        .get(proj_id)
-        .map_or(false, |p| p.active);
+    let was_active = ss.projections.get(proj_id).map_or(false, |p| p.active);
 
     let hidden = state
         .engine
-        .filter_table_column(table_id, header.col, filter_index)?;
+        .filter_table_column(table_id, header.col, filter_option_id)?;
 
     let is_active = state
         .engine
@@ -720,11 +679,147 @@ fn toggle_table_filter(
     } else if was_active && !is_active {
         let _ = app.emit("disable-table-projection", table_id);
     }
-    Ok(hidden)
+    let _ = app.emit("update-table-hidden-rows", (table_id, hidden));
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn apply_table_projection(
+    app: AppHandle,
+    state: tauri::State<'_, Mutex<TonicState>>,
+    table_name: String,
+) -> Result<(), String> {
+    let timer = std::time::Instant::now();
+    let mut state = state.lock().unwrap();
+    let ss = &state.engine.spreadsheet;
+
+    let &table_id = ss
+        .names
+        .table_names
+        .get(&table_name)
+        .ok_or_else(|| format!("Table '{}' not found", table_name))?;
+    let table = ss.tables.get(table_id).ok_or("Table not found")?;
+    let proj_id = table.projection_id;
+    let proj = ss.projections.get(proj_id).ok_or("Projection not found")?;
+    if !proj.active {
+        return Err("Projection is not active".into());
+    }
+
+    let sheet_id = table.sheet_id;
+    let col_start = table.body_start.col;
+    let col_end = table.body_end.col;
+    let body_start_row = table.body_start.row;
+    let body_end_row = table.body_end.row;
+    let projected_rows = proj.projected_rows.clone();
+
+    // collect values in projected order per column
+    let values_per_col: Vec<Vec<Option<CellValue>>> = (col_start..=col_end)
+        .map(|col| {
+            projected_rows
+                .iter()
+                .map(|&row| {
+                    ss.sheets[sheet_id as usize]
+                        .get_value(&GridCellId { row, col })
+                        .cloned()
+                })
+                .collect()
+        })
+        .collect();
+
+    // write back sequentially using engine methods
+    let t = state.engine.start_batch();
+    for (col_offset, values) in values_per_col.into_iter().enumerate() {
+        let col = col_start + col_offset as u32;
+        for (i, val) in values.into_iter().enumerate() {
+            let id = CellId {
+                row: body_start_row + i as u32,
+                col,
+            }
+            .to_absolute();
+            match val {
+                Some(v) => state.engine.insert_value(&t, id, v),
+                None => state.engine.delete(&t, id),
+            }
+        }
+        // delete remaining rows beyond projected length
+        let kept = projected_rows.len() as u32;
+        for row in (body_start_row + kept)..=body_end_row {
+            state.engine.delete(&t, CellId { row, col }.to_absolute());
+        }
+    }
+
+    // reset projection before end_batch so post_cell_changes_hook sees it inactive
+    let proj = state
+        .engine
+        .spreadsheet
+        .projections
+        .get_mut(proj_id)
+        .unwrap();
+    let num_cols = (col_end - col_start + 1) as usize;
+    proj.active = false;
+    proj.projected_rows = (body_start_row..=body_end_row).collect();
+    proj.hidden_rows_count = 0;
+    proj.filter_show_blanks = vec![true; num_cols];
+    for opt in &mut proj.sorting_options_per_column {
+        opt.selected = false;
+    }
+
+    state.engine.end_batch(t);
+    debug!("apply_table_projection took: {:?}", timer.elapsed());
+
+    let _ = app.emit("disable-table-projection", table_id);
+    emit_save_status(&app, &state);
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn disable_table_projection(
+    app: AppHandle,
+    state: tauri::State<'_, Mutex<TonicState>>,
+    table_name: String,
+) -> Result<(), String> {
+    let mut state = state.lock().unwrap();
+    let ss = &mut state.engine.spreadsheet;
+
+    let &table_id = ss
+        .names
+        .table_names
+        .get(&table_name)
+        .ok_or_else(|| format!("Table '{}' not found", table_name))?;
+    let table = ss.tables.get(table_id).ok_or("Table not found")?;
+    let proj_id = table.projection_id;
+    let col_start = table.body_start.col;
+    let col_end = table.body_end.col;
+    let body_start_row = table.body_start.row;
+    let body_end_row = table.body_end.row;
+
+    let proj = ss
+        .projections
+        .get_mut(proj_id)
+        .ok_or("Projection not found")?;
+    let num_cols = (col_end - col_start + 1) as usize;
+    proj.active = false;
+    proj.projected_rows = (body_start_row..=body_end_row).collect();
+    proj.hidden_rows_count = 0;
+    proj.filter_show_blanks = vec![true; num_cols];
+    for opt in &mut proj.sorting_options_per_column {
+        opt.selected = false;
+    }
+
+    // reset all filter options to selected
+    for col_opts in proj.filter_options_per_column.iter_mut() {
+        for opt in col_opts.values_mut() {
+            opt.selected = true;
+        }
+    }
+
+    let _ = app.emit("disable-table-projection", table_id);
+    Ok(())
 }
 
 #[derive(Serialize)]
 struct FilterOptionResponse {
+    id: u32,
     val: String,
     selected: bool,
 }
@@ -735,32 +830,37 @@ fn get_filter_options_for_table_column(
     header: GridCellId,
 ) -> Result<Vec<FilterOptionResponse>, String> {
     let state = state.lock().unwrap();
+    let ss = &state.engine.spreadsheet;
 
-    let (_, table) = state
-        .engine
-        .spreadsheet
+    let (_, table) = ss
         .find_table_by_header(&header)
         .ok_or("Column header is not part of any table")?;
-    let proj_id = table.projection_id;
     let col_idx = (header.col - table.first_header.col) as usize;
 
-    let projection = state
-        .engine
-        .spreadsheet
+    let proj = ss
         .projections
-        .get(proj_id)
+        .get(table.projection_id)
         .ok_or("Projection not found")?;
-    if col_idx >= projection.filter_options_per_column.len() {
+    if col_idx >= proj.filter_options_per_column.len() {
         return Err("Column index out of range".into());
     }
 
-    Ok(projection.filter_options_per_column[col_idx]
-        .iter()
-        .map(|o| FilterOptionResponse {
-            val: o.val.to_string(),
-            selected: o.selected,
-        })
-        .collect())
+    // id 0 is always the "(Blanks)" option
+    let mut result = vec![FilterOptionResponse {
+        id: 0,
+        val: "(Blanks)".into(),
+        selected: proj.filter_show_blanks[col_idx],
+    }];
+    result.extend(
+        proj.filter_options_per_column[col_idx]
+            .iter()
+            .map(|(val, o)| FilterOptionResponse {
+                id: o.id,
+                val: val.to_string(),
+                selected: o.selected,
+            }),
+    );
+    Ok(result)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -796,6 +896,8 @@ pub fn run() {
             toggle_table_sort,
             toggle_table_filter,
             get_filter_options_for_table_column,
+            apply_table_projection,
+            disable_table_projection,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

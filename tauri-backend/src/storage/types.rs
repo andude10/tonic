@@ -1,5 +1,33 @@
+use std::collections::BTreeMap;
+
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+/// Serde helper: serialize `Vec<BTreeMap<K, V>>` as `Vec<Vec<(K, V)>>`.
+/// Avoids the JSON requirement that map keys must be strings.
+mod vec_btreemap_as_vec {
+    use super::*;
+
+    pub fn serialize<S, K, V>(maps: &Vec<BTreeMap<K, V>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        K: Serialize + Ord,
+        V: Serialize,
+    {
+        let vecs: Vec<Vec<(&K, &V)>> = maps.iter().map(|m| m.iter().collect()).collect();
+        vecs.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D, K, V>(deserializer: D) -> Result<Vec<BTreeMap<K, V>>, D::Error>
+    where
+        D: Deserializer<'de>,
+        K: Deserialize<'de> + Ord,
+        V: Deserialize<'de>,
+    {
+        let vecs: Vec<Vec<(K, V)>> = Vec::deserialize(deserializer)?;
+        Ok(vecs.into_iter().map(|v| v.into_iter().collect()).collect())
+    }
+}
 
 use crate::storage::{
     grid::{CellContent, CellValue, Grid, GridCellId},
@@ -109,14 +137,14 @@ pub struct Table {
     pub last_header: GridCellId,
     pub body_start: GridCellId,
     pub body_end: GridCellId,
-    #[serde(default)]
     pub projection_id: ProjectionId,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ProjectionFilterOption {
-    pub val: CellValue,
+    pub id: u32,
     pub selected: bool,
+    pub count: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -132,21 +160,23 @@ pub struct Projection {
     pub projection_end: GridCellId,
     pub projected_rows: Vec<u32>,
     pub active: bool,
-    pub filter_options_per_column: Vec<Vec<ProjectionFilterOption>>,
+    #[serde(with = "vec_btreemap_as_vec")]
+    pub filter_options_per_column: Vec<BTreeMap<CellValue, ProjectionFilterOption>>,
     pub sorting_options_per_column: Vec<ProjectionSortOption>,
     pub hidden_rows_count: u32,
+    pub filter_show_blanks: Vec<bool>,
+    pub next_filter_option_id: u32,
 }
 
 pub type Sheets = Vec<Grid>;
 
 #[derive(Serialize, Deserialize)]
 pub struct Spreadsheet {
+    // todo: sheets are private for engine, should not be used in lib.rs
     pub(crate) sheets: Sheets,
     pub(crate) formulas: StableVec<Formula>,
     pub(crate) names: SpreadsheetNames,
-    #[serde(default)]
     pub(crate) tables: StableVec<Table>,
-    #[serde(default)]
     pub(crate) projections: StableVec<Projection>,
 }
 

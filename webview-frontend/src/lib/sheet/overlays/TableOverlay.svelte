@@ -1,5 +1,7 @@
 <script lang="ts">
     import { invoke } from "@tauri-apps/api/core";
+    import { fade } from "svelte/transition";
+    import { Icon } from "@svar-ui/svelte-core";
     import {
         cellRangeToPixels,
         type CellRange,
@@ -41,8 +43,21 @@
         }
     }
 
+    function handleApply() {
+        invoke("apply_table_projection", { tableName: table.title }).catch(
+            console.error,
+        );
+    }
+
+    function handleCancel() {
+        invoke("disable_table_projection", { tableName: table.title }).catch(
+            console.error,
+        );
+    }
+
     let borderRect: PixelRect | null = $state(null);
     let titleRect: PixelRect | null = $state(null);
+    let hiddenRect: PixelRect | null = $state(null);
 
     const TITLE_HEIGHT = 18;
 
@@ -52,6 +67,17 @@
         minC: Math.min(table.headerBounds.minC, table.bodyBounds.minC),
         maxC: Math.max(table.headerBounds.maxC, table.bodyBounds.maxC),
     });
+
+    let hiddenBounds: CellRange | null = $derived(
+        table.hiddenRowsCount > 0
+            ? {
+                  minR: table.bodyBounds.maxR - table.hiddenRowsCount + 1,
+                  maxR: table.bodyBounds.maxR,
+                  minC: table.bodyBounds.minC,
+                  maxC: table.bodyBounds.maxC,
+              }
+            : null,
+    );
 
     export function reposition() {
         const fr = cellRangeToPixels(sos, fullBounds);
@@ -71,6 +97,12 @@
         } else {
             borderRect = null;
             titleRect = null;
+        }
+
+        if (hiddenBounds) {
+            hiddenRect = cellRangeToPixels(sos, hiddenBounds);
+        } else {
+            hiddenRect = null;
         }
     }
 </script>
@@ -92,17 +124,53 @@
             onblur={handleTitleBlur}
             onkeydown={handleTitleKeyDown}>{table.title}</span
         >
+
+        {#if table.hasProjection}
+            <div class="proj-buttons" transition:fade={{ duration: 150 }}>
+                <Icon
+                    css="wxi wxi-check proj-btn apply-btn"
+                    title="Update table"
+                    onclick={handleApply}
+                />
+                <Icon
+                    css="wxi wxi-close proj-btn cancel-btn"
+                    title="Cancel table update"
+                    onclick={handleCancel}
+                />
+            </div>
+        {/if}
     </div>
 {/if}
 {#if borderRect}
     <div
         class="table-border"
-        class:has-projection={table.hasProjection}
         style:left="{borderRect.left}px"
         style:top="{borderRect.top}px"
         style:width="{borderRect.width}px"
         style:height="{borderRect.height}px"
     ></div>
+    {#if table.hasProjection}
+        <div
+            class="table-border has-projection"
+            transition:fade={{ duration: 150 }}
+            style:left="{borderRect.left}px"
+            style:top="{borderRect.top}px"
+            style:width="{borderRect.width}px"
+            style:height="{borderRect.height}px"
+        ></div>
+    {/if}
+{/if}
+{#if hiddenRect}
+    <div
+        class="hidden-rows-overlay"
+        style:left="{hiddenRect.left}px"
+        style:top="{hiddenRect.top}px"
+        style:width="{hiddenRect.width}px"
+        style:height="{hiddenRect.height}px"
+    >
+        <span class="hidden-rows-text">Hidden {table.hiddenRowsCount} rows</span
+        >
+    </div>
 {/if}
 
 <style>
@@ -167,6 +235,47 @@
         overflow: hidden;
     }
 
+    .proj-buttons {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        margin-left: 4px;
+        flex-shrink: 0;
+    }
+
+    :global(.proj-btn) {
+        font-size: 10px !important;
+        cursor: pointer;
+        width: 12px;
+        height: 12px;
+        display: flex !important;
+        align-items: center;
+        justify-content: center;
+        padding: 0 !important;
+        border-radius: 3px;
+        transition: background 100ms ease;
+    }
+
+    :global(.apply-btn) {
+        background: var(--wx-color-success);
+        color: white;
+    }
+
+    :global(.apply-btn:hover) {
+        background: var(--wx-color-success) !important;
+        filter: brightness(0.85);
+    }
+
+    :global(.cancel-btn) {
+        background: var(--wx-color-danger);
+        color: white;
+    }
+
+    :global(.cancel-btn:hover) {
+        background: var(--wx-color-danger) !important;
+        filter: brightness(0.85);
+    }
+
     .table-border.has-projection {
         box-shadow:
         /* tight outline */
@@ -176,5 +285,21 @@
             inset 0 -1px 0 rgba(0, 0, 0, 0.3),
             /* symmetric ambient shadow */ 0 0 12px rgba(0, 0, 0, 0.5),
             0 0 30px rgba(0, 0, 0, 0.3);
+    }
+
+    .hidden-rows-overlay {
+        position: absolute;
+        background: rgba(26, 26, 26);
+        pointer-events: none;
+        display: flex;
+        align-items: flex-start;
+        justify-content: center;
+        padding-top: 8px;
+    }
+
+    .hidden-rows-text {
+        color: #a1a1aa;
+        font-size: 11px;
+        font-weight: 600;
     }
 </style>

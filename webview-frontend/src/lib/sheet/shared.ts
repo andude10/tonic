@@ -14,7 +14,7 @@ export type ChangeBounds = {
 
 import type { CellRange } from "./overlays/Overlays.svelte";
 
-export type FilterOption = { val: string; selected: boolean };
+export type FilterOption = { id: number; val: string; selected: boolean };
 
 export type TableData = {
     id: number;
@@ -22,6 +22,7 @@ export type TableData = {
     bodyBounds: CellRange;
     title: string;
     hasProjection: boolean;
+    hiddenRowsCount: number;
 };
 
 export type SheetSharedState = {

@@ -83,6 +83,7 @@
                         },
                         title: tableName,
                         hasProjection: false,
+                        hiddenRowsCount: 0,
                     },
                 ];
                 requestAnimationFrame(() => repositionOverlays());
@@ -1441,7 +1442,33 @@
         repositionOverlays();
     });
 
-    export function onFileLoad() {
+    export function saveDecorationsToJson(): string {
+        const gridState = gridApi!.getState();
+        const columns: any[] = gridState._columns ?? [];
+
+        const columnWidths: Record<string, number> = {};
+        for (const col of columns) {
+            if (col.id === "rowNumber") continue;
+            if (col.width !== COL_WIDTH) {
+                columnWidths[col.id] = col.width;
+            }
+        }
+
+        // todo: row heights
+        const rowHeights: Record<string, number> = {};
+
+        return JSON.stringify({
+            tables,
+            defaultColWidth: COL_WIDTH,
+            defaultRowHeight: sizes.rowHeight,
+            columnWidths,
+            rowHeights,
+            rowCount,
+            columnCount,
+        });
+    }
+
+    export function onFileLoad(decorationsJson?: string) {
         // reset grid data
         baseRows.length = 0;
         for (let i = 0; i < INITIAL_ROWS; i++) {
@@ -1467,6 +1494,26 @@
         // scroll to the top
         const el = getScrollContainer();
         if (el) el.scrollTop = 0;
+
+        // restore decorations
+        if (decorationsJson) {
+            const dec = JSON.parse(decorationsJson);
+            if (dec.tables) tables = dec.tables;
+            if (dec.rowCount && dec.rowCount > rowCount)
+                expandRows(dec.rowCount);
+            if (dec.columnCount && dec.columnCount > columnCount)
+                expandColumns(dec.columnCount);
+            if (dec.columnWidths) {
+                for (const col of gridColumns) {
+                    if (col.id !== "rowNumber" && col.id in dec.columnWidths) {
+                        col.width = dec.columnWidths[col.id];
+                    }
+                }
+                gridColumns = gridColumns;
+            }
+        } else {
+            tables = [];
+        }
 
         updateVisibleColumns();
         restartPolling();
@@ -1527,7 +1574,18 @@
             (event) => {
                 const tableId = event.payload;
                 tables = tables.map((t) =>
-                    t.id === tableId ? { ...t, hasProjection: false } : t,
+                    t.id === tableId
+                        ? { ...t, hasProjection: false, hiddenRowsCount: 0 }
+                        : t,
+                );
+            },
+        );
+        const unlistenHiddenRows = listen<[number, number]>(
+            "update-table-hidden-rows",
+            (event) => {
+                const [tableId, hiddenRowsCount] = event.payload;
+                tables = tables.map((t) =>
+                    t.id === tableId ? { ...t, hiddenRowsCount } : t,
                 );
             },
         );
@@ -1536,6 +1594,7 @@
             if (pollInterval !== undefined) clearInterval(pollInterval);
             unlistenEnabled.then((fn) => fn());
             unlistenDisabled.then((fn) => fn());
+            unlistenHiddenRows.then((fn) => fn());
         };
     });
 

@@ -74,6 +74,7 @@ impl DebugInfo {
 }
 
 pub struct Engine {
+    // todo: move spreadsheet out of the Engine?
     pub spreadsheet: Spreadsheet,
     history: History,
     batch: Vec<CellUpdate>,
@@ -216,6 +217,13 @@ impl Engine {
         self.batch.push(CellUpdate(id, old, Some(new)));
     }
 
+    pub fn insert_value(&mut self, _: &EngineGuard, id: AbsoluteCellId, val: CellValue) {
+        let old = self.spreadsheet.get_content(&id).cloned();
+        self.spreadsheet.set_value(&id, val);
+        let new = self.spreadsheet.get_content(&id).cloned();
+        self.batch.push(CellUpdate(id, old, new));
+    }
+
     /// Insert a cell that shares an existing formula. Resolves dependencies from the
     /// formula's AST relative to the new cell position.
     pub fn insert_shared_formula(
@@ -310,6 +318,8 @@ impl Engine {
         //
         // todo
 
+        let mut affected_tables: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
         while let Some(CellUpdate(cell_id, _, _)) = wave.pop() {
             let formula_id = self
                 .spreadsheet
@@ -348,13 +358,21 @@ impl Engine {
                 }
             }
 
-            self.update_table_on_cell_change(&cell_id);
+            if let Some((table_id, _)) = self.spreadsheet.find_table_containing_cell(&cell_id) {
+                affected_tables.insert(table_id);
+            }
 
             dep_duration += t.elapsed();
         }
 
+        let table_time = std::time::Instant::now();
+        for table_id in affected_tables {
+            self.post_table_cells_change_hook(table_id);
+        }
+
         debug!("Eval (dependencies & dependants) took: {:?}", dep_duration);
         debug!("Eval (running expressions) took: {:?}", eval_duration);
+        debug!("Eval (updating tables) took: {:?}", table_time.elapsed());
     }
 
     /// Finalize the batch: push to undo log, truncate redo history.
@@ -434,23 +452,51 @@ impl Engine {
         current_id == self.history.last_saved_log_id
     }
 
-    /// Add new cell value to filter options if not already present.
-    fn update_table_on_cell_change(&mut self, cell_id: &AbsoluteCellId) {
-        if let Some((_, table)) = self.spreadsheet.find_table_containing_cell(cell_id) {
-            let proj_id = table.projection_id;
-            let col_idx = (cell_id.col - table.body_start.col) as usize;
-            if let Some(new_val) = self.spreadsheet.get_value(cell_id).cloned() {
-                let proj = self.spreadsheet.projections.get_mut(proj_id).unwrap();
-                if col_idx < proj.filter_options_per_column.len() {
-                    let opts = &mut proj.filter_options_per_column[col_idx];
-                    if !opts.iter().any(|o| o.val == new_val) {
-                        opts.push(ProjectionFilterOption {
-                            val: new_val,
-                            selected: true,
+    fn post_table_cells_change_hook(&mut self, table_id: u32) {
+        let table = match self.spreadsheet.tables.get(table_id) {
+            Some(t) => t,
+            None => return,
+        };
+        let sheet = table.sheet_id as usize;
+        let col_start = table.body_start.col;
+        let col_end = table.body_end.col;
+        let row_start = table.body_start.row;
+        let row_end = table.body_end.row;
+        let proj_id = table.projection_id;
+
+        let proj = self.spreadsheet.projections.get_mut(proj_id).unwrap();
+        let num_cols = (col_end - col_start + 1) as usize;
+
+        for col_idx in 0..num_cols {
+            let col = col_start + col_idx as u32;
+            let mut old_opts = std::mem::take(&mut proj.filter_options_per_column[col_idx]);
+
+            // reset counts, rebuild from grid
+            for opt in old_opts.values_mut() {
+                opt.count = 0;
+            }
+            for row in row_start..=row_end {
+                if let Some(val) =
+                    self.spreadsheet.sheets[sheet].get_value(&GridCellId { row, col })
+                {
+                    old_opts
+                        .entry(val.clone())
+                        .and_modify(|o| o.count += 1)
+                        .or_insert_with(|| {
+                            let id = proj.next_filter_option_id;
+                            proj.next_filter_option_id += 1;
+                            ProjectionFilterOption {
+                                id,
+                                selected: true,
+                                count: 1,
+                            }
                         });
-                    }
                 }
             }
+            // remove options with count 0 (value no longer in grid)
+            old_opts.retain(|_, o| o.count > 0);
+
+            proj.filter_options_per_column[col_idx] = old_opts;
         }
     }
 
@@ -515,7 +561,7 @@ impl Engine {
         &mut self,
         table_id: u32,
         filter_col: u32,
-        filter_index: usize,
+        filter_option_id: u32,
     ) -> Result<u32, String> {
         let table = self
             .spreadsheet
@@ -532,34 +578,33 @@ impl Engine {
         let proj = self.spreadsheet.projections.get_mut(proj_id).unwrap();
         let col_idx = (filter_col - col_start) as usize;
 
-        if let Some(opt) = proj
-            .filter_options_per_column
-            .get_mut(col_idx)
-            .and_then(|opts| opts.get_mut(filter_index))
+        // filter_index 0 = toggle blanks visibility for this column
+        if filter_option_id == 0 {
+            proj.filter_show_blanks[col_idx] = !proj.filter_show_blanks[col_idx];
+        } else if let Some(opt) = proj.filter_options_per_column[col_idx]
+            .values_mut()
+            .find(|o| o.id == filter_option_id)
         {
             opt.selected = !opt.selected;
         }
 
-        // Rebuild projected_rows from all body rows with current filters
+        // rebuild projected_rows from all body rows with current filters
         let mut rows: Vec<u32> = (body_start_row..=body_end_row).collect();
         for (i, filter_opts) in proj.filter_options_per_column.iter().enumerate() {
-            if filter_opts.iter().all(|o| o.selected) {
+            let col_blanks = proj.filter_show_blanks[i];
+            if col_blanks && filter_opts.values().all(|o| o.selected) {
                 continue;
             }
             let col = col_start + i as u32;
-            let selected: Vec<&CellValue> = filter_opts
-                .iter()
-                .filter(|o| o.selected)
-                .map(|o| &o.val)
-                .collect();
-            rows.retain(|&row| {
-                sheets[sheet]
-                    .get_value(&GridCellId { row, col })
-                    .map_or(true, |v| selected.contains(&v))
-            });
+            rows.retain(
+                |&row| match sheets[sheet].get_value(&GridCellId { row, col }) {
+                    Some(v) => filter_opts.get(v).map_or(false, |o| o.selected),
+                    None => col_blanks,
+                },
+            );
         }
 
-        // Re-apply sort if active
+        // re-apply sort if active
         if let Some((i, sort_opt)) = proj
             .sorting_options_per_column
             .iter()
@@ -603,10 +648,11 @@ impl Engine {
         proj.hidden_rows_count = total - rows.len() as u32;
         proj.projected_rows = rows;
         proj.active = proj.sorting_options_per_column.iter().any(|o| o.selected)
+            || proj.filter_show_blanks.iter().any(|&b| !b)
             || proj
                 .filter_options_per_column
                 .iter()
-                .any(|col| col.iter().any(|o| !o.selected));
+                .any(|col| col.values().any(|o| !o.selected));
         Ok(proj.hidden_rows_count)
     }
 
@@ -618,18 +664,19 @@ impl Engine {
     }
 
     /// Load a spreadsheet from disk and reset engine state.
-    pub fn open_spreadsheet(&mut self, path: &str) -> io::Result<()> {
-        let spreadsheet = file_api::load(path)?;
+    /// Returns the UI decorations JSON string (empty if old format).
+    pub fn open_spreadsheet(&mut self, path: &str) -> io::Result<String> {
+        let (spreadsheet, decorations) = file_api::load(path)?;
         self.spreadsheet = spreadsheet;
         self.history = History::new();
         self.batch.clear();
         self.mark_saved();
-        Ok(())
+        Ok(decorations)
     }
 
-    /// Save the current spreadsheet to disk.
-    pub fn save_spreadsheet(&mut self, path: &str) -> io::Result<()> {
-        file_api::save(&self.spreadsheet, path)?;
+    /// Save the current spreadsheet and UI decorations to disk.
+    pub fn save_spreadsheet(&mut self, path: &str, decorations_json: &str) -> io::Result<()> {
+        file_api::save(&self.spreadsheet, decorations_json, path)?;
         self.mark_saved();
         Ok(())
     }

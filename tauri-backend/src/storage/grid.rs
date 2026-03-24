@@ -80,7 +80,7 @@ impl Cell {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CellValue {
     Text(String),
     Number(Decimal),
@@ -167,16 +167,22 @@ impl Grid {
         self.get_content(id).map(|c| &c.val)
     }
 
-    /// Sets the value of an existing cell. Does nothing if the cell has no content.
+    /// Sets the value of a cell, creating it if it doesn't exist.
     pub fn set_value(&mut self, id: &GridCellId, val: CellValue) {
         let idx = id.block_idx(self.stride);
-        let Some(block) = self.blocks[idx].as_mut() else {
-            return;
-        };
+        let block = self.blocks[idx].get_or_insert_with(Block::new);
         let (r, c) = id.local();
-        if let Some(cell) = block.cells[r][c].as_mut() {
-            if let Some(content) = cell.content.as_mut() {
-                content.val = val;
+        let cell = block.cells[r][c].get_or_insert_with(Cell::new);
+        match cell.content.as_mut() {
+            Some(content) => content.val = val,
+            None => {
+                cell.content = Some(CellContent {
+                    val,
+                    defined_by_formula: None,
+                    dependencies: None,
+                    pending_dependencies: 0,
+                });
+                block.nonempty_values_count += 1;
             }
         }
     }
@@ -232,10 +238,6 @@ impl Grid {
         let (r, c) = id.local();
         let cell = block.cells[r][c].get_or_insert_with(Cell::new);
         let deps = cell.dependents.get_or_insert_with(Vec::new);
-        if deps.contains(dependant) {
-            panic!("Duplikate!");
-            return;
-        }
         let had_dependents = !deps.is_empty();
         deps.push(dependant.clone());
         if !had_dependents {

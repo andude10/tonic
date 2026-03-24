@@ -12,6 +12,14 @@
     onkeydown={(e) => e.stopPropagation()}
     onmousedown={(e) => e.stopPropagation()}
 >
+    <div class="filter-actions">
+        <button class="filter-link" onclick={() => option.onSelectAll?.()}
+            >Select all</button
+        >
+        <button class="filter-link" onclick={() => option.onClear?.()}
+            >Clear</button
+        >
+    </div>
     <MultiCombo
         checkboxes={true}
         options={option.comboOptions}
@@ -29,5 +37,26 @@
 
     .filter-menu-item :global(.wx-tags) {
         display: none;
+    }
+
+    .filter-actions {
+        display: flex;
+        gap: 8px;
+        padding: 0 2px 4px;
+    }
+
+    .filter-link {
+        background: none;
+        border: none;
+        padding: 0;
+        font-size: 12px;
+        color: var(--wx-color-primary, #7e5dab);
+        cursor: pointer;
+        opacity: 0.8;
+    }
+
+    .filter-link:hover {
+        opacity: 1;
+        text-decoration: underline;
     }
 </style>

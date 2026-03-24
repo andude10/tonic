@@ -28,4 +28,5 @@ thiserror = "2.0.18"
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
 flate2 = "1.1.9"
+tar = "0.4"
 rust_decimal = { version = "1.40.0", features = ["serde-with-str"] }

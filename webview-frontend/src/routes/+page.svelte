@@ -40,7 +40,8 @@
         dialogOpen = false;
         if (!path) return;
         isSaving = true;
-        await invoke("save_file", { path });
+        const uiDecorationsJson = sheet.saveDecorationsToJson();
+        await invoke("save_file", { path, uiDecorationsJson });
         isSaving = false;
         await syncFileInfo();
     }
@@ -48,7 +49,11 @@
     async function commitSave() {
         if (currentFilePath) {
             isSaving = true;
-            await invoke("save_file", { path: currentFilePath });
+            const uiDecorationsJson = sheet.saveDecorationsToJson();
+            await invoke("save_file", {
+                path: currentFilePath,
+                uiDecorationsJson,
+            });
             isSaving = false;
             await syncFileInfo();
         } else {
@@ -75,10 +80,12 @@
                 dialogOpen = false;
                 if (!path) return;
                 isLoading = true;
-                await invoke("open_file", { path });
+                const decorationsJson = await invoke<string>("open_file", {
+                    path,
+                });
                 isLoading = false;
                 await syncFileInfo();
-                sheet.onFileLoad();
+                sheet.onFileLoad(decorationsJson);
                 break;
             }
             case "file-save":
@@ -222,33 +229,42 @@
 </div>
 
 <style>
-    /* Menu bar options */
-    :global([data-wx-menu] .wx-option) {
-        font-size: 12px !important;
-        height: 28px !important;
-        display: flex !important;
-        align-items: center !important;
+    :global(.wx-popup) {
+        --wx-popup-border: 1px solid rgba(255, 255, 255, 0.08) !important;
+        --wx-popup-border-radius: 8px !important;
+        --wx-popup-shadow:
+            0 8px 24px rgba(0, 0, 0, 0.35), 0 2px 6px rgba(0, 0, 0, 0.2) !important;
+        --wx-popup-background: #1e1f22 !important;
     }
 
-    /* Filter MultiCombo in dropdown */
-    :global(.filter-option .wx-multicombo) {
+    /* Menu options */
+    :global([data-wx-menu] .wx-option) {
         font-size: 12px !important;
-        --wx-input-height: 24px;
-        --wx-input-font-size: 12px;
-        --wx-input-padding: 0 4px;
-        --wx-input-icon-size: 14px;
+        height: auto !important;
+        min-height: 26px !important;
+        line-height: normal !important;
+        display: flex !important;
+        align-items: center !important;
+        border-radius: 4px !important;
+        margin: 1px 4px !important;
+        padding: 0 8px !important;
+        transition: background 100ms ease;
     }
-    :global(.filter-option .wx-multicombo .wx-wrapper) {
-        min-height: 0 !important;
+    :global([data-wx-menu] .wx-option:hover) {
+        background: rgba(126, 93, 171, 0.15) !important;
     }
-    :global(.wx-multicombo .wx-dropdown) {
-        --wx-input-padding: 2px 8px;
-        --wx-input-font-size: 12px;
-        --wx-checkbox-size: 14px;
-        --wx-checkbox-height: 14px;
+    :global([data-wx-menu] .wx-option.wx-active) {
+        background: rgba(126, 93, 171, 0.22) !important;
     }
-    :global(.wx-multicombo .wx-dropdown .wx-checkbox) {
-        margin-right: 4px !important;
+    :global([data-wx-menu] .wx-option.filter-option),
+    :global([data-wx-menu] .wx-option.filter-option:hover) {
+        background: transparent !important;
+        cursor: default !important;
+        padding: 4px 8px !important;
+    }
+    :global([data-wx-menu] .wx-separator) {
+        margin: 4px 8px !important;
+        border-color: rgba(255, 255, 255, 0.06) !important;
     }
 
     /* Menu bar icons */
@@ -256,9 +272,46 @@
         display: flex !important;
         align-items: center !important;
         justify-content: center !important;
-        font-size: 14px !important;
+        font-size: 12px !important;
     }
 
+    /* Filter MultiCombo in dropdown */
+    :global(.filter-option .wx-multicombo) {
+        font-size: 12px !important;
+        --wx-input-height: 26px;
+        --wx-input-font-size: 12px;
+        --wx-input-padding: 0 6px;
+        --wx-input-icon-size: 14px;
+        --wx-input-border: 1px solid rgba(255, 255, 255, 0.08);
+        --wx-input-border-focus: 1px solid var(--wx-color-primary);
+        --wx-input-background: #262729;
+    }
+    :global(.filter-option .wx-multicombo .wx-wrapper) {
+        min-height: 0 !important;
+        border-radius: 6px !important;
+    }
+    :global(.wx-multicombo .wx-dropdown) {
+        --wx-input-padding: 4px 8px;
+        --wx-input-font-size: 12px;
+        --wx-checkbox-size: 14px;
+        --wx-checkbox-height: 14px;
+        border-radius: 6px !important;
+    }
+    :global(.wx-multicombo .wx-dropdown .wx-checkbox) {
+        margin-right: 6px !important;
+        accent-color: var(--wx-color-primary);
+    }
+    :global(.wx-multicombo .wx-dropdown .wx-item) {
+        border-radius: 4px !important;
+        padding: 2px 6px !important;
+    }
+    :global(.wx-multicombo .wx-dropdown .wx-item.wx-focus) {
+        background: transparent !important;
+    }
+
+    :global(.wx-multicombo .wx-dropdown .wx-item:hover) {
+        background: rgba(126, 93, 171, 0.12) !important;
+    }
     .dialog-overlay {
         position: fixed;
         inset: 0;
@@ -414,10 +467,13 @@
         --wx-color-secondary-border: var(--wx-color-primary);
 
         /* Semantic colors from Vibrant Summer palette */
-        --wx-color-success: #9ad636;
-        --wx-color-warning: #ffd24d;
-        --wx-color-danger: #ff6b70;
-        --wx-color-info: #2a96d6;
+        --wx-color-success: #22c55e;
+        --wx-color-warning: #eab308;
+        --wx-color-danger: #ef4444;
+        --wx-color-info: #3b82f6;
+
+        /* Secondary font color for icons */
+        --wx-color-font-alt: white;
 
         /* Dark backgrounds — neutral grey with slight cool tint */
         --wx-background: #2b2d30;
@@ -428,6 +484,7 @@
         --wx-border: 1px solid #3e4042;
         --wx-border-light: 1px solid #3e4042;
         --wx-border-medium: 1px solid #3e4042;
+        --wx-border-radius: 6px;
 
         /* Table overrides */
         --wx-table-header-background: #222426;
