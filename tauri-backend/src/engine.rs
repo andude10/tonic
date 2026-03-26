@@ -8,7 +8,7 @@ use std::io;
 
 use crate::file_api;
 use crate::parser::{lex_formula, parse_formula, FormulaState};
-use crate::storage::grid::{CellContent, CellValue, GridCellId};
+use crate::storage::grid::{Cell, CellValue, GridCellId};
 use crate::storage::types::{
     AbsoluteCellId, AtomType, Expr, ExprAtom, Formula, FormulaId, ProjectionFilterOption,
     Reference, SheetId, Sheets, Spreadsheet,
@@ -16,11 +16,7 @@ use crate::storage::types::{
 
 /// A single cell mutation: (cell_id, old_value, new_value).
 #[derive(Clone)]
-pub struct CellUpdate(
-    pub AbsoluteCellId,
-    pub Option<CellContent>,
-    pub Option<CellContent>,
-);
+pub struct CellUpdate(pub AbsoluteCellId, pub Option<Cell>, pub Option<Cell>);
 
 /// Bounding rectangle of affected cells. Returned by undo/redo.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -98,48 +94,46 @@ impl Engine {
         EngineGuard(PhantomData)
     }
 
-    /// If the cell is defined by a formula, remove this cell from the dependants of its dependencies
-    fn remove_cell_from_dependents(&mut self, id: &AbsoluteCellId) {
-        let Some(content) = self.spreadsheet.get_content(id) else {
-            return;
-        };
-        let Some(dependencies) = content.dependencies.clone() else {
-            return;
-        };
-        for dep in &dependencies {
-            self.spreadsheet.remove_dependant(dep, id);
+    fn set_cell(&mut self, id: &AbsoluteCellId, new_cell: Option<Cell>) -> Option<Cell> {
+        let old_cell = self.spreadsheet.get_cell(id).cloned();
+        if old_cell
+            .as_ref()
+            .and_then(|cell| cell.defined_by_formula)
+            .is_some()
+        {
+            self.spreadsheet.dependency_graph.remove_formula_cell(*id);
         }
+
+        match new_cell.as_ref() {
+            Some(cell) => self.spreadsheet.insert_cell(id, cell.clone()),
+            None => self.spreadsheet.remove_cell(id),
+        }
+
+        if let Some(formula_id) = new_cell.as_ref().and_then(|cell| cell.defined_by_formula) {
+            if let Some(formula) = self.spreadsheet.formulas.get(formula_id) {
+                self.spreadsheet
+                    .dependency_graph
+                    .insert_formula_cell(*id, &formula.ast);
+            }
+        }
+
+        old_cell
     }
 
-    /// If the cell is defined by a formula, add this cell to the dependants of its dependencies
-    fn add_cell_to_dependents(&mut self, id: &AbsoluteCellId) {
-        let Some(content) = self.spreadsheet.get_content(id) else {
-            return;
-        };
-        let Some(dependencies) = content.dependencies.clone() else {
-            return;
-        };
-        for dep in &dependencies {
-            self.spreadsheet.add_dependant(dep, id);
-        }
+    fn record_cell_change(&mut self, id: AbsoluteCellId, new_cell: Option<Cell>) {
+        let old_cell = self.set_cell(&id, new_cell.clone());
+        self.batch.push(CellUpdate(id, old_cell, new_cell));
     }
 
     /// Parse string and insert appropriate cell.
     pub fn parse_and_insert_string(&mut self, _: &EngineGuard, id: AbsoluteCellId, input: &str) {
-        let old = self.spreadsheet.get_content(&id).cloned();
-
-        // Remove this cell from dependants of its old dependencies
-        self.remove_cell_from_dependents(&id);
-
-        // if not entering formula, just update value
         if !input.starts_with('=') {
             let new = if let Ok(n) = input.parse::<Decimal>() {
-                CellContent::number(n)
+                Cell::number(n)
             } else {
-                CellContent::text(input.to_string())
+                Cell::text(input.to_string())
             };
-            self.spreadsheet.insert_content(&id, new.clone());
-            self.batch.push(CellUpdate(id, old, Some(new)));
+            self.record_cell_change(id, Some(new));
             return;
         }
 
@@ -148,9 +142,7 @@ impl Engine {
         let lex_result = lex_formula(formula_text);
         // report any errors during lexing
         if lex_result.has_errors() {
-            let new = CellContent::error("Lex error".into());
-            self.spreadsheet.insert_content(&id, new.clone());
-            self.batch.push(CellUpdate(id, old, Some(new)));
+            self.record_cell_change(id, Some(Cell::error("Lex error".into())));
             return;
         }
 
@@ -167,21 +159,16 @@ impl Engine {
             names: &mut self.spreadsheet.names,
             cell_id: parser_cell_id,
             expr_arena: Vec::new(),
-            dependencies: Vec::new(),
         };
         let (parsed, parse_errs) = parse_formula(&tokens, formula_text.len(), &mut state);
         // report any errors during parsing (syntax, name not found)
         if !parse_errs.is_empty() {
-            let new = CellContent::error("Parse error".into());
-            self.spreadsheet.insert_content(&id, new.clone());
-            self.batch.push(CellUpdate(id, old, Some(new)));
+            self.record_cell_change(id, Some(Cell::error("Parse error".into())));
             return;
         }
         let Some((ast, _root_id)) = parsed else {
             return;
         };
-
-        let dependencies = state.dependencies;
 
         // create and store formula
         let formula = Formula {
@@ -191,77 +178,41 @@ impl Engine {
         let formula_id = self.spreadsheet.formulas.insert(formula);
 
         // insert cell with formula reference and dependencies
-        let new = CellContent {
+        let new = Cell {
             defined_by_formula: Some(formula_id),
-            dependencies: if dependencies.is_empty() {
-                None
-            } else {
-                Some(dependencies)
-            },
             val: CellValue::Error(String::new()),
             pending_dependencies: 0,
         };
-        self.spreadsheet.insert_content(&id, new.clone());
-
-        // add this cell as dependant to all its dependencies
-        self.add_cell_to_dependents(&id);
-
-        self.batch.push(CellUpdate(id, old, Some(new)));
+        self.record_cell_change(id, Some(new));
     }
 
     pub fn insert_number(&mut self, _: &EngineGuard, id: AbsoluteCellId, n: Decimal) {
-        let old = self.spreadsheet.get_content(&id).cloned();
-        self.remove_cell_from_dependents(&id);
-        let new = CellContent::number(n);
-        self.spreadsheet.insert_content(&id, new.clone());
-        self.batch.push(CellUpdate(id, old, Some(new)));
+        self.record_cell_change(id, Some(Cell::number(n)));
     }
 
     pub fn insert_value(&mut self, _: &EngineGuard, id: AbsoluteCellId, val: CellValue) {
-        let old = self.spreadsheet.get_content(&id).cloned();
+        let old = self.spreadsheet.get_cell(&id).cloned();
         self.spreadsheet.set_value(&id, val);
-        let new = self.spreadsheet.get_content(&id).cloned();
+        let new = self.spreadsheet.get_cell(&id).cloned();
         self.batch.push(CellUpdate(id, old, new));
     }
 
-    /// Insert a cell that shares an existing formula. Resolves dependencies from the
-    /// formula's AST relative to the new cell position.
     pub fn insert_shared_formula(
         &mut self,
         _: &EngineGuard,
         id: AbsoluteCellId,
         formula_id: FormulaId,
     ) {
-        let old = self.spreadsheet.get_content(&id).cloned();
-        self.remove_cell_from_dependents(&id);
-
-        let dependencies = self
-            .spreadsheet
-            .formulas
-            .get(formula_id)
-            .map(|f| find_dependencies_from_relative_references(&f.ast, &id))
-            .unwrap_or_default();
-
-        let new = CellContent {
+        let new = Cell {
             defined_by_formula: Some(formula_id),
-            dependencies: if dependencies.is_empty() {
-                None
-            } else {
-                Some(dependencies)
-            },
             val: CellValue::Error(String::new()),
             pending_dependencies: 0,
         };
-        self.spreadsheet.insert_content(&id, new.clone());
-        self.add_cell_to_dependents(&id);
-        self.batch.push(CellUpdate(id, old, Some(new)));
+        self.record_cell_change(id, Some(new));
     }
 
     pub fn delete(&mut self, _: &EngineGuard, id: AbsoluteCellId) {
-        let old = self.spreadsheet.get_content(&id).cloned();
-        self.remove_cell_from_dependents(&id);
-        self.spreadsheet.remove_content(&id);
-        self.batch.push(CellUpdate(id, old, None));
+        self.record_cell_change(id, None);
     }
 
     /// Recalculate all formulas affected by the given cell changes.
@@ -280,34 +231,17 @@ impl Engine {
         // for each cell in "current", increase "pending_dependencies" of cell's dependents, and push cell's dependents to next
         // after each pass, swap
 
-        let change_set: std::collections::HashSet<AbsoluteCellId> =
-            changes.iter().map(|CellUpdate(id, _, _)| *id).collect();
-        let mut current = changes.clone();
-        let mut next: Vec<CellUpdate> = Vec::new();
-        while !current.is_empty() {
-            for CellUpdate(cell_id, _, _) in &current {
-                let dependents = self.spreadsheet.get_dependents(cell_id).cloned();
-                if let Some(dependents) = dependents {
-                    for d in dependents {
-                        let count = self.spreadsheet.get_pending_dependencies(&d);
-                        if count == 0 && !change_set.contains(&d) {
-                            next.push(CellUpdate(d, None, None));
-                        }
-                        self.spreadsheet.increase_pending_dependencies(&d);
-                    }
-                }
-            }
-
-            current.clear();
-            std::mem::swap(&mut current, &mut next);
-        }
-
-        // add cells, that have their dependencies already calculated into "wave"
-        let mut wave: Vec<CellUpdate> = Vec::new();
-        for CellUpdate(cell_id, _, _) in &changes {
-            if self.spreadsheet.get_pending_dependencies(cell_id) == 0 {
-                wave.push(CellUpdate(*cell_id, None, None));
-            }
+        let mut wave: Vec<AbsoluteCellId> = Vec::new();
+        let changed_cells: Vec<_> = changes.iter().map(|CellUpdate(id, _, _)| *id).collect();
+        {
+            let spreadsheet = &mut self.spreadsheet;
+            let ready_cells = spreadsheet
+                .dependency_graph
+                .init_pending_counter_for_new_recalculation(
+                    &mut spreadsheet.sheets,
+                    &changed_cells,
+                );
+            wave.extend_from_slice(ready_cells);
         }
 
         let mut dep_duration = dep_time.elapsed();
@@ -319,11 +253,16 @@ impl Engine {
         // todo
 
         let mut affected_tables: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for cell_id in &changed_cells {
+            if let Some((table_id, _)) = self.spreadsheet.find_table_containing_cell(cell_id) {
+                affected_tables.insert(table_id);
+            }
+        }
 
-        while let Some(CellUpdate(cell_id, _, _)) = wave.pop() {
+        while let Some(cell_id) = wave.pop() {
             let formula_id = self
                 .spreadsheet
-                .get_content(&cell_id)
+                .get_cell(&cell_id)
                 .and_then(|c| c.defined_by_formula);
 
             if let Some(formula_id) = formula_id {
@@ -347,15 +286,12 @@ impl Engine {
 
             // Decrement pending_dependencies_count of dependents, add to wave if ready
             let t = std::time::Instant::now();
-            let deps = self.spreadsheet.get_dependents(&cell_id).cloned();
-            if let Some(deps) = deps {
-                for dep in deps {
-                    self.spreadsheet.decrease_pending_dependencies(&dep);
-                    let count = self.spreadsheet.get_pending_dependencies(&dep);
-                    if count == 0 {
-                        wave.push(CellUpdate(dep, None, None));
-                    }
-                }
+            {
+                let spreadsheet = &mut self.spreadsheet;
+                let ready_cells = spreadsheet
+                    .dependency_graph
+                    .decrease_pending_counter(&mut spreadsheet.sheets, cell_id);
+                wave.extend_from_slice(ready_cells);
             }
 
             if let Some((table_id, _)) = self.spreadsheet.find_table_containing_cell(&cell_id) {
@@ -364,6 +300,32 @@ impl Engine {
 
             dep_duration += t.elapsed();
         }
+
+        // todo: add normal cycle detection
+        let t = std::time::Instant::now();
+        let unresolved_cells = {
+            let spreadsheet = &mut self.spreadsheet;
+            spreadsheet
+                .dependency_graph
+                .collect_unresolved_cells(&spreadsheet.sheets)
+                .to_vec()
+        };
+        for cell_id in unresolved_cells {
+            if self
+                .spreadsheet
+                .get_cell(&cell_id)
+                .and_then(|cell| cell.defined_by_formula)
+                .is_some()
+            {
+                self.spreadsheet
+                    .set_value(&cell_id, CellValue::Error("Cycle".into()));
+            }
+
+            if let Some((table_id, _)) = self.spreadsheet.find_table_containing_cell(&cell_id) {
+                affected_tables.insert(table_id);
+            }
+        }
+        dep_duration += t.elapsed();
 
         let table_time = std::time::Instant::now();
         for table_id in affected_tables {
@@ -408,14 +370,7 @@ impl Engine {
         let bounds = entry.bounds.clone();
         let changes = entry.changes.clone();
         for CellUpdate(id, old, _) in &changes {
-            self.remove_cell_from_dependents(id);
-            match old {
-                Some(content) => {
-                    self.spreadsheet.insert_content(id, content.clone());
-                    self.add_cell_to_dependents(id);
-                }
-                None => self.spreadsheet.remove_content(id),
-            }
+            self.set_cell(id, old.clone());
         }
         self.post_cell_changes_hook(changes);
         Some(bounds)
@@ -430,14 +385,7 @@ impl Engine {
         let changes = entry.changes.clone();
         self.history.log_position += 1;
         for CellUpdate(id, _, new) in &changes {
-            self.remove_cell_from_dependents(id);
-            match new {
-                Some(content) => {
-                    self.spreadsheet.insert_content(id, content.clone());
-                    self.add_cell_to_dependents(id);
-                }
-                None => self.spreadsheet.remove_content(id),
-            }
+            self.set_cell(id, new.clone());
         }
         self.post_cell_changes_hook(changes);
         Some(bounds)
@@ -500,7 +448,7 @@ impl Engine {
         }
     }
 
-    /// Sort table by column. Only one sort can be active at a time.
+    /// Sort table by column by reordering the current projected rows.
     pub fn sort_table_column(
         &mut self,
         table_id: u32,
@@ -514,14 +462,9 @@ impl Engine {
             .ok_or("Table not found")?;
         let sheet = table.sheet_id as usize;
         let proj_id = table.projection_id;
-        let col_idx = (sort_col - table.body_start.col) as usize;
 
         let sheets = &self.spreadsheet.sheets;
         let proj = self.spreadsheet.projections.get_mut(proj_id).unwrap();
-        for (i, opt) in proj.sorting_options_per_column.iter_mut().enumerate() {
-            opt.selected = i == col_idx;
-            opt.desc = if i == col_idx { desc } else { false };
-        }
         proj.projected_rows.sort_by(|&a, &b| {
             let va = sheets[sheet].get_value(&GridCellId {
                 row: a,
@@ -633,7 +576,7 @@ impl Engine {
         self.rebuild_table_projection(table_id)
     }
 
-    /// Rebuild projected_rows for a table from current filter/sort state. Returns hidden_rows_count.
+    /// Rebuild projected_rows for a table from current filter state. Returns hidden_rows_count.
     fn rebuild_table_projection(&mut self, table_id: u32) -> Result<u32, String> {
         let table = self
             .spreadsheet
@@ -665,51 +608,10 @@ impl Engine {
             );
         }
 
-        // re-apply sort if active
-        if let Some((i, sort_opt)) = proj
-            .sorting_options_per_column
-            .iter()
-            .enumerate()
-            .find(|(_, o)| o.selected)
-        {
-            let sort_col = col_start + i as u32;
-            let desc = sort_opt.desc;
-            rows.sort_by(|&a, &b| {
-                let va = sheets[sheet].get_value(&GridCellId {
-                    row: a,
-                    col: sort_col,
-                });
-                let vb = sheets[sheet].get_value(&GridCellId {
-                    row: b,
-                    col: sort_col,
-                });
-                match (va, vb) {
-                    (None, None) => std::cmp::Ordering::Equal,
-                    (None, Some(_)) => std::cmp::Ordering::Greater,
-                    (Some(_), None) => std::cmp::Ordering::Less,
-                    (Some(va), Some(vb)) => {
-                        let ord = match (va, vb) {
-                            (CellValue::Number(n1), CellValue::Number(n2)) => n1.cmp(n2),
-                            (CellValue::Text(t1), CellValue::Text(t2)) => t1.cmp(t2),
-                            (CellValue::Number(_), _) => std::cmp::Ordering::Less,
-                            (_, CellValue::Number(_)) => std::cmp::Ordering::Greater,
-                            _ => std::cmp::Ordering::Equal,
-                        };
-                        if desc {
-                            ord.reverse()
-                        } else {
-                            ord
-                        }
-                    }
-                }
-            });
-        }
-
         let total = (body_end_row - body_start_row + 1) as u32;
         proj.hidden_rows_count = total - rows.len() as u32;
         proj.projected_rows = rows;
-        proj.active = proj.sorting_options_per_column.iter().any(|o| o.selected)
-            || proj.filter_show_blanks.iter().any(|&b| !b)
+        proj.active = proj.filter_show_blanks.iter().any(|&b| !b)
             || proj
                 .filter_options_per_column
                 .iter()
@@ -729,6 +631,7 @@ impl Engine {
     pub fn open_spreadsheet(&mut self, path: &str) -> io::Result<String> {
         let (spreadsheet, decorations) = file_api::load(path)?;
         self.spreadsheet = spreadsheet;
+        self.spreadsheet.rebuild_dependency_graph();
         self.history = History::new();
         self.batch.clear();
         self.mark_saved();
@@ -760,13 +663,9 @@ fn resolve_number(
     match expr {
         ExprAtom::Number(n) => Ok(*n),
         ExprAtom::Reference(r) => match r {
-            Reference::Single {
-                sheet_id,
-                row_offset,
-                col_offset,
-            } => {
-                let row = (source_cell.row as i32 + row_offset) as u32;
-                let col = (source_cell.col as i32 + col_offset) as u32;
+            Reference::Single { sheet_id, row, col } => {
+                let row = row.to_index(source_cell.row);
+                let col = col.to_index(source_cell.col);
                 let gid = GridCellId { row, col };
                 match sheets[*sheet_id as usize].get_value(&gid) {
                     Some(CellValue::Number(n)) => Ok(*n),
@@ -803,15 +702,15 @@ fn resolve_range(
     match expr {
         ExprAtom::Reference(Reference::Range {
             sheet_id,
-            range_start_row_offset,
-            range_start_col_offset,
-            range_end_row_offset,
-            range_end_col_offset,
+            start_row,
+            start_col,
+            end_row,
+            end_col,
         }) => {
-            let sr = (source_cell.row as i32 + range_start_row_offset) as u32;
-            let sc = (source_cell.col as i32 + range_start_col_offset) as u32;
-            let er = (source_cell.row as i32 + range_end_row_offset) as u32;
-            let ec = (source_cell.col as i32 + range_end_col_offset) as u32;
+            let sr = start_row.to_index(source_cell.row);
+            let sc = start_col.to_index(source_cell.col);
+            let er = end_row.to_index(source_cell.row);
+            let ec = end_col.to_index(source_cell.col);
             Ok((*sheet_id, sr.min(er), sc.min(ec), sr.max(er), sc.max(ec)))
         }
         _ => Err(EvalError::TypeError {
@@ -918,53 +817,6 @@ fn eval_formula(
     Ok(value)
 }
 
-/// Walk the AST and collect all referenced cells as absolute IDs, relative to `cell_id`.
-fn find_dependencies_from_relative_references(
-    ast: &[Expr],
-    cell_id: &AbsoluteCellId,
-) -> Vec<AbsoluteCellId> {
-    let mut deps = Vec::new();
-    for expr in ast {
-        if let Expr::Atom(ExprAtom::Reference(r)) = expr {
-            match r {
-                Reference::Single {
-                    sheet_id,
-                    row_offset,
-                    col_offset,
-                } => {
-                    deps.push(AbsoluteCellId {
-                        sheet_id: *sheet_id,
-                        row: (cell_id.row as i32 + row_offset) as u32,
-                        col: (cell_id.col as i32 + col_offset) as u32,
-                    });
-                }
-                Reference::Range {
-                    sheet_id,
-                    range_start_row_offset,
-                    range_start_col_offset,
-                    range_end_row_offset,
-                    range_end_col_offset,
-                } => {
-                    let start_row = (cell_id.row as i32 + range_start_row_offset) as u32;
-                    let start_col = (cell_id.col as i32 + range_start_col_offset) as u32;
-                    let end_row = (cell_id.row as i32 + range_end_row_offset) as u32;
-                    let end_col = (cell_id.col as i32 + range_end_col_offset) as u32;
-                    for row in start_row.min(end_row)..=start_row.max(end_row) {
-                        for col in start_col.min(end_col)..=start_col.max(end_col) {
-                            deps.push(AbsoluteCellId {
-                                sheet_id: *sheet_id,
-                                row,
-                                col,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-    deps
-}
-
 fn compute_bounds(changes: &[CellUpdate]) -> ChangeBounds {
     let mut min_row = u32::MAX;
     let mut max_row = 0u32;
@@ -981,5 +833,54 @@ fn compute_bounds(changes: &[CellUpdate]) -> ChangeBounds {
         max_row,
         min_col,
         max_col,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cell(row: u32, col: u32) -> AbsoluteCellId {
+        AbsoluteCellId {
+            sheet_id: 0,
+            row,
+            col,
+        }
+    }
+
+    fn assert_cycle_error(engine: &Engine, id: AbsoluteCellId) {
+        let value = engine
+            .spreadsheet
+            .get_cell(&id)
+            .map(|cell| cell.val.clone());
+        assert_eq!(value, Some(CellValue::Error("Cycle".into())));
+    }
+
+    #[test]
+    fn direct_cycle_sets_cycle_error() {
+        let mut engine = Engine::new();
+        let guard = engine.start_batch();
+
+        engine.parse_and_insert_string(&guard, cell(0, 0), "=B1");
+        engine.parse_and_insert_string(&guard, cell(0, 1), "=A1");
+        engine.end_batch(guard);
+
+        assert_cycle_error(&engine, cell(0, 0));
+        assert_cycle_error(&engine, cell(0, 1));
+    }
+
+    #[test]
+    fn formulas_blocked_by_cycle_also_get_cycle_error() {
+        let mut engine = Engine::new();
+        let guard = engine.start_batch();
+
+        engine.parse_and_insert_string(&guard, cell(0, 0), "=B1");
+        engine.parse_and_insert_string(&guard, cell(0, 1), "=A1");
+        engine.parse_and_insert_string(&guard, cell(1, 0), "=A1");
+        engine.end_batch(guard);
+
+        assert_cycle_error(&engine, cell(0, 0));
+        assert_cycle_error(&engine, cell(0, 1));
+        assert_cycle_error(&engine, cell(1, 0));
     }
 }

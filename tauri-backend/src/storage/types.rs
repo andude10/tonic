@@ -30,7 +30,8 @@ mod vec_btreemap_as_vec {
 }
 
 use crate::storage::{
-    grid::{CellContent, CellValue, Grid, GridCellId},
+    dependency_graph::DependencyGraph,
+    grid::{Cell, CellValue, Grid, GridCellId},
     name_resolution::SpreadsheetNames,
     stable_vec::StableVec,
 };
@@ -47,6 +48,15 @@ pub struct AbsoluteCellId {
     pub col: u32,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CellRange {
+    pub sheet_id: SheetId,
+    pub start_row: u32,
+    pub start_col: u32,
+    pub end_row: u32,
+    pub end_col: u32,
+}
+
 impl From<&AbsoluteCellId> for GridCellId {
     fn from(id: &AbsoluteCellId) -> Self {
         GridCellId {
@@ -56,19 +66,219 @@ impl From<&AbsoluteCellId> for GridCellId {
     }
 }
 
+impl CellRange {
+    pub fn new(
+        sheet_id: SheetId,
+        start_row: u32,
+        start_col: u32,
+        end_row: u32,
+        end_col: u32,
+    ) -> Self {
+        Self {
+            sheet_id,
+            start_row: start_row.min(end_row),
+            start_col: start_col.min(end_col),
+            end_row: start_row.max(end_row),
+            end_col: start_col.max(end_col),
+        }
+    }
+
+    pub fn single(id: AbsoluteCellId) -> Self {
+        Self {
+            sheet_id: id.sheet_id,
+            start_row: id.row,
+            start_col: id.col,
+            end_row: id.row,
+            end_col: id.col,
+        }
+    }
+
+    pub fn head_cell(&self) -> AbsoluteCellId {
+        AbsoluteCellId {
+            sheet_id: self.sheet_id,
+            row: self.start_row,
+            col: self.start_col,
+        }
+    }
+
+    pub fn tail_cell(&self) -> AbsoluteCellId {
+        AbsoluteCellId {
+            sheet_id: self.sheet_id,
+            row: self.end_row,
+            col: self.end_col,
+        }
+    }
+
+    pub fn is_single(&self) -> bool {
+        self.start_row == self.end_row && self.start_col == self.end_col
+    }
+
+    pub fn is_row_vector(&self) -> bool {
+        self.start_row == self.end_row
+    }
+
+    pub fn is_col_vector(&self) -> bool {
+        self.start_col == self.end_col
+    }
+
+    pub fn is_line(&self) -> bool {
+        self.is_row_vector() || self.is_col_vector()
+    }
+
+    pub fn cell_count(&self) -> u32 {
+        (self.end_row - self.start_row + 1) * (self.end_col - self.start_col + 1)
+    }
+
+    pub fn for_each_cell<F>(&self, mut f: F)
+    where
+        F: FnMut(AbsoluteCellId),
+    {
+        for row in self.start_row..=self.end_row {
+            for col in self.start_col..=self.end_col {
+                f(AbsoluteCellId {
+                    sheet_id: self.sheet_id,
+                    row,
+                    col,
+                });
+            }
+        }
+    }
+
+    pub fn intersects(&self, other: &Self) -> bool {
+        self.sheet_id == other.sheet_id
+            && self.start_row <= other.end_row
+            && other.start_row <= self.end_row
+            && self.start_col <= other.end_col
+            && other.start_col <= self.end_col
+    }
+
+    pub fn intersection(&self, other: &Self) -> Option<Self> {
+        if !self.intersects(other) {
+            return None;
+        }
+        Some(Self {
+            sheet_id: self.sheet_id,
+            start_row: self.start_row.max(other.start_row),
+            start_col: self.start_col.max(other.start_col),
+            end_row: self.end_row.min(other.end_row),
+            end_col: self.end_col.min(other.end_col),
+        })
+    }
+
+    pub fn contains(&self, other: &Self) -> bool {
+        self.sheet_id == other.sheet_id
+            && self.start_row <= other.start_row
+            && self.start_col <= other.start_col
+            && self.end_row >= other.end_row
+            && self.end_col >= other.end_col
+    }
+
+    pub fn bounding_union(&self, other: &Self) -> Self {
+        Self {
+            sheet_id: self.sheet_id,
+            start_row: self.start_row.min(other.start_row),
+            start_col: self.start_col.min(other.start_col),
+            end_row: self.end_row.max(other.end_row),
+            end_col: self.end_col.max(other.end_col),
+        }
+    }
+
+    pub fn shifted(&self, row_delta: i32, col_delta: i32) -> Option<Self> {
+        fn apply_delta(value: u32, delta: i32) -> Option<u32> {
+            let shifted = value as i64 + delta as i64;
+            (shifted >= 0).then_some(shifted as u32)
+        }
+
+        Some(Self {
+            sheet_id: self.sheet_id,
+            start_row: apply_delta(self.start_row, row_delta)?,
+            start_col: apply_delta(self.start_col, col_delta)?,
+            end_row: apply_delta(self.end_row, row_delta)?,
+            end_col: apply_delta(self.end_col, col_delta)?,
+        })
+    }
+
+    pub fn subtract(&self, other: &Self) -> Vec<Self> {
+        let Some(overlap) = self.intersection(other) else {
+            return vec![*self];
+        };
+        if overlap == *self {
+            return Vec::new();
+        }
+
+        let mut result = Vec::new();
+        if self.start_row < overlap.start_row {
+            result.push(Self::new(
+                self.sheet_id,
+                self.start_row,
+                self.start_col,
+                overlap.start_row - 1,
+                self.end_col,
+            ));
+        }
+
+        if overlap.end_row < self.end_row {
+            result.push(Self::new(
+                self.sheet_id,
+                overlap.end_row + 1,
+                self.start_col,
+                self.end_row,
+                self.end_col,
+            ));
+        }
+
+        if self.start_col < overlap.start_col {
+            result.push(Self::new(
+                self.sheet_id,
+                overlap.start_row,
+                self.start_col,
+                overlap.end_row,
+                overlap.start_col - 1,
+            ));
+        }
+
+        if overlap.end_col < self.end_col {
+            result.push(Self::new(
+                self.sheet_id,
+                overlap.start_row,
+                overlap.end_col + 1,
+                overlap.end_row,
+                self.end_col,
+            ));
+        }
+
+        result
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Coordinate {
+    Absolute(u32),
+    Relative(i32),
+}
+
+impl Coordinate {
+    pub fn to_index(&self, base: u32) -> u32 {
+        match self {
+            Coordinate::Absolute(index) => *index,
+            Coordinate::Relative(offset) => (base as i32 + offset).max(0) as u32,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum Reference {
     Single {
         sheet_id: SheetId,
-        row_offset: i32,
-        col_offset: i32,
+        row: Coordinate,
+        col: Coordinate,
     },
     Range {
         sheet_id: SheetId,
-        range_start_row_offset: i32,
-        range_start_col_offset: i32,
-        range_end_row_offset: i32,
-        range_end_col_offset: i32,
+        start_row: Coordinate,
+        start_col: Coordinate,
+        end_row: Coordinate,
+        end_col: Coordinate,
     },
 }
 
@@ -148,12 +358,6 @@ pub struct ProjectionFilterOption {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct ProjectionSortOption {
-    pub selected: bool,
-    pub desc: bool,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Projection {
     pub sheet_id: SheetId,
     pub projection_start: GridCellId,
@@ -162,7 +366,6 @@ pub struct Projection {
     pub active: bool,
     #[serde(with = "vec_btreemap_as_vec")]
     pub filter_options_per_column: Vec<BTreeMap<CellValue, ProjectionFilterOption>>,
-    pub sorting_options_per_column: Vec<ProjectionSortOption>,
     pub hidden_rows_count: u32,
     pub filter_show_blanks: Vec<bool>,
     pub next_filter_option_id: u32,
@@ -178,6 +381,8 @@ pub struct Spreadsheet {
     pub(crate) names: SpreadsheetNames,
     pub(crate) tables: StableVec<Table>,
     pub(crate) projections: StableVec<Projection>,
+    #[serde(skip, default)]
+    pub(crate) dependency_graph: DependencyGraph,
 }
 
 impl Spreadsheet {
@@ -188,6 +393,7 @@ impl Spreadsheet {
             names: SpreadsheetNames::new(),
             tables: StableVec::new(),
             projections: StableVec::new(),
+            dependency_graph: DependencyGraph::new(),
         }
     }
 
@@ -219,13 +425,13 @@ impl Spreadsheet {
             })
     }
 
-    pub fn get_projected_content(&self, id: &AbsoluteCellId) -> Option<&CellContent> {
+    pub fn get_projected_cell(&self, id: &AbsoluteCellId) -> Option<&Cell> {
         if let Some((_, table)) = self.find_table_containing_cell(id) {
             let projection = self.projections.get(table.projection_id).unwrap();
             if projection.active {
                 let visual_idx = (id.row - projection.projection_start.row) as usize;
                 if visual_idx < projection.projected_rows.len() {
-                    return self.get_content(&AbsoluteCellId {
+                    return self.get_cell(&AbsoluteCellId {
                         sheet_id: id.sheet_id,
                         row: projection.projected_rows[visual_idx],
                         col: id.col,
@@ -233,52 +439,50 @@ impl Spreadsheet {
                 }
             }
         }
-        self.get_content(id)
+        self.get_cell(id)
     }
 
     // todo: remove this mess.
 
-    pub fn get_content(&self, id: &AbsoluteCellId) -> Option<&CellContent> {
-        self.sheets[id.sheet_id as usize].get_content(&id.into())
-    }
-
-    pub fn get_value(&self, id: &AbsoluteCellId) -> Option<&CellValue> {
-        self.sheets[id.sheet_id as usize].get_value(&id.into())
+    pub fn get_cell(&self, id: &AbsoluteCellId) -> Option<&Cell> {
+        self.sheets[id.sheet_id as usize].get_cell(&id.into())
     }
 
     pub fn set_value(&mut self, id: &AbsoluteCellId, val: CellValue) {
         self.sheets[id.sheet_id as usize].set_value(&id.into(), val);
     }
 
-    pub fn insert_content(&mut self, id: &AbsoluteCellId, content: CellContent) {
-        self.sheets[id.sheet_id as usize].insert_content(&id.into(), content);
+    pub fn insert_cell(&mut self, id: &AbsoluteCellId, cell: Cell) {
+        self.sheets[id.sheet_id as usize].insert_cell(&id.into(), cell);
     }
 
-    pub fn remove_content(&mut self, id: &AbsoluteCellId) {
-        self.sheets[id.sheet_id as usize].remove_content(&id.into());
+    pub fn remove_cell(&mut self, id: &AbsoluteCellId) {
+        self.sheets[id.sheet_id as usize].remove_cell(&id.into());
     }
 
-    pub fn get_dependents(&self, id: &AbsoluteCellId) -> Option<&Vec<AbsoluteCellId>> {
-        self.sheets[id.sheet_id as usize].get_dependents(&id.into())
-    }
+    pub fn rebuild_dependency_graph(&mut self) {
+        let mut formula_cells = Vec::new();
+        for (sheet_id, sheet) in self.sheets.iter().enumerate() {
+            sheet.for_each_cell(|grid_id, cell| {
+                if let Some(formula_id) = cell.defined_by_formula {
+                    formula_cells.push((
+                        AbsoluteCellId {
+                            sheet_id: sheet_id as u32,
+                            row: grid_id.row,
+                            col: grid_id.col,
+                        },
+                        formula_id,
+                    ));
+                }
+            });
+        }
 
-    pub fn add_dependant(&mut self, id: &AbsoluteCellId, dependant: &AbsoluteCellId) {
-        self.sheets[id.sheet_id as usize].add_dependant(&id.into(), dependant);
-    }
-
-    pub fn remove_dependant(&mut self, id: &AbsoluteCellId, dependant: &AbsoluteCellId) {
-        self.sheets[id.sheet_id as usize].remove_dependant(&id.into(), dependant);
-    }
-
-    pub fn increase_pending_dependencies(&mut self, id: &AbsoluteCellId) {
-        self.sheets[id.sheet_id as usize].increase_pending_dependencies(&id.into());
-    }
-
-    pub fn decrease_pending_dependencies(&mut self, id: &AbsoluteCellId) {
-        self.sheets[id.sheet_id as usize].decrease_pending_dependencies(&id.into());
-    }
-
-    pub fn get_pending_dependencies(&self, id: &AbsoluteCellId) -> u32 {
-        self.sheets[id.sheet_id as usize].get_pending_dependencies(&id.into())
+        self.dependency_graph.clear();
+        for (cell_id, formula_id) in formula_cells {
+            if let Some(formula) = self.formulas.get(formula_id) {
+                self.dependency_graph
+                    .insert_formula_cell(cell_id, &formula.ast);
+            }
+        }
     }
 }

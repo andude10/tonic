@@ -18,15 +18,14 @@ use std::collections::BTreeMap;
 
 use crate::engine::{ChangeBounds, Engine};
 use crate::parser::shift_formula_refs;
-use crate::storage::grid::{CellContent, CellValue, GridCellId};
-use crate::storage::types::{
-    AbsoluteCellId, Projection, ProjectionFilterOption, ProjectionSortOption, Table,
-};
+use crate::storage::grid::{Cell, CellValue, GridCellId};
+use crate::storage::types::{AbsoluteCellId, Projection, ProjectionFilterOption, Table};
 
 mod engine;
 mod file_api;
 mod parser;
 pub(crate) mod storage {
+    pub(crate) mod dependency_graph;
     pub(crate) mod grid;
     pub(crate) mod name_resolution;
     pub(crate) mod stable_vec;
@@ -95,13 +94,13 @@ fn emit_table_projection_events(
 
 /// Encode a single cell into the binary buffer.
 /// Format: [row: u32 LE][col: u32 LE][is_formula: u8][display_len: u32 LE][display_bytes]
-fn encode_cell(buf: &mut Vec<u8>, row: u32, col: u32, content: Option<&CellContent>) {
+fn encode_cell(buf: &mut Vec<u8>, row: u32, col: u32, cell: Option<&Cell>) {
     buf.extend_from_slice(&row.to_le_bytes());
     buf.extend_from_slice(&col.to_le_bytes());
-    match content {
-        Some(content) => {
-            buf.push(content.defined_by_formula.is_some() as u8);
-            let display = content.val.to_string();
+    match cell {
+        Some(cell) => {
+            buf.push(cell.defined_by_formula.is_some() as u8);
+            let display = cell.val.to_string();
             let display_bytes = display.as_bytes();
             buf.extend_from_slice(&(display_bytes.len() as u32).to_le_bytes());
             buf.extend_from_slice(display_bytes);
@@ -120,12 +119,12 @@ fn encode_cell(buf: &mut Vec<u8>, row: u32, col: u32, content: Option<&CellConte
 /// For formulas, returns the formula string with shifted references.
 fn get_editor_value(state: &TonicState, cell_id: CellId) -> String {
     let abs_id = cell_id.to_absolute();
-    let Some(content) = state.engine.spreadsheet.get_content(&abs_id) else {
+    let Some(cell) = state.engine.spreadsheet.get_cell(&abs_id) else {
         return String::new();
     };
 
     // If defined by formula, shift references (formula_string already includes '=')
-    if let Some(formula_id) = content.defined_by_formula {
+    if let Some(formula_id) = cell.defined_by_formula {
         if let Some(formula) = state.engine.spreadsheet.formulas.get(formula_id) {
             let gid = GridCellId {
                 row: cell_id.row,
@@ -141,7 +140,7 @@ fn get_editor_value(state: &TonicState, cell_id: CellId) -> String {
     }
 
     // Otherwise, return the value as string
-    content.val.to_string()
+    cell.val.to_string()
 }
 
 #[tauri::command(async)]
@@ -239,8 +238,8 @@ fn get_cells_in_viewport(
                 row,
                 col,
             };
-            let content = spreadsheet.get_projected_content(&id);
-            encode_cell(buf, row, col, content);
+            let cell = spreadsheet.get_projected_cell(&id);
+            encode_cell(buf, row, col, cell);
         }
     }
 
@@ -303,6 +302,34 @@ fn fill_cells(
 
     let timer = std::time::Instant::now();
     let mut state = state.lock().unwrap();
+    let line_value = |first_value: Decimal, step: Decimal, offset: i64| {
+        first_value + step * Decimal::from(offset)
+    };
+    let pattern_value =
+        |patterns: &[Option<(Decimal, Decimal)>], pattern_index: usize, axis_offset: i64| {
+            let (first_value, step) = patterns.get(pattern_index).copied().flatten()?;
+            Some(line_value(first_value, step, axis_offset))
+        };
+    let step_value = |patterns: &[Option<(Decimal, Decimal)>], axis_offset: i64| {
+        let Some((_, first_step)) = patterns.first().copied().flatten() else {
+            return None;
+        };
+
+        if axis_offset >= 0 && (axis_offset as usize) < patterns.len() {
+            return patterns[axis_offset as usize].map(|(_, step)| step);
+        }
+
+        if patterns.len() == 1 {
+            return Some(first_step);
+        }
+
+        let (_, second_step) = patterns.get(1).copied().flatten()?;
+        Some(line_value(
+            first_step,
+            second_step - first_step,
+            axis_offset,
+        ))
+    };
 
     let get_num = |state: &TonicState, row: u32, col: u32| -> Option<Decimal> {
         let id = AbsoluteCellId {
@@ -310,11 +337,11 @@ fn fill_cells(
             row,
             col,
         };
-        let content = state.engine.spreadsheet.get_content(&id)?;
-        if content.defined_by_formula.is_some() {
+        let cell = state.engine.spreadsheet.get_cell(&id)?;
+        if cell.defined_by_formula.is_some() {
             return None;
         }
-        match &content.val {
+        match &cell.val {
             CellValue::Number(n) => Some(*n),
             _ => None,
         }
@@ -369,11 +396,11 @@ fn fill_cells(
         let source_content = state
             .engine
             .spreadsheet
-            .get_content(&source.to_absolute())
+            .get_cell(&source.to_absolute())
             .cloned();
 
-        if let Some(content) = &source_content {
-            if let Some(formula_id) = content.defined_by_formula {
+        if let Some(cell) = &source_content {
+            if let Some(formula_id) = cell.defined_by_formula {
                 state
                     .engine
                     .insert_shared_formula(&t, dest.to_absolute(), formula_id);
@@ -385,24 +412,36 @@ fn fill_cells(
         let row_idx = (source.row - orig_min_row) as usize;
         let row_offset = dest.row as i64 - source.row as i64;
         let col_offset = dest.col as i64 - source.col as i64;
+        let row_from_origin = dest.row as i64 - orig_min_row as i64;
+        let col_from_origin = dest.col as i64 - orig_min_col as i64;
+        let horizontal_value = pattern_value(&row_col_steps, row_idx, col_from_origin);
+        let vertical_value = pattern_value(&col_row_steps, col_idx, row_from_origin);
 
-        // per-column extrapolation (vertical fill) + per-row extrapolation (horizontal fill)
-        let mut extrapolated = None;
-        if row_offset != 0 {
-            if let Some((first_val, step)) = col_row_steps.get(col_idx).copied().flatten() {
-                extrapolated = Some(first_val + step * Decimal::from(dest.row - orig_min_row));
+        let extrapolated = if row_offset != 0 && col_offset != 0 {
+            if let (Some(value), Some(vertical_step)) = (
+                horizontal_value,
+                step_value(&col_row_steps, col_from_origin),
+            ) {
+                Some(value + vertical_step * Decimal::from(row_offset))
+            } else if let (Some(value), Some(horizontal_step)) =
+                (vertical_value, step_value(&row_col_steps, row_from_origin))
+            {
+                Some(value + horizontal_step * Decimal::from(col_offset))
+            } else {
+                None
             }
-        }
-        if col_offset != 0 {
-            if let Some((first_val, step)) = row_col_steps.get(row_idx).copied().flatten() {
-                extrapolated = Some(first_val + step * Decimal::from(dest.col - orig_min_col));
-            }
-        }
+        } else if row_offset != 0 {
+            vertical_value
+        } else if col_offset != 0 {
+            horizontal_value
+        } else {
+            None
+        };
 
         if let Some(val) = extrapolated {
             state.engine.insert_number(&t, dest.to_absolute(), val);
-        } else if let Some(content) = source_content {
-            let text = content.val.to_string();
+        } else if let Some(cell) = source_content {
+            let text = cell.val.to_string();
             state
                 .engine
                 .parse_and_insert_string(&t, dest.to_absolute(), &text);
@@ -549,6 +588,12 @@ fn get_file_info(state: tauri::State<'_, Mutex<TonicState>>) -> (Option<String>,
 }
 
 #[tauri::command(async)]
+fn get_dependency_graph_dot(state: tauri::State<'_, Mutex<TonicState>>) -> String {
+    let state = state.lock().unwrap();
+    state.engine.spreadsheet.dependency_graph.to_dot()
+}
+
+#[tauri::command(async)]
 fn create_table(
     state: tauri::State<'_, Mutex<TonicState>>,
     table_name: String,
@@ -624,13 +669,6 @@ fn create_table(
         projected_rows: rows,
         active: false,
         filter_options_per_column: filter_options,
-        sorting_options_per_column: vec![
-            ProjectionSortOption {
-                selected: false,
-                desc: false
-            };
-            num_cols
-        ],
         hidden_rows_count: 0,
         filter_show_blanks: vec![true; num_cols],
         next_filter_option_id: next_id,
@@ -896,9 +934,6 @@ fn apply_table_projection(
     proj.projected_rows = (body_start_row..=body_end_row).collect();
     proj.hidden_rows_count = 0;
     proj.filter_show_blanks = vec![true; num_cols];
-    for opt in &mut proj.sorting_options_per_column {
-        opt.selected = false;
-    }
 
     state.engine.end_batch(t);
     debug!("apply_table_projection took: {:?}", timer.elapsed());
@@ -938,9 +973,6 @@ fn disable_table_projection(
     proj.projected_rows = (body_start_row..=body_end_row).collect();
     proj.hidden_rows_count = 0;
     proj.filter_show_blanks = vec![true; num_cols];
-    for opt in &mut proj.sorting_options_per_column {
-        opt.selected = false;
-    }
 
     // reset all filter options to selected
     for col_opts in proj.filter_options_per_column.iter_mut() {
@@ -1033,6 +1065,7 @@ pub fn run() {
             open_file,
             new_file,
             get_file_info,
+            get_dependency_graph_dot,
             rename_current_file,
             undo_input,
             redo_input,
@@ -1048,4 +1081,92 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn extrapolate_for_test(
+        row_patterns: &[Option<(Decimal, Decimal)>],
+        col_patterns: &[Option<(Decimal, Decimal)>],
+        source_row_index: usize,
+        source_col_index: usize,
+        row_from_origin: i64,
+        col_from_origin: i64,
+        row_from_source: i64,
+        col_from_source: i64,
+    ) -> Option<Decimal> {
+        let line_value = |first_value: Decimal, step: Decimal, offset: i64| {
+            first_value + step * Decimal::from(offset)
+        };
+        let pattern_value =
+            |patterns: &[Option<(Decimal, Decimal)>], pattern_index: usize, axis_offset: i64| {
+                let (first_value, step) = patterns.get(pattern_index).copied().flatten()?;
+                Some(line_value(first_value, step, axis_offset))
+            };
+        let step_value = |patterns: &[Option<(Decimal, Decimal)>], axis_offset: i64| {
+            let Some((_, first_step)) = patterns.first().copied().flatten() else {
+                return None;
+            };
+
+            if axis_offset >= 0 && (axis_offset as usize) < patterns.len() {
+                return patterns[axis_offset as usize].map(|(_, step)| step);
+            }
+
+            if patterns.len() == 1 {
+                return Some(first_step);
+            }
+
+            let (_, second_step) = patterns.get(1).copied().flatten()?;
+            Some(line_value(
+                first_step,
+                second_step - first_step,
+                axis_offset,
+            ))
+        };
+
+        let horizontal_value = pattern_value(row_patterns, source_row_index, col_from_origin);
+        let vertical_value = pattern_value(col_patterns, source_col_index, row_from_origin);
+
+        if row_from_source != 0 && col_from_source != 0 {
+            if let (Some(value), Some(vertical_step)) =
+                (horizontal_value, step_value(col_patterns, col_from_origin))
+            {
+                return Some(value + vertical_step * Decimal::from(row_from_source));
+            }
+
+            if let (Some(value), Some(horizontal_step)) =
+                (vertical_value, step_value(row_patterns, row_from_origin))
+            {
+                return Some(value + horizontal_step * Decimal::from(col_from_source));
+            }
+        }
+
+        if row_from_source != 0 {
+            return vertical_value;
+        }
+
+        if col_from_source != 0 {
+            return horizontal_value;
+        }
+
+        None
+    }
+
+    #[test]
+    fn two_dimensional_fill_combines_row_and_column_progressions() {
+        let row_patterns = vec![
+            Some((Decimal::from(1), Decimal::from(1))),
+            Some((Decimal::from(2), Decimal::from(2))),
+        ];
+        let col_patterns = vec![
+            Some((Decimal::from(1), Decimal::from(1))),
+            Some((Decimal::from(2), Decimal::from(2))),
+        ];
+
+        let value = extrapolate_for_test(&row_patterns, &col_patterns, 1, 1, 2, 2, 1, 1);
+
+        assert_eq!(value, Some(Decimal::from(9)));
+    }
 }

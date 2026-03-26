@@ -30,3 +30,5 @@ tauri-plugin-dialog = "2"
 flate2 = "1.1.9"
 tar = "0.4"
 rust_decimal = { version = "1.40.0", features = ["serde-with-str"] }
+rstar = "0.12"
+petgraph = "0.8"

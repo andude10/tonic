@@ -131,7 +131,7 @@
     // -- backend (tauri) communication setup --
 
     let viewportRowStart = 0;
-    let viewportRowEnd = 0;
+    let viewportRowEnd = 40;
     let viewportColumnStart = 0;
     let viewportColumnEnd = 25;
 
@@ -1613,48 +1613,62 @@
 
     let pollInterval: ReturnType<typeof setInterval> | undefined;
 
+    function setViewportRows(start: number, end: number) {
+        gridRows = baseRows.slice(start, end + 1);
+        viewportRowStart = start;
+        viewportRowEnd = end;
+    }
+
+    function pollViewportOnce() {
+        invoke<ArrayBuffer>("get_cells_in_viewport", EMPTY_BODY, {
+            headers: {
+                "row-start": String(viewportRowStart),
+                "row-end": String(viewportRowEnd),
+                "col-start": String(viewportColumnStart),
+                "col-end": String(viewportColumnEnd),
+            },
+        }).then((buf) => {
+            // "buf" length is 0 when the cells in the current viewport did not change,
+            // in which case we do nothing
+            if (buf.byteLength > 0) {
+                decodeCells(new Uint8Array(buf), new DataView(buf));
+            }
+        });
+
+        // keep editor value fresh for focused cell (skip while user is editing)
+        if (focusedCell && !isEditing) {
+            invoke<ArrayBuffer>("get_editor_value_for_cell", {
+                cellId: focusedCell,
+            }).then((response) => {
+                if (!isEditing) {
+                    editorInput = decodeEditorValue(new Uint8Array(response));
+                }
+            });
+        }
+
+        if (focusedCell && !isEditingCellName) {
+            invoke<ArrayBuffer>("get_name_for_cell", {
+                cellId: focusedCell,
+            }).then((response) => {
+                if (!isEditingCellName) {
+                    cellName = new TextDecoder().decode(
+                        new Uint8Array(response),
+                    );
+                }
+            });
+        }
+    }
+
     function restartPolling() {
         if (pollInterval !== undefined) clearInterval(pollInterval);
+
         invoke("init_viewport").then(() => {
-            pollInterval = setInterval(() => {
-                invoke<ArrayBuffer>("get_cells_in_viewport", EMPTY_BODY, {
-                    headers: {
-                        "row-start": String(viewportRowStart),
-                        "row-end": String(viewportRowEnd),
-                        "col-start": String(viewportColumnStart),
-                        "col-end": String(viewportColumnEnd),
-                    },
-                }).then((buf) => {
-                    // "buf" length is 0 when the cells in the current viewport did not change,
-                    // in which case we do nothing
-                    if (buf.byteLength > 0) {
-                        decodeCells(new Uint8Array(buf), new DataView(buf));
-                    }
-                });
-                // keep editor value fresh for focused cell (skip while user is editing)
-                if (focusedCell && !isEditing) {
-                    invoke<ArrayBuffer>("get_editor_value_for_cell", {
-                        cellId: focusedCell,
-                    }).then((response) => {
-                        if (!isEditing) {
-                            editorInput = decodeEditorValue(
-                                new Uint8Array(response),
-                            );
-                        }
-                    });
-                }
-                if (focusedCell && !isEditingCellName) {
-                    invoke<ArrayBuffer>("get_name_for_cell", {
-                        cellId: focusedCell,
-                    }).then((response) => {
-                        if (!isEditingCellName) {
-                            cellName = new TextDecoder().decode(
-                                new Uint8Array(response),
-                            );
-                        }
-                    });
-                }
-            }, 16);
+            requestAnimationFrame(() => {
+                updateVisibleColumns();
+                pollViewportOnce();
+
+                pollInterval = setInterval(pollViewportOnce, 16);
+            });
         });
     }
 
@@ -1704,13 +1718,10 @@
     function handleRequestData(
         ev: { row: { start: number; end: number } } & { [key: string]: any },
     ): void {
-        console.log("handle request data");
         const {
             row: { start, end },
         } = ev;
-        gridRows = baseRows.slice(start, end + 1);
-        viewportRowStart = start;
-        viewportRowEnd = end;
+        setViewportRows(start, end);
     }
 </script>
 
@@ -1752,7 +1763,9 @@
         <div class="add-rows-bar">
             <button
                 onclick={() => {
-                    const newRowCount = rowCount + addRowsCount;
+                    const count = parseInt(String(addRowsCount), 10);
+                    if (!count || count < 1) return;
+                    const newRowCount = rowCount + count;
                     expandRows(newRowCount);
                     requestAnimationFrame(() => {
                         scrollToRow(newRowCount);
@@ -1772,7 +1785,9 @@
         <div class="add-cols-bar">
             <button
                 onclick={() => {
-                    const newColumnCount = columnCount + addColsCount;
+                    const count = parseInt(String(addColsCount), 10);
+                    if (!count || count < 1) return;
+                    const newColumnCount = columnCount + count;
                     expandColumns(newColumnCount);
                     requestAnimationFrame(() => {
                         scrollToColumn(newColumnCount);

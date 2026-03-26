@@ -16,6 +16,7 @@ export const menu_options: IMenuOption[] = [
             {
                 id: "file-save-as",
                 text: "Save As...",
+                subtext: "Ctrl+Shift+S",
                 icon: "wxi wxi-download",
             },
         ],
@@ -45,6 +46,10 @@ export const menu_options: IMenuOption[] = [
         id: "view",
         text: "View",
         data: [
+            {
+                id: "view-show-dependency-graph",
+                text: "Show dependency graph",
+            },
             { id: "view-fullscreen", text: "Fullscreen" },
             { id: "view-option", text: "..." },
         ],

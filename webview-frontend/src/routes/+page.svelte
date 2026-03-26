@@ -6,6 +6,7 @@
     import WindowBar from "$lib/WindowBar.svelte";
     import Sheet from "$lib/sheet/Sheet.svelte";
     import DevBottomPanel from "$lib/DevBottomPanel.svelte";
+    import ShowDependencyGraph from "$lib/side-areas/ShowDependencyGraph.svelte";
     import { trackFps } from "$lib/stats.svelte";
     import { showError } from "$lib/notice";
     import type { IApi } from "@svar-ui/svelte-grid";
@@ -26,6 +27,7 @@
     let isSaved = $state(true);
     let isSaving = $state(false);
     let isLoading = $state(false);
+    let isDependencyGraphVisible = $state(false);
 
     const DIALOG_FILTER = { name: "Tonic Spreadsheet", extensions: ["tcs"] };
 
@@ -95,6 +97,9 @@
                 break;
             case "file-save-as":
                 await commitSaveAs();
+                break;
+            case "view-show-dependency-graph":
+                isDependencyGraphVisible = true;
                 break;
         }
     }
@@ -222,6 +227,13 @@
                 </WindowBar>
 
                 <Sheet bind:this={sheet} />
+                {#if isDependencyGraphVisible}
+                    <ShowDependencyGraph
+                        onclose={() => {
+                            isDependencyGraphVisible = false;
+                        }}
+                    />
+                {/if}
                 {#if dialogOpen}<div class="dialog-overlay"></div>{/if}
                 {#if isLoading}<div class="dialog-overlay">
                         <div class="loading-text"></div>
@@ -234,6 +246,35 @@
 </div>
 
 <style>
+    /* Side areas — position below WindowBar, above grid scrollbars */
+    :global(.wx-sidearea) {
+        top: 32px !important;
+        right: 0 !important;
+        height: calc(100% - 32px) !important;
+        z-index: 10 !important;
+        min-width: 0 !important;
+        background: transparent !important;
+        border: none !important;
+        border-radius: 0 !important;
+        box-shadow: none !important;
+    }
+
+    :global(.wx-sidearea button) {
+        border: var(--wx-border);
+        background: var(--wx-button-background);
+        color: rgba(255, 255, 255, 0.88);
+        border-radius: var(--wx-border-radius);
+        padding: 7px 13px;
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: background 120ms ease;
+    }
+
+    :global(.wx-sidearea button:hover) {
+        background: #3e4042;
+    }
+
     :global(.wx-popup) {
         --wx-popup-border: 1px solid rgba(255, 255, 255, 0.08) !important;
         --wx-popup-border-radius: 8px !important;
@@ -458,6 +499,7 @@
         min-height: 0;
         overflow: hidden;
         position: relative;
+        z-index: 0;
 
         /* Font size */
         --wx-font-size: 12px;
@@ -520,6 +562,9 @@
         /* Color disabled */
         --wx-color-disabled: #3e4042;
         --wx-color-disabled-alt: #464849;
+
+        /* Popups (context menus, etc.) above grid overlays */
+        --wx-popup-z-index: 10;
 
         background: var(--wx-background);
 

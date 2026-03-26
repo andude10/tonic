@@ -17,7 +17,7 @@ use rust_decimal::Decimal;
 use crate::storage::{
     grid::GridCellId,
     name_resolution::SpreadsheetNames,
-    types::{AbsoluteCellId, Expr, ExprAtom, ExprId, Reference, SheetId},
+    types::{AbsoluteCellId, Coordinate, Expr, ExprAtom, ExprId, Reference, SheetId},
 };
 
 // --- Tokens ---
@@ -29,7 +29,12 @@ pub enum Token<'src> {
     True,
     False,
     Name(&'src str),
-    Cell(u32, u32),
+    Cell {
+        col: u32,
+        row: u32,
+        abs_col: bool,
+        abs_row: bool,
+    },
     Plus,
     Dash,
     Star,
@@ -50,7 +55,21 @@ impl fmt::Display for Token<'_> {
             Token::True => write!(f, "true"),
             Token::False => write!(f, "false"),
             Token::Name(s) => write!(f, "{s}"),
-            Token::Cell(col, row) => write!(f, "{col}:{row}"),
+            Token::Cell {
+                col,
+                row,
+                abs_col,
+                abs_row,
+            } => {
+                if *abs_col {
+                    write!(f, "$")?;
+                }
+                write!(f, "{}{}", col_to_letters(*col), "")?;
+                if *abs_row {
+                    write!(f, "$")?;
+                }
+                write!(f, "{}", row + 1)
+            }
             Token::Plus => write!(f, "+"),
             Token::Dash => write!(f, "-"),
             Token::Star => write!(f, "*"),
@@ -97,18 +116,7 @@ type LexerExtra<'src> = extra::Err<Rich<'src, char>>;
 pub fn create_lexer<'src>(
 ) -> impl Parser<'src, LexerInput<'src>, LexerOutput<'src>, LexerExtra<'src>> {
     choice((
-        // Cell (e.g. A1, BC23)
-        chumsky::regex::regex("[a-zA-Z]+[0-9]+").map(|s: &str| {
-            let (mut col, mut row) = (0u32, 0u32);
-            for b in s.bytes() {
-                if b.is_ascii_alphabetic() {
-                    col = col * 26 + (b.to_ascii_uppercase() - b'A') as u32 + 1;
-                } else {
-                    row = row * 10 + (b - b'0') as u32;
-                }
-            }
-            Token::Cell(col - 1, row - 1)
-        }),
+        chumsky::regex::regex("\\$?[a-zA-Z]+\\$?[0-9]+").map(lex_cell_ref),
         text::ident().map(|s| match s {
             "true" => Token::True,
             "false" => Token::False,
@@ -140,6 +148,78 @@ pub fn create_lexer<'src>(
     .padded()
     .repeated()
     .collect()
+}
+
+fn lex_cell_ref(s: &str) -> Token<'_> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let abs_col = if bytes[i] == b'$' {
+        i += 1;
+        true
+    } else {
+        false
+    };
+
+    let mut col = 0u32;
+    while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+        col = col * 26 + (bytes[i].to_ascii_uppercase() - b'A') as u32 + 1;
+        i += 1;
+    }
+    col -= 1;
+
+    let abs_row = if i < bytes.len() && bytes[i] == b'$' {
+        i += 1;
+        true
+    } else {
+        false
+    };
+
+    let mut row = 0u32;
+    while i < bytes.len() {
+        row = row * 10 + (bytes[i] - b'0') as u32;
+        i += 1;
+    }
+
+    Token::Cell {
+        col,
+        row: row - 1,
+        abs_col,
+        abs_row,
+    }
+}
+
+fn make_coordinate(value: u32, absolute: bool, base: u32) -> Coordinate {
+    if absolute {
+        Coordinate::Absolute(value)
+    } else {
+        Coordinate::Relative(value as i32 - base as i32)
+    }
+}
+
+fn format_cell_ref(id: &AbsoluteCellId, abs_col: bool, abs_row: bool) -> String {
+    let mut result = String::new();
+    if abs_col {
+        result.push('$');
+    }
+    result.push_str(&col_to_letters(id.col));
+    if abs_row {
+        result.push('$');
+    }
+    result.push_str(&(id.row + 1).to_string());
+    result
+}
+
+fn col_to_letters(col: u32) -> String {
+    let mut result = String::new();
+    let mut c = col;
+    loop {
+        result.insert(0, (b'A' + (c % 26) as u8) as char);
+        if c < 26 {
+            break;
+        }
+        c = c / 26 - 1;
+    }
+    result
 }
 
 // --- Cached lexer ---
@@ -180,7 +260,6 @@ pub struct FormulaState<'a> {
     pub names: &'a mut SpreadsheetNames,
     pub cell_id: GridCellId,
     pub expr_arena: Vec<Expr>,
-    pub dependencies: Vec<AbsoluteCellId>,
 }
 
 type FormulaExtra<'tokens, 'src> =
@@ -225,8 +304,9 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
                 }
             });
 
-        // cell_id == A1-style token, produces GridCellId (defaults to sheet 0)
-        let cell_id = select_ref! { Token::Cell(col, row) => GridCellId { col: *col, row: *row } };
+        let cell_ref = select_ref! {
+            Token::Cell { col, row, abs_col, abs_row } => (*col, *row, *abs_col, *abs_row)
+        };
 
         // call_args: (expr, expr, ...)
         let call_args = expr
@@ -237,7 +317,7 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
 
         // cell_name_or_function_call == qualified_name followed by optional (...) for function call, otherwise cell ref
         let cell_name_or_function_call = qualified_name.then(call_args.or_not()).try_map_with(
-            |((sheet_id, name), args), extra| {
+            |((_sheet_id, name), args), extra| {
                 let span = extra.span();
                 let st: &mut FormulaState = extra.state();
                 let expr = if let Some(args) = args {
@@ -269,17 +349,10 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
                         st.names.cell_names.get(name).ok_or_else(|| {
                             Rich::custom(span, format!("unresolved cell '{name}'"))
                         })?;
-                    let row_offset = named_cell.row as i32 - st.cell_id.row as i32;
-                    let col_offset = named_cell.col as i32 - st.cell_id.col as i32;
-                    st.dependencies.push(AbsoluteCellId {
-                        sheet_id: named_cell.sheet_id,
-                        row: named_cell.row,
-                        col: named_cell.col,
-                    });
                     Expr::Atom(ExprAtom::Reference(Reference::Single {
                         sheet_id: named_cell.sheet_id,
-                        row_offset,
-                        col_offset,
+                        row: Coordinate::Absolute(named_cell.row),
+                        col: Coordinate::Absolute(named_cell.col),
                     }))
                 };
                 Ok(push_expr(extra.state(), expr))
@@ -287,51 +360,30 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
         );
 
         // A1 or A1:B2 == produces Reference with offsets
-        let cell_or_range = cell_id
+        let cell_or_range = cell_ref
             .clone()
-            .then(just(Token::Colon).ignore_then(cell_id.clone()).or_not())
+            .then(just(Token::Colon).ignore_then(cell_ref.clone()).or_not())
             .map_with(|(start, end), extra| {
                 let st: &mut FormulaState = extra.state();
-                let start_row_offset = start.row as i32 - st.cell_id.row as i32;
-                let start_col_offset = start.col as i32 - st.cell_id.col as i32;
+                let start_row = make_coordinate(start.1, start.3, st.cell_id.row);
+                let start_col = make_coordinate(start.0, start.2, st.cell_id.col);
                 match end {
                     Some(end) => {
-                        let end_row_offset = end.row as i32 - st.cell_id.row as i32;
-                        let end_col_offset = end.col as i32 - st.cell_id.col as i32;
-                        // add all cells in range as dependencies
-                        let min_row = start.row.min(end.row);
-                        let max_row = start.row.max(end.row);
-                        let min_col = start.col.min(end.col);
-                        let max_col = start.col.max(end.col);
-                        for row in min_row..=max_row {
-                            for col in min_col..=max_col {
-                                st.dependencies.push(AbsoluteCellId {
-                                    sheet_id: 0,
-                                    row,
-                                    col,
-                                });
-                            }
-                        }
+                        let end_row = make_coordinate(end.1, end.3, st.cell_id.row);
+                        let end_col = make_coordinate(end.0, end.2, st.cell_id.col);
                         ExprAtom::Reference(Reference::Range {
                             sheet_id: 0,
-                            range_start_row_offset: start_row_offset,
-                            range_start_col_offset: start_col_offset,
-                            range_end_row_offset: end_row_offset,
-                            range_end_col_offset: end_col_offset,
+                            start_row,
+                            start_col,
+                            end_row,
+                            end_col,
                         })
                     }
-                    None => {
-                        st.dependencies.push(AbsoluteCellId {
-                            sheet_id: 0,
-                            row: start.row,
-                            col: start.col,
-                        });
-                        ExprAtom::Reference(Reference::Single {
-                            sheet_id: 0,
-                            row_offset: start_row_offset,
-                            col_offset: start_col_offset,
-                        })
-                    }
+                    None => ExprAtom::Reference(Reference::Single {
+                        sheet_id: 0,
+                        row: start_row,
+                        col: start_col,
+                    }),
                 }
             });
 
@@ -392,8 +444,14 @@ pub fn parse_formula<'tokens, 'src: 'tokens>(
 
 /// Parse a cell reference at position `pos` in `s` (letters then digits).
 /// Returns (col 0-indexed, row 0-indexed, end position) or None.
-fn parse_cell_at(s: &[u8], pos: usize) -> Option<(u32, u32, usize)> {
+fn parse_cell_at(s: &[u8], pos: usize) -> Option<(u32, u32, bool, bool, usize)> {
     let mut i = pos;
+    let abs_col = if i < s.len() && s[i] == b'$' {
+        i += 1;
+        true
+    } else {
+        false
+    };
     if i >= s.len() || !s[i].is_ascii_alphabetic() {
         return None;
     }
@@ -403,6 +461,12 @@ fn parse_cell_at(s: &[u8], pos: usize) -> Option<(u32, u32, usize)> {
         i += 1;
     }
     col -= 1;
+    let abs_row = if i < s.len() && s[i] == b'$' {
+        i += 1;
+        true
+    } else {
+        false
+    };
     if i >= s.len() || !s[i].is_ascii_digit() {
         return None;
     }
@@ -412,7 +476,7 @@ fn parse_cell_at(s: &[u8], pos: usize) -> Option<(u32, u32, usize)> {
         i += 1;
     }
     row -= 1; // 1-indexed in text -> 0-indexed
-    Some((col, row, i))
+    Some((col, row, abs_col, abs_row, i))
 }
 
 /// Shift all cell references in a formula string using AST references.
@@ -424,7 +488,7 @@ pub fn shift_formula_refs(
     formula: &str,
     cell_id: &GridCellId,
     ast: &[Expr],
-    names: &SpreadsheetNames,
+    _names: &SpreadsheetNames,
 ) -> String {
     use crate::storage::types::{ExprAtom, Reference};
 
@@ -457,13 +521,13 @@ pub fn shift_formula_refs(
             continue;
         }
 
-        if bytes[pos].is_ascii_alphabetic() {
-            if let Some((_col, _row, end)) = parse_cell_at(bytes, pos) {
+        if bytes[pos].is_ascii_alphabetic() || bytes[pos] == b'$' {
+            if let Some((_col, _row, _abs_col, _abs_row, end)) = parse_cell_at(bytes, pos) {
                 // Check for range: A1:B2
                 let is_range = end < bytes.len() && bytes[end] == b':';
                 let final_end = if is_range {
                     parse_cell_at(bytes, end + 1)
-                        .map(|(_, _, e)| e)
+                        .map(|(_, _, _, _, e)| e)
                         .unwrap_or(end)
                 } else {
                     end
@@ -474,46 +538,52 @@ pub fn shift_formula_refs(
                     let r = refs[ref_idx];
                     ref_idx += 1;
                     match r {
-                        Reference::Single {
-                            sheet_id,
-                            row_offset,
-                            col_offset,
-                        } => {
-                            let abs_row = (cell_id.row as i32 + row_offset).max(0) as u32;
-                            let abs_col = (cell_id.col as i32 + col_offset).max(0) as u32;
+                        Reference::Single { sheet_id, row, col } => {
+                            let abs_row = row.to_index(cell_id.row);
+                            let abs_col = col.to_index(cell_id.col);
                             let abs_id = AbsoluteCellId {
                                 sheet_id: *sheet_id,
                                 row: abs_row,
                                 col: abs_col,
                             };
-                            result.push_str(&names.cell_id_to_name(&abs_id));
+                            result.push_str(&format_cell_ref(
+                                &abs_id,
+                                matches!(col, Coordinate::Absolute(_)),
+                                matches!(row, Coordinate::Absolute(_)),
+                            ));
                         }
                         Reference::Range {
                             sheet_id,
-                            range_start_row_offset,
-                            range_start_col_offset,
-                            range_end_row_offset,
-                            range_end_col_offset,
+                            start_row,
+                            start_col,
+                            end_row,
+                            end_col,
                         } => {
-                            let start_row =
-                                (cell_id.row as i32 + range_start_row_offset).max(0) as u32;
-                            let start_col =
-                                (cell_id.col as i32 + range_start_col_offset).max(0) as u32;
-                            let end_row = (cell_id.row as i32 + range_end_row_offset).max(0) as u32;
-                            let end_col = (cell_id.col as i32 + range_end_col_offset).max(0) as u32;
+                            let start_row_abs = start_row.to_index(cell_id.row);
+                            let start_col_abs = start_col.to_index(cell_id.col);
+                            let end_row_abs = end_row.to_index(cell_id.row);
+                            let end_col_abs = end_col.to_index(cell_id.col);
                             let start_id = AbsoluteCellId {
                                 sheet_id: *sheet_id,
-                                row: start_row,
-                                col: start_col,
+                                row: start_row_abs,
+                                col: start_col_abs,
                             };
                             let end_id = AbsoluteCellId {
                                 sheet_id: *sheet_id,
-                                row: end_row,
-                                col: end_col,
+                                row: end_row_abs,
+                                col: end_col_abs,
                             };
-                            result.push_str(&names.cell_id_to_name(&start_id));
+                            result.push_str(&format_cell_ref(
+                                &start_id,
+                                matches!(start_col, Coordinate::Absolute(_)),
+                                matches!(start_row, Coordinate::Absolute(_)),
+                            ));
                             result.push(':');
-                            result.push_str(&names.cell_id_to_name(&end_id));
+                            result.push_str(&format_cell_ref(
+                                &end_id,
+                                matches!(end_col, Coordinate::Absolute(_)),
+                                matches!(end_row, Coordinate::Absolute(_)),
+                            ));
                         }
                     }
                     pos = final_end;
@@ -540,10 +610,19 @@ pub fn string_is_regular_cell_name(s: &str) -> bool {
         return false;
     }
     let mut i = 0;
+    if bytes[i] == b'$' {
+        i += 1;
+    }
     while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
         i += 1;
     }
     if i == 0 || i == bytes.len() {
+        return false;
+    }
+    if i < bytes.len() && bytes[i] == b'$' {
+        i += 1;
+    }
+    if i == bytes.len() {
         return false;
     }
     while i < bytes.len() {
@@ -574,7 +653,6 @@ mod tests {
             names,
             cell_id: GridCellId { col: 0, row: 0 },
             expr_arena: Vec::new(),
-            dependencies: Vec::new(),
         };
         let (parsed, errs) = parse_formula(&tokens, src.len(), &mut state);
         assert!(
@@ -593,12 +671,19 @@ mod tests {
         }
     }
 
-    /// Helper to create a Reference::Single with offsets (relative to cell 0,0)
     fn r(col: i32, row: i32) -> Reference {
         Reference::Single {
             sheet_id: 0,
-            row_offset: row,
-            col_offset: col,
+            row: Coordinate::Relative(row),
+            col: Coordinate::Relative(col),
+        }
+    }
+
+    fn a(col: u32, row: u32) -> Reference {
+        Reference::Single {
+            sheet_id: 0,
+            row: Coordinate::Absolute(row),
+            col: Coordinate::Absolute(col),
         }
     }
 
@@ -631,6 +716,15 @@ mod tests {
         assert_parses(&[
             ("A1", vec![Expr::Atom(ExprAtom::Reference(r(0, 0)))]),
             ("B3", vec![Expr::Atom(ExprAtom::Reference(r(1, 2)))]),
+            ("$A$1", vec![Expr::Atom(ExprAtom::Reference(a(0, 0)))]),
+            (
+                "A$2",
+                vec![Expr::Atom(ExprAtom::Reference(Reference::Single {
+                    sheet_id: 0,
+                    row: Coordinate::Absolute(1),
+                    col: Coordinate::Relative(0),
+                }))],
+            ),
         ]);
     }
 
@@ -640,10 +734,20 @@ mod tests {
             "A1:B2",
             vec![Expr::Atom(ExprAtom::Reference(Reference::Range {
                 sheet_id: 0,
-                range_start_row_offset: 0,
-                range_start_col_offset: 0,
-                range_end_row_offset: 1,
-                range_end_col_offset: 1,
+                start_row: Coordinate::Relative(0),
+                start_col: Coordinate::Relative(0),
+                end_row: Coordinate::Relative(1),
+                end_col: Coordinate::Relative(1),
+            }))],
+        )]);
+        assert_parses(&[(
+            "$A1:B$2",
+            vec![Expr::Atom(ExprAtom::Reference(Reference::Range {
+                sheet_id: 0,
+                start_row: Coordinate::Relative(0),
+                start_col: Coordinate::Absolute(0),
+                end_row: Coordinate::Absolute(1),
+                end_col: Coordinate::Relative(1),
             }))],
         )]);
     }
@@ -731,10 +835,10 @@ mod tests {
             vec![
                 Expr::Atom(ExprAtom::Reference(Reference::Range {
                     sheet_id: 0,
-                    range_start_row_offset: 0,
-                    range_start_col_offset: 0,
-                    range_end_row_offset: 1,
-                    range_end_col_offset: 1,
+                    start_row: Coordinate::Relative(0),
+                    start_col: Coordinate::Relative(0),
+                    end_row: Coordinate::Relative(1),
+                    end_col: Coordinate::Relative(1),
                 })),
                 Expr::Sum
             ]
@@ -751,10 +855,10 @@ mod tests {
             vec![
                 Expr::Atom(ExprAtom::Reference(Reference::Range {
                     sheet_id: 0,
-                    range_start_row_offset: 0,
-                    range_start_col_offset: 0,
-                    range_end_row_offset: 1,
-                    range_end_col_offset: 1,
+                    start_row: Coordinate::Relative(0),
+                    start_col: Coordinate::Relative(0),
+                    end_row: Coordinate::Relative(1),
+                    end_col: Coordinate::Relative(1),
                 })),
                 Expr::Avg
             ]
@@ -791,8 +895,8 @@ mod tests {
             arena,
             vec![Expr::Atom(ExprAtom::Reference(Reference::Single {
                 sheet_id: 0,
-                row_offset: 10,
-                col_offset: 5,
+                row: Coordinate::Absolute(10),
+                col: Coordinate::Absolute(5),
             }))]
         );
     }

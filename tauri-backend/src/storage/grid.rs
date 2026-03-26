@@ -2,33 +2,28 @@ use std::fmt;
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use tauri_plugin_log::log::debug;
 
-use crate::storage::types::{AbsoluteCellId, FormulaId};
+use crate::storage::types::FormulaId;
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct GridCellId {
     pub row: u32,
     pub col: u32,
 }
 
-/// Content of a cell (value + formula info). Separate from dependents tracking.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct CellContent {
+pub struct Cell {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defined_by_formula: Option<FormulaId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dependencies: Option<Vec<AbsoluteCellId>>,
     pub val: CellValue,
     #[serde(skip)]
     pub pending_dependencies: u32,
 }
 
-impl CellContent {
+impl Cell {
     pub fn text(s: String) -> Self {
         Self {
             defined_by_formula: None,
-            dependencies: None,
             val: CellValue::Text(s),
             pending_dependencies: 0,
         }
@@ -37,7 +32,6 @@ impl CellContent {
     pub fn number(n: Decimal) -> Self {
         Self {
             defined_by_formula: None,
-            dependencies: None,
             val: CellValue::Number(n),
             pending_dependencies: 0,
         }
@@ -46,37 +40,9 @@ impl CellContent {
     pub fn error(msg: String) -> Self {
         Self {
             defined_by_formula: None,
-            dependencies: None,
             val: CellValue::Error(msg),
             pending_dependencies: 0,
         }
-    }
-}
-
-// todo: move out dependents and dependencies outside of cell
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct Cell {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) dependents: Option<Vec<AbsoluteCellId>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) content: Option<CellContent>,
-}
-
-impl Cell {
-    fn new() -> Self {
-        Self {
-            dependents: None,
-            content: None,
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.dependents.is_none() && self.content.is_none()
-    }
-
-    fn has_dependents(&self) -> bool {
-        self.dependents.as_ref().map_or(false, |d| !d.is_empty())
     }
 }
 
@@ -87,7 +53,6 @@ pub enum CellValue {
     Error(String),
 }
 
-// todo: remove
 impl fmt::Display for CellValue {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -101,21 +66,19 @@ impl fmt::Display for CellValue {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 struct Block {
     cells: Box<[[Option<Cell>; 32]; 32]>,
-    nonempty_values_count: u32,
-    dependants_count: u32,
+    nonempty_cells_count: u32,
 }
 
 impl Block {
     fn new() -> Self {
         Self {
             cells: Box::new(std::array::from_fn(|_| std::array::from_fn(|_| None))),
-            nonempty_values_count: 0,
-            dependants_count: 0,
+            nonempty_cells_count: 0,
         }
     }
 
     fn should_deallocate(&self) -> bool {
-        self.nonempty_values_count == 0 && self.dependants_count == 0
+        self.nonempty_cells_count == 0
     }
 }
 
@@ -130,6 +93,7 @@ impl GridCellId {
     fn block_idx(&self, stride: usize) -> usize {
         (self.row as usize >> 5) * stride + (self.col as usize >> 5)
     }
+
     fn local(&self) -> (usize, usize) {
         (self.row as usize & 31, self.col as usize & 31)
     }
@@ -154,106 +118,57 @@ impl Default for Grid {
 }
 
 impl Grid {
-    /// Returns a reference to the cell content, or `None` if the cell has no content.
-    pub fn get_content(&self, id: &GridCellId) -> Option<&CellContent> {
+    pub fn get_cell(&self, id: &GridCellId) -> Option<&Cell> {
         let idx = id.block_idx(self.stride);
         let block = self.blocks.get(idx)?.as_ref()?;
         let (r, c) = id.local();
-        block.cells[r][c].as_ref()?.content.as_ref()
+        block.cells[r][c].as_ref()
     }
 
-    /// Returns the cell's value, or `None` if the cell has no content.
     pub fn get_value(&self, id: &GridCellId) -> Option<&CellValue> {
-        self.get_content(id).map(|c| &c.val)
+        self.get_cell(id).map(|cell| &cell.val)
     }
 
-    /// Sets the value of a cell, creating it if it doesn't exist.
     pub fn set_value(&mut self, id: &GridCellId, val: CellValue) {
         let idx = id.block_idx(self.stride);
         let block = self.blocks[idx].get_or_insert_with(Block::new);
         let (r, c) = id.local();
-        let cell = block.cells[r][c].get_or_insert_with(Cell::new);
-        match cell.content.as_mut() {
-            Some(content) => content.val = val,
+        match block.cells[r][c].as_mut() {
+            Some(cell) => cell.val = val,
             None => {
-                cell.content = Some(CellContent {
-                    val,
+                block.cells[r][c] = Some(Cell {
                     defined_by_formula: None,
-                    dependencies: None,
+                    val,
                     pending_dependencies: 0,
                 });
-                block.nonempty_values_count += 1;
+                block.nonempty_cells_count += 1;
             }
         }
     }
 
-    /// Returns true if the cell has any dependents.
-    pub fn has_dependants(&self, id: &GridCellId) -> bool {
-        let Some(block) = self.blocks[id.block_idx(self.stride)].as_ref() else {
-            return false;
-        };
-        let (r, c) = id.local();
-        block.cells[r][c]
-            .as_ref()
-            .map_or(false, |c| c.has_dependents())
-    }
-
-    /// Inserts or updates cell content, preserving dependents.
-    pub fn insert_content(&mut self, id: &GridCellId, content: CellContent) {
+    pub fn insert_cell(&mut self, id: &GridCellId, cell: Cell) {
         let idx = id.block_idx(self.stride);
         let block = self.blocks[idx].get_or_insert_with(Block::new);
         let (r, c) = id.local();
-        let cell = block.cells[r][c].get_or_insert_with(Cell::new);
-        if cell.content.is_none() {
-            block.nonempty_values_count += 1;
+        if block.cells[r][c].is_none() {
+            block.nonempty_cells_count += 1;
         }
-        cell.content = Some(content);
+        block.cells[r][c] = Some(cell);
     }
 
-    /// Removes cell content, preserving dependents. Deallocates block if empty.
-    pub fn remove_content(&mut self, id: &GridCellId) {
+    pub fn remove_cell(&mut self, id: &GridCellId) {
         let idx = id.block_idx(self.stride);
         let Some(block) = self.blocks[idx].as_mut() else {
             return;
         };
         let (r, c) = id.local();
-        let Some(cell) = block.cells[r][c].as_mut() else {
-            return;
-        };
-        if cell.content.take().is_some() {
-            block.nonempty_values_count -= 1;
+        if block.cells[r][c].take().is_some() {
+            block.nonempty_cells_count -= 1;
         }
-        if cell.is_empty() {
-            block.cells[r][c] = None;
-            if block.should_deallocate() {
-                self.blocks[idx] = None;
-            }
+        if block.should_deallocate() {
+            self.blocks[idx] = None;
         }
     }
-
-    /// Adds a dependant to a cell. Allocates block if needed.
-    pub fn add_dependant(&mut self, id: &GridCellId, dependant: &AbsoluteCellId) {
-        let idx = id.block_idx(self.stride);
-        let block = self.blocks[idx].get_or_insert_with(Block::new);
-        let (r, c) = id.local();
-        let cell = block.cells[r][c].get_or_insert_with(Cell::new);
-        let deps = cell.dependents.get_or_insert_with(Vec::new);
-        let had_dependents = !deps.is_empty();
-        deps.push(dependant.clone());
-        if !had_dependents {
-            block.dependants_count += 1;
-        }
-    }
-
-    /// Returns a reference to the cell's dependents list, or `None`.
-    pub fn get_dependents(&self, id: &GridCellId) -> Option<&Vec<AbsoluteCellId>> {
-        let block = self.blocks[id.block_idx(self.stride)].as_ref()?;
-        let (r, c) = id.local();
-        block.cells[r][c].as_ref()?.dependents.as_ref()
-    }
-
-    // todo: probably remove increase_pending_dependency_count, decrease_pending_dependency_count
-    // and get_pending_dependency_count with something shorter
 
     pub fn increase_pending_dependencies(&mut self, id: &GridCellId) {
         let idx = id.block_idx(self.stride);
@@ -262,9 +177,7 @@ impl Grid {
         };
         let (r, c) = id.local();
         if let Some(cell) = block.cells[r][c].as_mut() {
-            if let Some(content) = cell.content.as_mut() {
-                content.pending_dependencies += 1;
-            }
+            cell.pending_dependencies += 1;
         }
     }
 
@@ -275,44 +188,49 @@ impl Grid {
         };
         let (r, c) = id.local();
         if let Some(cell) = block.cells[r][c].as_mut() {
-            if let Some(content) = cell.content.as_mut() {
-                content.pending_dependencies -= 1;
-            }
+            cell.pending_dependencies -= 1;
         }
     }
 
     pub fn get_pending_dependencies(&self, id: &GridCellId) -> u32 {
-        let Some(block) = self.blocks[id.block_idx(self.stride)].as_ref() else {
-            return 0;
-        };
-        let (r, c) = id.local();
-        block.cells[r][c]
-            .as_ref()
-            .and_then(|cell| cell.content.as_ref())
-            .map_or(0, |c| c.pending_dependencies)
+        self.get_cell(id)
+            .map_or(0, |cell| cell.pending_dependencies)
     }
 
-    /// Removes a dependant from a cell. Deallocates block if empty.
-    pub fn remove_dependant(&mut self, id: &GridCellId, dependant: &AbsoluteCellId) {
+    pub fn reset_pending_dependencies(&mut self, id: &GridCellId) {
         let idx = id.block_idx(self.stride);
         let Some(block) = self.blocks[idx].as_mut() else {
             return;
         };
         let (r, c) = id.local();
-        let Some(cell) = block.cells[r][c].as_mut() else {
-            return;
-        };
-        if let Some(deps) = cell.dependents.as_mut() {
-            deps.retain(|d| d != dependant);
-            if deps.is_empty() {
-                cell.dependents = None;
-                block.dependants_count -= 1;
-            }
+        if let Some(cell) = block.cells[r][c].as_mut() {
+            cell.pending_dependencies = 0;
         }
-        if cell.is_empty() {
-            block.cells[r][c] = None;
-            if block.should_deallocate() {
-                self.blocks[idx] = None;
+    }
+
+    pub fn for_each_cell<F>(&self, mut f: F)
+    where
+        F: FnMut(GridCellId, &Cell),
+    {
+        for (block_idx, block) in self.blocks.iter().enumerate() {
+            let Some(block) = block.as_ref() else {
+                continue;
+            };
+            let block_row = block_idx / self.stride;
+            let block_col = block_idx % self.stride;
+            for row in 0..32 {
+                for col in 0..32 {
+                    let Some(cell) = block.cells[row][col].as_ref() else {
+                        continue;
+                    };
+                    f(
+                        GridCellId {
+                            row: (block_row as u32 * 32) + row as u32,
+                            col: (block_col as u32 * 32) + col as u32,
+                        },
+                        cell,
+                    );
+                }
             }
         }
     }
@@ -326,10 +244,9 @@ mod tests {
         GridCellId { row, col }
     }
 
-    fn content(val: CellValue) -> CellContent {
-        CellContent {
+    fn cell(val: CellValue) -> Cell {
+        Cell {
             defined_by_formula: None,
-            dependencies: None,
             val,
             pending_dependencies: 0,
         }
@@ -338,14 +255,14 @@ mod tests {
     #[test]
     fn insert_and_get() {
         let mut grid = Grid::default();
-        grid.insert_content(&id(0, 0), content(CellValue::Text("hello".into())));
-        grid.insert_content(&id(100, 200), content(CellValue::Number(Decimal::from(42))));
+        grid.insert_cell(&id(0, 0), cell(CellValue::Text("hello".into())));
+        grid.insert_cell(&id(100, 200), cell(CellValue::Number(Decimal::from(42))));
 
         assert!(
-            matches!(grid.get_content(&id(0, 0)).map(|c| &c.val), Some(CellValue::Text(s)) if s == "hello")
+            matches!(grid.get_cell(&id(0, 0)).map(|c| &c.val), Some(CellValue::Text(s)) if s == "hello")
         );
         assert!(matches!(
-            grid.get_content(&id(100, 200)).map(|c| &c.val),
+            grid.get_cell(&id(100, 200)).map(|c| &c.val),
             Some(CellValue::Number(_))
         ));
     }
@@ -353,35 +270,35 @@ mod tests {
     #[test]
     fn get_empty_returns_none() {
         let grid = Grid::default();
-        assert!(grid.get_content(&id(0, 0)).is_none());
-        assert!(grid.get_content(&id(500, 500)).is_none());
+        assert!(grid.get_cell(&id(0, 0)).is_none());
+        assert!(grid.get_cell(&id(500, 500)).is_none());
     }
 
     #[test]
     fn remove_cell() {
         let mut grid = Grid::default();
-        grid.insert_content(&id(3, 3), content(CellValue::Error(String::new())));
-        assert!(grid.get_content(&id(3, 3)).is_some());
-        grid.remove_content(&id(3, 3));
-        assert!(grid.get_content(&id(3, 3)).is_none());
+        grid.insert_cell(&id(3, 3), cell(CellValue::Error(String::new())));
+        assert!(grid.get_cell(&id(3, 3)).is_some());
+        grid.remove_cell(&id(3, 3));
+        assert!(grid.get_cell(&id(3, 3)).is_none());
     }
 
     #[test]
     fn remove_frees_empty_block() {
         let mut grid = Grid::default();
-        grid.insert_content(&id(0, 0), content(CellValue::Error(String::new())));
+        grid.insert_cell(&id(0, 0), cell(CellValue::Error(String::new())));
         let idx = id(0, 0).block_idx(grid.stride);
         assert!(grid.blocks[idx].is_some());
-        grid.remove_content(&id(0, 0));
+        grid.remove_cell(&id(0, 0));
         assert!(grid.blocks[idx].is_none());
     }
 
     #[test]
     fn block_not_freed_while_cells_remain() {
         let mut grid = Grid::default();
-        grid.insert_content(&id(0, 0), content(CellValue::Error(String::new())));
-        grid.insert_content(&id(1, 1), content(CellValue::Error(String::new())));
-        grid.remove_content(&id(0, 0));
+        grid.insert_cell(&id(0, 0), cell(CellValue::Error(String::new())));
+        grid.insert_cell(&id(1, 1), cell(CellValue::Error(String::new())));
+        grid.remove_cell(&id(0, 0));
         let idx = id(0, 0).block_idx(grid.stride);
         assert!(grid.blocks[idx].is_some());
     }
@@ -389,62 +306,48 @@ mod tests {
     #[test]
     fn insert_overwrites_existing() {
         let mut grid = Grid::default();
-        grid.insert_content(&id(0, 0), content(CellValue::Text("first".into())));
-        grid.insert_content(&id(0, 0), content(CellValue::Text("second".into())));
+        grid.insert_cell(&id(0, 0), cell(CellValue::Text("first".into())));
+        grid.insert_cell(&id(0, 0), cell(CellValue::Text("second".into())));
         assert!(
-            matches!(grid.get_content(&id(0, 0)).map(|c| &c.val), Some(CellValue::Text(s)) if s == "second")
+            matches!(grid.get_cell(&id(0, 0)).map(|c| &c.val), Some(CellValue::Text(s)) if s == "second")
         );
         let idx = id(0, 0).block_idx(grid.stride);
-        assert_eq!(grid.blocks[idx].as_ref().unwrap().nonempty_values_count, 1);
+        assert_eq!(grid.blocks[idx].as_ref().unwrap().nonempty_cells_count, 1);
     }
 
     #[test]
     fn cells_across_block_boundaries() {
         let mut grid = Grid::default();
-        grid.insert_content(&id(31, 31), content(CellValue::Text("a".into())));
-        grid.insert_content(&id(32, 32), content(CellValue::Text("b".into())));
+        grid.insert_cell(&id(31, 31), cell(CellValue::Text("a".into())));
+        grid.insert_cell(&id(32, 32), cell(CellValue::Text("b".into())));
         let idx_a = id(31, 31).block_idx(grid.stride);
         let idx_b = id(32, 32).block_idx(grid.stride);
         assert_ne!(idx_a, idx_b);
         assert!(
-            matches!(grid.get_content(&id(31, 31)).map(|c| &c.val), Some(CellValue::Text(s)) if s == "a")
+            matches!(grid.get_cell(&id(31, 31)).map(|c| &c.val), Some(CellValue::Text(s)) if s == "a")
         );
         assert!(
-            matches!(grid.get_content(&id(32, 32)).map(|c| &c.val), Some(CellValue::Text(s)) if s == "b")
+            matches!(grid.get_cell(&id(32, 32)).map(|c| &c.val), Some(CellValue::Text(s)) if s == "b")
         );
     }
 
     #[test]
-    fn block_not_freed_while_dependants_exist() {
+    fn set_value_preserves_formula_metadata() {
         let mut grid = Grid::default();
-        let dep = AbsoluteCellId {
-            sheet_id: 0,
-            row: 5,
-            col: 5,
-        };
-        grid.add_dependant(&id(0, 0), &dep);
-        let idx = id(0, 0).block_idx(grid.stride);
-        assert!(grid.blocks[idx].is_some());
-        // Cell has no content but has dependant
-        assert!(grid.get_content(&id(0, 0)).is_none());
-        assert!(grid.has_dependants(&id(0, 0)));
-        // Remove dependant should free block
-        grid.remove_dependant(&id(0, 0), &dep);
-        assert!(grid.blocks[idx].is_none());
-    }
+        grid.insert_cell(
+            &id(0, 0),
+            Cell {
+                defined_by_formula: Some(7),
+                val: CellValue::Text("old".into()),
+                pending_dependencies: 3,
+            },
+        );
 
-    #[test]
-    fn dependants_preserved_on_value_update() {
-        let mut grid = Grid::default();
-        let dep = AbsoluteCellId {
-            sheet_id: 0,
-            row: 5,
-            col: 5,
-        };
-        grid.insert_content(&id(0, 0), content(CellValue::Text("old".into())));
-        grid.add_dependant(&id(0, 0), &dep);
-        grid.insert_content(&id(0, 0), content(CellValue::Text("new".into())));
-        // Dependant should still be there
-        assert!(grid.has_dependants(&id(0, 0)));
+        grid.set_value(&id(0, 0), CellValue::Text("new".into()));
+
+        let cell = grid.get_cell(&id(0, 0)).unwrap();
+        assert_eq!(cell.defined_by_formula, Some(7));
+        assert_eq!(cell.pending_dependencies, 3);
+        assert!(matches!(&cell.val, CellValue::Text(s) if s == "new"));
     }
 }

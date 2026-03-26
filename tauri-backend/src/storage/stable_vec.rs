@@ -34,11 +34,6 @@ impl<T> StableVec<T> {
         }
     }
 
-    pub fn remove(&mut self, index: u32) {
-        self.entries[index as usize] = None;
-        self.free.push(index);
-    }
-
     pub fn get(&self, index: u32) -> Option<&T> {
         self.entries[index as usize].as_ref()
     }
