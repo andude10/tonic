@@ -30,39 +30,28 @@
     } = $props();
 
     const shared = getSheetSharedState();
+    const colIndex = columnLetterToIndex(column.id);
 
     let focusedThisCell = $derived(
         shared.focusedCell?.row === (row.id as number) - 1 &&
-            shared.focusedCell?.col === columnLetterToIndex(column.id),
+            shared.focusedCell?.col === colIndex,
     );
 
-    const displayContent = $derived.by(() => {
-        const cell = row[column.id];
-        if (isCellData(cell)) return cell.computedValue;
-        return cell ?? "";
-    });
+    const cell = $derived(row[column.id]);
+    const displayContent = $derived(
+        isCellData(cell) ? cell.computedValue : (cell ?? ""),
+    );
+    const hasFormula = $derived(isCellData(cell) && cell.isFormula);
 
-    // todo: simplify
-    const hasFormula = $derived.by(() => {
-        const cell = row[column.id];
-        return isCellData(cell) && cell.isFormula;
-    });
-
-    const isTableHeader = $derived.by(() => {
-        const r = (row.id as number) - 1;
-        const c = columnLetterToIndex(column.id);
-        return shared.tables.some(
-            (t) =>
-                r === t.headerBounds.minR &&
-                c >= t.headerBounds.minC &&
-                c <= t.headerBounds.maxC,
-        );
-    });
+    const isTableHeader = $derived(
+        shared.tableCellStyles.get(`${row.id},${column.id}`) ===
+            "table-header-cell",
+    );
 
     function headerCellId() {
         return {
             row: (row.id as number) - 1,
-            col: columnLetterToIndex(column.id),
+            col: colIndex,
         };
     }
 

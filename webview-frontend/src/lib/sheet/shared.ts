@@ -36,6 +36,7 @@ export type SheetSharedState = {
     caretPosition: number;
     editorInputWidth: number;
     tables: TableData[];
+    readonly tableCellStyles: Map<string, string>;
     commitEdit(): void;
 };
 
@@ -47,8 +48,11 @@ export type SheetRow = {
     rowNumber: number;
 } & Record<string, CellData | number>;
 
+const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
 /** "A" -> 0, "B" -> 1, "Z" -> 25, "AA" -> 26 */
 export function columnLetterToIndex(id: string): number {
+    if (id.length === 1) return id.charCodeAt(0) - 65;
     let n = 0;
     for (let i = 0; i < id.length; i++) {
         n = n * 26 + (id.charCodeAt(i) - 64);
@@ -58,7 +62,7 @@ export function columnLetterToIndex(id: string): number {
 
 /** 0 -> "A", 1 -> "B", 25 -> "Z", 26 -> "AA" */
 export function columnIndexToLetter(index: number): string {
-    if (index < 26) return String.fromCharCode(65 + index);
+    if (index < 26) return LETTERS[index];
     let s = "";
     let n = index + 1;
     while (n > 0) {

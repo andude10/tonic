@@ -1,4 +1,4 @@
-import { columnIndexToLetter, type CellId } from "../shared";
+import type { CellId } from "../shared";
 
 export type CellRange = {
     minR: number;
@@ -23,6 +23,8 @@ export type SheetObjectsState = {
     rowHeight: number;
     headerHeight: number;
     rowNumWidth: number;
+    /** Prefix-sum of column left pixel edges, indexed by render position. */
+    columnEdges: number[];
 };
 
 export function createState(
@@ -39,6 +41,7 @@ export function createState(
         rowHeight: 37,
         headerHeight: 37,
         rowNumWidth: 50,
+        columnEdges: [],
     };
 }
 
@@ -71,21 +74,16 @@ export function reposition(
     const rowNumCol = columns.find((c: any) => c.id === "rowNumber");
     state.rowNumWidth = rowNumCol ? (rowNumCol.width ?? 50) : 50;
     state.clipWrapper.style.clipPath = `inset(${state.headerHeight}px 0 0 ${state.rowNumWidth}px)`;
-}
 
-/** Find the left and right pixel edges of a column by its 0-based index. */
-function getColumnEdges(
-    columns: any[],
-    colIndex: number,
-): { left: number; right: number } | null {
-    const letter = columnIndexToLetter(colIndex);
+    // rebuild column edge cache (prefix-sum of widths)
+    const edges = state.columnEdges;
+    edges.length = columns.length + 1;
     let x = 0;
-    for (const col of columns) {
-        const w = col.width ?? 100;
-        if (col.id === letter) return { left: x, right: x + w };
-        x += w;
+    for (let i = 0; i < columns.length; i++) {
+        edges[i] = x;
+        x += columns[i].width ?? 100;
     }
-    return null;
+    edges[columns.length] = x;
 }
 
 /** Convert a cell range to pixel coordinates relative to scroll baseline. */
@@ -93,12 +91,18 @@ export function cellRangeToPixels(
     state: SheetObjectsState,
     bounds: CellRange,
 ): PixelRect | null {
-    const columns: any[] = state.gridApi.getState()._columns ?? [];
-    const min = getColumnEdges(columns, bounds.minC);
-    const max = getColumnEdges(columns, bounds.maxC);
-    if (!min || !max) return null;
+    const edges = state.columnEdges;
+    if (edges.length === 0) return null;
 
-    const left = min.left - state.baseScrollLeft;
+    // +1 because render column 0 is "rowNumber"
+    const minIdx = bounds.minC + 1;
+    const maxIdx = bounds.maxC + 1;
+    if (maxIdx + 1 >= edges.length) return null;
+
+    const minLeft = edges[minIdx];
+    const maxRight = edges[maxIdx + 1];
+
+    const left = minLeft - state.baseScrollLeft;
     const top =
         state.headerHeight +
         bounds.minR * state.rowHeight -
@@ -106,7 +110,7 @@ export function cellRangeToPixels(
     return {
         left,
         top,
-        width: max.right - state.baseScrollLeft - left,
+        width: maxRight - state.baseScrollLeft - left,
         height: (bounds.maxR + 1 - bounds.minR) * state.rowHeight,
     };
 }

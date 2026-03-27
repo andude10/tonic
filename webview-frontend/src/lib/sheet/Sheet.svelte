@@ -1,43 +1,30 @@
 <script lang="ts">
-    import { Grid, type IApi, type IColumnConfig } from "@svar-ui/svelte-grid";
+    import { type IApi } from "@svar-ui/svelte-grid";
     import {
         columnIndexToLetter,
         columnLetterToIndex,
-        isCellData,
         parseSvarID,
         setSheetSharedState,
         type CellData,
         type CellId,
         type ChangeBounds,
-        type SheetRow,
         type TableData,
         type UICell,
     } from "$lib/sheet/shared";
     import { invoke } from "@tauri-apps/api/core";
     import SheetFormulaPanel from "./SheetFormulaPanel.svelte";
-    import Cell from "./Cell.svelte";
     import { onMount, untrack } from "svelte";
-    import { endTimer, startTimer } from "$lib/stats.svelte";
     import {
-        createState,
-        syncScroll,
-        reposition,
         cellsInBounds,
         cellsOutside,
         type CellRange,
-        type SheetObjectsState,
     } from "./overlays/Overlays.svelte";
-    import SelectionOverlay from "./overlays/SelectionOverlay.svelte";
-    import FocusOverlay from "./overlays/FocusOverlay.svelte";
-    import FillOriginOverlay from "./overlays/FillOriginOverlay.svelte";
-    import CloneSourceOverlay from "./overlays/CloneSourceOverlay.svelte";
-    import RefOverlay from "./overlays/RefOverlay.svelte";
-    import TableOverlay from "./overlays/TableOverlay.svelte";
     import { listen } from "@tauri-apps/api/event";
     import { ContextMenu, type IMenuOptionClick } from "@svar-ui/svelte-menu";
     import { initNotice } from "$lib/notice";
     import { showError } from "$lib/notice";
     import { getContext } from "svelte";
+    import Render from "./Render.svelte";
 
     const helpers = getContext<{ showNotice: (msg: any) => void }>(
         "wx-helpers",
@@ -96,7 +83,7 @@
                         hiddenRowsCount: 0,
                     },
                 ];
-                requestAnimationFrame(() => repositionOverlays());
+                requestAnimationFrame(() => render?.repositionOverlays());
             })
             .catch((e) => showError(String(e)));
     }
@@ -130,18 +117,7 @@
 
     // -- backend (tauri) communication setup --
 
-    let viewportRowStart = 0;
-    let viewportRowEnd = 40;
-    let viewportColumnStart = 0;
-    let viewportColumnEnd = 25;
-
     const textDecoder = new TextDecoder();
-    const EMPTY_BODY = new Uint8Array();
-
-    /** Decode a single editor value from raw bytes */
-    function decodeEditorValue(bytes: Uint8Array): string {
-        return textDecoder.decode(bytes);
-    }
 
     /** Decode multiple editor values from backend response: [count: u32][len: u32][bytes]... */
     function decodeEditorValues(bytes: Uint8Array, view: DataView): string[] {
@@ -158,36 +134,6 @@
             offset += len;
         }
         return values;
-    }
-
-    function decodeCells(bytes: Uint8Array, view: DataView) {
-        let offset = 0;
-        const len = bytes.byteLength;
-        while (offset < len) {
-            const row = view.getUint32(offset, true);
-            const col = view.getUint32(offset + 4, true);
-            const isFormula = bytes[offset + 8] !== 0;
-            offset += 9;
-
-            const displayLen = view.getUint32(offset, true);
-            offset += 4;
-            const displayStart = offset;
-            offset += displayLen;
-
-            const gridRow = gridApi?.getRow(row + 1);
-            if (!gridRow) continue;
-            const cell = gridRow[columnIndexToLetter(col)];
-            if (!cell || typeof cell !== "object") continue;
-
-            const display = displayLen
-                ? textDecoder.decode(
-                      bytes.subarray(displayStart, displayStart + displayLen),
-                  )
-                : "";
-
-            if (cell.computedValue !== display) cell.computedValue = display;
-            if (cell.isFormula !== isFormula) cell.isFormula = isFormula;
-        }
     }
 
     // todo: it's gonna be non trivial refactor when introducing named cells
@@ -229,100 +175,21 @@
         return map;
     });
 
-    function cellStyle(row: any, col: any): string {
-        return tableCellStyles.get(`${row.id},${col.id}`) ?? "";
-    }
-
     const INITIAL_ROWS = 1000;
     const INITIAL_COLS = 26;
-    const COL_WIDTH = 90;
-    const ROW_NUMBER_WIDTH = 50;
 
     let rowCount = $state(INITIAL_ROWS);
     let columnCount = $state(INITIAL_COLS);
 
-    function makeRow(i: number, colCount: number): SheetRow {
-        const row: SheetRow = { id: i + 1, rowNumber: i + 1 };
-        for (let j = 0; j < colCount; j++) {
-            row[columnIndexToLetter(j)] = {
-                computedValue: "",
-                isFormula: false,
-            };
-        }
-        return row;
-    }
+    // --- Render component ref ---
 
-    const baseRows: SheetRow[] = $state(
-        Array.from({ length: INITIAL_ROWS }, (_, i) =>
-            makeRow(i, INITIAL_COLS),
-        ),
-    );
-
-    let gridColumns: IColumnConfig[] = $state(
-        (() => {
-            const cols: IColumnConfig[] = [
-                { id: "rowNumber", width: ROW_NUMBER_WIDTH, resize: true },
-            ];
-            for (let i = 0; i < INITIAL_COLS; i++) {
-                const id = columnIndexToLetter(i);
-                cols.push({
-                    id,
-                    header: id,
-                    cell: Cell,
-                    width: COL_WIDTH,
-                    resize: true,
-                });
-            }
-            return cols;
-        })(),
-    );
-
-    let gridRows: SheetRow[] = $state([]);
-
-    function expandRows(newCount: number) {
-        if (newCount <= rowCount) return;
-        for (let i = rowCount; i < newCount; i++) {
-            baseRows.push(makeRow(i, columnCount));
-        }
-        rowCount = newCount;
-    }
-
-    function expandColumns(newCount: number) {
-        if (newCount <= columnCount) return;
-        const newCols: IColumnConfig[] = [];
-        for (let i = columnCount; i < newCount; i++) {
-            const id = columnIndexToLetter(i);
-            newCols.push({
-                id,
-                header: id,
-                cell: Cell,
-                width: COL_WIDTH,
-                resize: true,
-            });
-            for (const row of baseRows) {
-                row[id] = { computedValue: "", isFormula: false };
-            }
-        }
-        gridColumns = [...gridColumns, ...newCols];
-        columnCount = newCount;
-    }
-
-    let addRowsCount = $state(1000);
-    let addColsCount = $state(50);
-    let showAddRows = $state(false);
-    let showAddCols = $state(false);
-
-    function updateVisibleColumns() {
-        const scroller = getScrollContainer();
-        if (!scroller) return;
-        viewportColumnStart = Math.floor(scroller.scrollLeft / COL_WIDTH);
-        viewportColumnEnd = Math.min(
-            Math.ceil((scroller.scrollLeft + scroller.clientWidth) / COL_WIDTH),
-            columnCount - 1,
-        );
-    }
-
+    let render: Render | null = $state(null);
     let gridApi: IApi | null = $state(null);
+    let overlaysEl: HTMLElement | null = $state(null);
+
+    function isOverlayEvent(ev: Event): boolean {
+        return !!overlaysEl?.contains(ev.target as Node);
+    }
 
     // --- selection state ---
 
@@ -491,6 +358,9 @@
         get tables() {
             return tables;
         },
+        get tableCellStyles() {
+            return tableCellStyles;
+        },
         commitEdit,
     });
 
@@ -645,6 +515,10 @@
 
     // --- backend calls ---
 
+    function getCell(id: CellId | null): CellData | null {
+        return render?.getCell(id) ?? null;
+    }
+
     function commitEdit() {
         if (!focusedCell) return;
         const cell = getCell(focusedCell);
@@ -686,6 +560,10 @@
             origMinCol: orig.minC,
             origMaxCol: orig.maxC,
         });
+    }
+
+    function scrollToRow(row: number) {
+        render?.scrollToRow(row);
     }
 
     async function commitUndo() {
@@ -858,14 +736,6 @@
 
     // todo: refactor all hardcoded values (like rowHeight, headerHeight, etc) into constants
 
-    let left = 1; // pin first column (row numbers) to the left
-    let select = false; // disable Grid's built-in selection, we handle it ourselves
-    let filterValues = {};
-    let sizes = {
-        headerHeight: 28,
-        rowHeight: 28,
-    };
-
     function isInBounds(row: number, col: number): boolean {
         return row >= 0 && col >= 0 && row < rowCount && col < columnCount;
     }
@@ -898,36 +768,9 @@
         });
     }
 
-    function getCell(id: CellId | null): CellData | null {
-        if (!id) return null;
-        const ui = toUICell(id);
-        const row = gridApi?.getRow(ui.row);
-        if (!row) return null;
-        const cell = row[ui.column];
-        if (isCellData(cell)) return cell;
-        return null;
-    }
-
-    function init(api: IApi) {
-        api.intercept("open-editor", () => {
-            return false;
-        });
-
-        api.intercept("close-editor", (ev: any) => {
-            return false;
-        });
-
-        api.intercept("focus-cell", (ev: any) => {
-            if (isEditing) return false;
-            if (ev?.row == null || ev?.column == null) return;
-            if (ev.column === "rowNumber") {
-                return false;
-            }
-        });
-
-        api.on("resize-column", () => {
-            requestAnimationFrame(() => repositionOverlays());
-        });
+    function handleGridInit(api: IApi) {
+        gridApi = api;
+        overlaysEl = render?.getOverlaysEl() ?? null;
     }
 
     function handleMouseMove(ev: MouseEvent) {
@@ -1166,8 +1009,7 @@
     }
 
     function handleKeyDown(ev: KeyboardEvent) {
-        // let overlay elements (e.g. editable table title) handle their own keys
-        if (overlaysEl?.contains(ev.target as Node)) return;
+        if (isOverlayEvent(ev)) return;
 
         if (ev.ctrlKey && ev.shiftKey && ev.key === "Z") {
             commitRedo();
@@ -1375,187 +1217,20 @@
     }
 
     function handleKeyUp(ev: KeyboardEvent) {
-        // let overlay elements (e.g. editable table title) handle their own keys
-        if (overlaysEl?.contains(ev.target as Node)) return;
+        if (isOverlayEvent(ev)) return;
 
         if (ev.key === "Shift" && !isEditing) {
             isSelecting = false;
         }
     }
 
-    // --- scroll handling & selection overlays ---
-
-    let sos: SheetObjectsState = $state(null as any);
-    let focusOverlay = $state<FocusOverlay>(null as any);
-    let selectionOverlays: (SelectionOverlay | undefined)[] = $state([]);
-    let fillOriginOverlay = $state<FillOriginOverlay>(null as any);
-    let cloneSourceOverlay = $state<CloneSourceOverlay>(null as any);
-    let refOverlays: RefOverlay[] = $state([]);
-    let tableOverlays: (TableOverlay | undefined)[] = $state([]);
-    let overlayDebounceId: ReturnType<typeof setTimeout> | null = null;
-    let gridWrapperEl: HTMLElement | null = null;
-    let clipWrapperEl: HTMLElement | null = null;
-    let overlaysEl: HTMLElement | null = null;
-    let scrollContainerEl: HTMLElement | null = null;
-
-    /** Scroll the grid so that the given 0-indexed row is visible. */
-    function scrollToRow(row: number) {
-        const el = getScrollContainer();
-        if (!el) return;
-        const top = row * sizes.rowHeight;
-        if (top < el.scrollTop) {
-            el.scrollTop = top;
-        } else if (top + sizes.rowHeight > el.scrollTop + el.clientHeight) {
-            el.scrollTop = top + sizes.rowHeight - el.clientHeight;
-        }
-    }
-
-    /** Scroll the grid so that the given 0-indexed column is visible. */
-    function scrollToColumn(col: number) {
-        const el = getScrollContainer();
-        if (!el) return;
-        const left = col * COL_WIDTH;
-        if (left < el.scrollLeft) {
-            el.scrollLeft = left;
-        } else if (left + COL_WIDTH > el.scrollLeft + el.clientWidth) {
-            el.scrollLeft = left + COL_WIDTH - el.clientWidth;
-        }
-    }
-
-    // get the grid's scroll container element
-    function getScrollContainer(): HTMLElement | null {
-        if (scrollContainerEl) return scrollContainerEl;
-        gridWrapperEl ??= document.querySelector<HTMLElement>(".grid-wrapper");
-        if (!gridWrapperEl) return null;
-        scrollContainerEl =
-            gridWrapperEl.querySelector<HTMLElement>("[style*='overflow']") ??
-            gridWrapperEl;
-        return scrollContainerEl;
-    }
-
-    function moveFocusBackToSpreadsheet() {
-        if (document.activeElement !== gridWrapperEl) gridWrapperEl?.focus();
-    }
-
-    function initOverlays() {
-        sos = createState(clipWrapperEl!, overlaysEl!, gridApi!);
-        repositionOverlays();
-    }
-
-    function handleScroll(ev: Event) {
-        if ((ev.target as HTMLElement).closest(".formula-input")) return;
-        const scroller = ev.target as HTMLElement;
-        syncScroll(sos, scroller.scrollLeft, scroller.scrollTop);
-        updateVisibleColumns();
-        const THRESHOLD = 50;
-        showAddRows =
-            scroller.scrollTop + scroller.clientHeight >=
-            scroller.scrollHeight - THRESHOLD;
-        showAddCols =
-            scroller.scrollLeft + scroller.clientWidth >=
-            scroller.scrollWidth - THRESHOLD;
-        if (overlayDebounceId) clearTimeout(overlayDebounceId);
-        overlayDebounceId = setTimeout(() => {
-            applyHeaderHighlights();
-            overlayDebounceId = null;
-        }, 10);
-        moveFocusBackToSpreadsheet();
-    }
-
-    function applyHeaderHighlights() {
-        const wrapper = document.querySelector(".grid-wrapper");
-        if (!wrapper) return;
-        const highlightBounds = [
-            ...selections,
-            ...(focusedCellBounds ? [focusedCellBounds] : []),
-            ...(isSelecting && activeSelectionBounds
-                ? [activeSelectionBounds]
-                : []),
-        ];
-
-        for (const col of wrapper.querySelectorAll<HTMLElement>(
-            "[data-header-id]",
-        )) {
-            const colIdx = columnLetterToIndex(
-                parseSvarID(col.dataset.headerId!) as string,
-            );
-            col.classList.toggle(
-                "highlight-col",
-                highlightBounds.some(
-                    (bounds) => colIdx >= bounds.minC && colIdx <= bounds.maxC,
-                ),
-            );
-        }
-
-        for (const cell of wrapper.querySelectorAll<HTMLElement>(
-            '.wx-cell[data-col-id=":rowNumber"]',
-        )) {
-            const rowIdx = (parseSvarID(cell.dataset.rowId!) as number) - 1;
-            cell.classList.toggle(
-                "highlight-row",
-                highlightBounds.some(
-                    (bounds) => rowIdx >= bounds.minR && rowIdx <= bounds.maxR,
-                ),
-            );
-        }
-    }
-
-    function repositionOverlays() {
-        if (!gridApi || !sos) return;
-        const scroller = getScrollContainer();
-        reposition(sos, scroller?.scrollLeft ?? 0, scroller?.scrollTop ?? 0);
-        focusOverlay?.reposition();
-        for (const selection of selectionOverlays) selection?.reposition();
-        fillOriginOverlay?.reposition();
-        cloneSourceOverlay?.reposition();
-        for (const ref of refOverlays) ref?.reposition();
-        for (const t of tableOverlays) t?.reposition();
-    }
-
-    // when selection or formula bounds change, reposition overlays and apply header highlight
-    $effect(() => {
-        focusedCellBounds;
-        activeSelectionBounds;
-        activeFocusHasBorder;
-        activeFocusHasBackground;
-        selections;
-        fillOriginalBounds;
-        clonedFormulaBounds;
-        parsedFormulaReferencesHighlights;
-        applyHeaderHighlights();
-        repositionOverlays();
-    });
+    // --- public API (delegated to Render or handled here) ---
 
     export function saveDecorationsToJson(): string {
-        const gridState = gridApi!.getState();
-        const columns: any[] = gridState._columns ?? [];
-
-        const columnWidths: Record<string, number> = {};
-        for (const col of columns) {
-            columnWidths[col.id] = col.width;
-        }
-
-        // todo: row heights
-        const rowHeights: Record<string, number> = {};
-
-        return JSON.stringify({
-            tables,
-            defaultColWidth: COL_WIDTH,
-            defaultRowHeight: sizes.rowHeight,
-            columnWidths,
-            rowHeights,
-            rowCount,
-            columnCount,
-        });
+        return render?.saveDecorationsToJson() ?? "{}";
     }
 
     export function onFileLoad(decorationsJson?: string) {
-        // reset grid data
-        baseRows.length = 0;
-        for (let i = 0; i < INITIAL_ROWS; i++) {
-            baseRows.push(makeRow(i, columnCount));
-        }
-
         // reset selection and editing state
         focusedCell = null;
         hoveredCell = null;
@@ -1571,112 +1246,22 @@
         editorInsertReferenceStart = null;
         editorInsertReferenceEnd = null;
         editorInsertReference = false;
-        gridRows = baseRows.slice(viewportRowStart, viewportRowEnd + 1);
 
-        // scroll to the top
-        const el = getScrollContainer();
-        if (el) el.scrollTop = 0;
-
-        // restore decorations
+        // restore table decorations
         if (decorationsJson) {
             const dec = JSON.parse(decorationsJson);
             if (dec.tables) tables = dec.tables;
-            if (dec.rowCount && dec.rowCount > rowCount)
-                expandRows(dec.rowCount);
-            if (dec.columnCount && dec.columnCount > columnCount)
-                expandColumns(dec.columnCount);
         } else {
             tables = [];
         }
 
-        // reset all column widths to default, then apply saved widths
-        const savedWidths = decorationsJson
-            ? JSON.parse(decorationsJson).columnWidths
-            : undefined;
-        if (gridApi) {
-            for (const col of gridApi.getState()._columns ?? []) {
-                const defaultW =
-                    col.id === "rowNumber" ? ROW_NUMBER_WIDTH : COL_WIDTH;
-                const targetW = savedWidths?.[col.id!] ?? defaultW;
-                if (col.width !== targetW) {
-                    gridApi.exec("resize-column", {
-                        id: col.id!,
-                        width: targetW,
-                    });
-                }
-            }
-        }
-
-        updateVisibleColumns();
-        restartPolling();
+        // delegate data/grid/polling reset to Render
+        render?.onFileLoad(decorationsJson);
     }
 
-    let pollInterval: ReturnType<typeof setInterval> | undefined;
-
-    function setViewportRows(start: number, end: number) {
-        gridRows = baseRows.slice(start, end + 1);
-        viewportRowStart = start;
-        viewportRowEnd = end;
-    }
-
-    function pollViewportOnce() {
-        invoke<ArrayBuffer>("get_cells_in_viewport", EMPTY_BODY, {
-            headers: {
-                "row-start": String(viewportRowStart),
-                "row-end": String(viewportRowEnd),
-                "col-start": String(viewportColumnStart),
-                "col-end": String(viewportColumnEnd),
-            },
-        }).then((buf) => {
-            // "buf" length is 0 when the cells in the current viewport did not change,
-            // in which case we do nothing
-            if (buf.byteLength > 0) {
-                decodeCells(new Uint8Array(buf), new DataView(buf));
-            }
-        });
-
-        // keep editor value fresh for focused cell (skip while user is editing)
-        if (focusedCell && !isEditing) {
-            invoke<ArrayBuffer>("get_editor_value_for_cell", {
-                cellId: focusedCell,
-            }).then((response) => {
-                if (!isEditing) {
-                    editorInput = decodeEditorValue(new Uint8Array(response));
-                }
-            });
-        }
-
-        if (focusedCell && !isEditingCellName) {
-            invoke<ArrayBuffer>("get_name_for_cell", {
-                cellId: focusedCell,
-            }).then((response) => {
-                if (!isEditingCellName) {
-                    cellName = new TextDecoder().decode(
-                        new Uint8Array(response),
-                    );
-                }
-            });
-        }
-    }
-
-    function restartPolling() {
-        if (pollInterval !== undefined) clearInterval(pollInterval);
-
-        invoke("init_viewport").then(() => {
-            requestAnimationFrame(() => {
-                updateVisibleColumns();
-                pollViewportOnce();
-
-                pollInterval = setInterval(pollViewportOnce, 16);
-            });
-        });
-    }
+    // --- Tauri event listeners ---
 
     onMount(() => {
-        initOverlays();
-        updateVisibleColumns();
-        restartPolling();
-
         const unlistenEnabled = listen<number>(
             "enable-table-projection",
             (event) => {
@@ -1708,34 +1293,22 @@
         );
 
         return () => {
-            if (pollInterval !== undefined) clearInterval(pollInterval);
             unlistenEnabled.then((fn) => fn());
             unlistenDisabled.then((fn) => fn());
             unlistenHiddenRows.then((fn) => fn());
         };
     });
-
-    function handleRequestData(
-        ev: { row: { start: number; end: number } } & { [key: string]: any },
-    ): void {
-        const {
-            row: { start, end },
-        } = ev;
-        setViewportRows(start, end);
-    }
 </script>
 
 <SheetFormulaPanel />
 
 <div
     class="grid-wrapper"
-    bind:this={gridWrapperEl}
     onmousemove={handleMouseMove}
     onmouseup={handleMouseUp}
     onmousedown={handleMouseDown}
     onkeydowncapture={handleKeyDown}
     onkeyupcapture={handleKeyUp}
-    onscrollcapture={handleScroll}
     tabindex="-1"
     role="grid"
 >
@@ -1745,114 +1318,25 @@
         at="point"
         resolver={contextMenuResolver}
     >
-        <Grid
-            bind:this={gridApi as any}
-            {init}
-            data={gridRows}
-            columns={gridColumns}
-            dynamic={{ rowCount, columnCount }}
-            onrequestdata={handleRequestData}
-            split={{ left }}
-            {sizes}
-            {select}
-            {filterValues}
-            {cellStyle}
+        <Render
+            bind:this={render}
+            {isFilling}
+            {fillOriginalBounds}
+            {clonedFormulaBounds}
+            {parsedFormulaReferencesHighlights}
+            {activeRefIndex}
+            {selections}
+            {activeSelectionBounds}
+            {activeFocusHasBorder}
+            {activeFocusHasBackground}
+            {focusedCellBounds}
+            {isSelecting}
+            bind:rowCount
+            bind:columnCount
+            onfillstart={handleFillStart}
+            oninit={handleGridInit}
         />
     </ContextMenu>
-    {#if showAddRows}
-        <div class="add-rows-bar">
-            <button
-                onclick={() => {
-                    const count = parseInt(String(addRowsCount), 10);
-                    if (!count || count < 1) return;
-                    const newRowCount = rowCount + count;
-                    expandRows(newRowCount);
-                    requestAnimationFrame(() => {
-                        scrollToRow(newRowCount);
-                    });
-                }}>Add</button
-            >
-            <input
-                inputmode="numeric"
-                pattern="[0-9]*"
-                bind:value={addRowsCount}
-                min="1"
-            />
-            <span>rows</span>
-        </div>
-    {/if}
-    {#if showAddCols}
-        <div class="add-cols-bar">
-            <button
-                onclick={() => {
-                    const count = parseInt(String(addColsCount), 10);
-                    if (!count || count < 1) return;
-                    const newColumnCount = columnCount + count;
-                    expandColumns(newColumnCount);
-                    requestAnimationFrame(() => {
-                        scrollToColumn(newColumnCount);
-                    });
-                }}>Add</button
-            >
-            <input
-                inputmode="numeric"
-                pattern="[0-9]*"
-                bind:value={addColsCount}
-                min="1"
-            />
-            <span>columns</span>
-        </div>
-    {/if}
-    <div class="selection-overlays-clip" bind:this={clipWrapperEl}>
-        <div class="selection-overlays" bind:this={overlaysEl}>
-            {#if sos}
-                {#each tables as table, i}
-                    <TableOverlay bind:this={tableOverlays[i]} {sos} {table} />
-                {/each}
-                {#each selections as bounds, i}
-                    <SelectionOverlay
-                        bind:this={selectionOverlays[i]}
-                        {sos}
-                        {bounds}
-                        visible={true}
-                    />
-                {/each}
-                <FillOriginOverlay
-                    bind:this={fillOriginOverlay}
-                    {sos}
-                    bounds={fillOriginalBounds}
-                    visible={isFilling && !!fillOriginalBounds}
-                />
-                <CloneSourceOverlay
-                    bind:this={cloneSourceOverlay}
-                    {sos}
-                    bounds={clonedFormulaBounds}
-                    visible={!!clonedFormulaBounds}
-                />
-                {#each parsedFormulaReferencesHighlights ?? [] as ref, i}
-                    <RefOverlay
-                        bind:this={refOverlays[i]}
-                        {sos}
-                        bounds={ref.bounds}
-                        color={REF_COLORS[ref.colorIndex]}
-                        active={i === activeRefIndex}
-                    />
-                {/each}
-                <FocusOverlay
-                    bind:this={focusOverlay}
-                    {sos}
-                    bounds={activeSelectionBounds}
-                    visible={!!activeSelectionBounds}
-                    {isFilling}
-                    {isEditing}
-                    {editorInputWidth}
-                    showBorder={activeFocusHasBorder}
-                    showBackground={activeFocusHasBackground}
-                    onfillstart={handleFillStart}
-                />
-            {/if}
-        </div>
-    </div>
 </div>
 
 <style>
@@ -1864,104 +1348,6 @@
         position: relative;
         overflow: hidden;
         outline: none;
-    }
-
-    .grid-wrapper > :global(.wx-grid) {
-        width: 100%;
-        height: 100%;
-    }
-
-    .add-rows-bar,
-    .add-cols-bar {
-        position: absolute;
-        z-index: 6;
-        display: flex;
-        align-items: center;
-        gap: 0.5em;
-        padding: 0.75em 1.5em;
-        font-size: 0.8rem;
-        background: var(--wx-table-header-background);
-        border-radius: 0.4em;
-    }
-
-    .add-rows-bar button,
-    .add-cols-bar button,
-    .add-rows-bar input,
-    .add-cols-bar input {
-        all: unset;
-        font: inherit;
-        color: inherit;
-        padding: 0.35em 0.6em;
-        border-radius: 0.25em;
-        background: rgba(255, 255, 255, 0.07);
-    }
-
-    .add-rows-bar button,
-    .add-cols-bar button {
-        cursor: pointer;
-    }
-
-    .add-rows-bar button:hover,
-    .add-cols-bar button:hover {
-        background: rgba(255, 255, 255, 0.13);
-    }
-
-    .add-rows-bar input,
-    .add-cols-bar input {
-        width: 4em;
-        text-align: center;
-    }
-
-    .add-rows-bar {
-        bottom: 0.8em;
-        left: 50%;
-        transform: translateX(-50%);
-        animation: fade-in-up 150ms ease-out;
-    }
-
-    .add-cols-bar {
-        right: 0.8em;
-        top: 50%;
-        transform: translateY(-50%);
-        animation: fade-in-left 150ms ease-out;
-    }
-
-    @keyframes fade-in-up {
-        from {
-            opacity: 0;
-            transform: translateX(-50%) translateY(6px);
-        }
-        to {
-            opacity: 1;
-            transform: translateX(-50%) translateY(0);
-        }
-    }
-
-    @keyframes fade-in-left {
-        from {
-            opacity: 0;
-            transform: translateY(-50%) translateX(6px);
-        }
-        to {
-            opacity: 1;
-            transform: translateY(-50%) translateX(0);
-        }
-    }
-
-    /* Static clip wrapper - prevents overlays from rendering over headers/row numbers */
-    .selection-overlays-clip {
-        position: absolute;
-        inset: 0;
-        pointer-events: none;
-        z-index: 5;
-    }
-
-    /* Container for all selection overlays */
-    .selection-overlays {
-        position: absolute;
-        inset: 0;
-        pointer-events: none;
-        will-change: transform;
     }
 
     :global(.wx-cell[data-col-id=":rowNumber"]) {
