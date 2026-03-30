@@ -5,6 +5,7 @@
     import { showError } from "$lib/notice";
     import {
         cellRangeToPixels,
+        toTranslate3d,
         type CellRange,
         type SheetObjectsState,
         type PixelRect,
@@ -111,8 +112,7 @@
 {#if titleRect}
     <div
         class="table-title"
-        style:left="{titleRect.left}px"
-        style:top="{titleRect.top}px"
+        style:transform={toTranslate3d(titleRect)}
         style:width="{titleRect.width}px"
         style:height="{titleRect.height}px"
     >
@@ -145,8 +145,7 @@
 {#if borderRect}
     <div
         class="table-border"
-        style:left="{borderRect.left}px"
-        style:top="{borderRect.top}px"
+        style:transform={toTranslate3d(borderRect)}
         style:width="{borderRect.width}px"
         style:height="{borderRect.height}px"
     ></div>
@@ -154,8 +153,7 @@
         <div
             class="table-border has-projection"
             transition:fade={{ duration: 150 }}
-            style:left="{borderRect.left}px"
-            style:top="{borderRect.top}px"
+            style:transform={toTranslate3d(borderRect)}
             style:width="{borderRect.width}px"
             style:height="{borderRect.height}px"
         ></div>
@@ -164,8 +162,7 @@
 {#if hiddenRect}
     <div
         class="hidden-rows-overlay"
-        style:left="{hiddenRect.left}px"
-        style:top="{hiddenRect.top}px"
+        style:transform={toTranslate3d(hiddenRect)}
         style:width="{hiddenRect.width}px"
         style:height="{hiddenRect.height}px"
     >

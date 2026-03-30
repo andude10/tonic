@@ -403,6 +403,21 @@
         };
     }
 
+    function selectRange(anchor: CellId, bounds: CellRange) {
+        if (!isInBounds(anchor.row, anchor.col)) return;
+        if (isEditing) commitEdit();
+        isEditing = false;
+        focusedCell = { ...anchor };
+        hoveredCell = { ...anchor };
+        selections = [bounds];
+        isSelecting = false;
+        appendSelectionOnMouseUp = false;
+        isSingleCellSelectionOnMouseUp = false;
+        isFilling = false;
+        fillOriginalBounds = null;
+        editorInsertReference = false;
+    }
+
     function isCellInRange(cell: CellId, bounds: CellRange): boolean {
         return (
             cell.row >= bounds.minR &&
@@ -713,9 +728,8 @@
                     ]);
                 }
             }
-            focusedCell = { row: startRow, col: startCol };
-            hoveredCell = { row: startRow, col: startCol };
-            selections = [
+            selectRange(
+                { row: startRow, col: startCol },
                 {
                     minR: startRow,
                     maxR: Math.min(
@@ -725,7 +739,7 @@
                     minC: startCol,
                     maxC: Math.min(startCol + clipWidth - 1, columnCount - 1),
                 },
-            ];
+            );
         }
 
         if (!pairs.length) return;
@@ -991,19 +1005,54 @@
         editorInsertReference = false;
 
         const target = ev.target as HTMLElement;
-        const clickedCell = target.closest<HTMLElement>(".wx-cell");
+        const clickedHeader = target.closest<HTMLElement>(
+            "[role='columnheader']",
+        );
+        if (clickedHeader) {
+            const lastRow = rowCount - 1;
+            const lastCol = columnCount - 1;
+            const headerId = parseSvarID(clickedHeader.dataset.headerId);
 
+            // if clicked top-left header, select whole sheet
+            if (headerId === "rowNumber" && lastRow >= 0 && lastCol >= 0) {
+                selectRange(
+                    { row: 0, col: 0 },
+                    { minR: 0, maxR: lastRow, minC: 0, maxC: lastCol },
+                );
+                return;
+            }
+
+            // otherwise, select whole column
+            if (typeof headerId === "string") {
+                const col = columnLetterToIndex(headerId);
+                if (lastRow >= 0) {
+                    selectRange(
+                        { row: 0, col },
+                        { minR: 0, maxR: lastRow, minC: col, maxC: col },
+                    );
+                }
+                return;
+            }
+        }
+
+        const clickedCell = target.closest<HTMLElement>(".wx-cell");
         if (!clickedCell) {
             if (hoveredCell) hoveredCell = null;
             return;
         }
 
-        const { colId } = clickedCell.dataset;
+        const { rowId, colId } = clickedCell.dataset;
 
-        // if clicked on headers, clear focus
-        const isHeader = target.closest("[role='columnheader']");
-        if ((colId && parseSvarID(colId) === "rowNumber") || isHeader) {
-            clearFocus();
+        // if clicked row header, select whole row
+        if (colId && parseSvarID(colId) === "rowNumber") {
+            const row = Number(rowId) - 1;
+            const lastCol = columnCount - 1;
+            if (lastCol >= 0) {
+                selectRange(
+                    { row, col: 0 },
+                    { minR: row, maxR: row, minC: 0, maxC: lastCol },
+                );
+            }
             return;
         }
     }
@@ -1018,6 +1067,28 @@
 
         if (ev.ctrlKey && !ev.shiftKey && ev.key === "z") {
             commitUndo();
+            return;
+        }
+
+        // Ctrl+A: select whole sheet
+        if (
+            ev.ctrlKey &&
+            !ev.altKey &&
+            !isEditing &&
+            ev.key.toLowerCase() === "a"
+        ) {
+            ev.preventDefault();
+            if (rowCount > 0 && columnCount > 0) {
+                selectRange(
+                    { row: 0, col: 0 },
+                    {
+                        minR: 0,
+                        maxR: rowCount - 1,
+                        minC: 0,
+                        maxC: columnCount - 1,
+                    },
+                );
+            }
             return;
         }
 

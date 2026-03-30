@@ -1,6 +1,7 @@
 <script lang="ts">
     import {
         cellRangeToPixels,
+        toTranslate3d,
         type CellRange,
         type SheetObjectsState,
         type PixelRect,
@@ -29,8 +30,7 @@
     <div
         class="ref-overlay"
         class:active
-        style:left="{rect.left}px"
-        style:top="{rect.top}px"
+        style:transform={toTranslate3d(rect)}
         style:width="{rect.width}px"
         style:height="{rect.height}px"
         style:color
@@ -42,11 +42,10 @@
         position: absolute;
         border: 2px solid currentColor;
         border-radius: 4px;
-        will-change: left, top, width, height;
+        will-change: transform, width, height;
         pointer-events: none;
         --transition-base:
-            left 30ms cubic-bezier(0, 0, 0.2, 1),
-            top 30ms cubic-bezier(0, 0, 0.2, 1),
+            transform 30ms cubic-bezier(0, 0, 0.2, 1),
             width 30ms cubic-bezier(0, 0, 0.2, 1),
             height 30ms cubic-bezier(0, 0, 0.2, 1);
         transition:
@@ -66,7 +65,6 @@
     .ref-overlay.active {
         background-color: color-mix(in srgb, currentColor 6%, transparent);
         border-color: transparent;
-        position: relative;
     }
 
     .ref-overlay.active::before {

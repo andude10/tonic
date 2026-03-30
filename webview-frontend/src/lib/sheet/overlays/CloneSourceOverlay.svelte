@@ -1,6 +1,7 @@
 <script lang="ts">
     import {
         cellRangeToPixels,
+        toTranslate3d,
         type CellRange,
         type SheetObjectsState,
         type PixelRect,
@@ -28,8 +29,7 @@
 {#if show && rect}
     <div
         class="clone-source-overlay"
-        style:left="{rect.left}px"
-        style:top="{rect.top}px"
+        style:transform={toTranslate3d(rect)}
         style:width="{rect.width}px"
         style:height="{rect.height}px"
     ></div>
@@ -40,7 +40,7 @@
         position: absolute;
         border: 2px dashed var(--wx-color-primary);
         border-radius: 4px;
-        will-change: left, top, width, height;
+        will-change: transform, width, height;
         pointer-events: none;
     }
 </style>

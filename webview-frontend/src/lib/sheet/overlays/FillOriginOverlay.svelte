@@ -1,6 +1,7 @@
 <script lang="ts">
     import {
         cellRangeToPixels,
+        toTranslate3d,
         type CellRange,
         type SheetObjectsState,
         type PixelRect,
@@ -28,8 +29,7 @@
 {#if show}
     <div
         class="fill-origin-overlay"
-        style:left="{rect!.left}px"
-        style:top="{rect!.top}px"
+        style:transform={toTranslate3d(rect!)}
         style:width="{rect!.width}px"
         style:height="{rect!.height}px"
     ></div>

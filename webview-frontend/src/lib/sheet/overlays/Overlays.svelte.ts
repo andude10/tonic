@@ -14,6 +14,10 @@ export type PixelRect = {
     height: number;
 };
 
+export function toTranslate3d(rect: PixelRect): string {
+    return `translate3d(${Math.round(rect.left)}px, ${Math.round(rect.top)}px, 0)`;
+}
+
 export type SheetObjectsState = {
     container: HTMLElement;
     clipWrapper: HTMLElement;
@@ -53,7 +57,7 @@ export function syncScroll(
 ): void {
     const dx = state.baseScrollLeft - scrollLeft;
     const dy = state.baseScrollTop - scrollTop;
-    state.container.style.transform = `translate(${dx}px, ${dy}px)`;
+    state.container.style.transform = `translate3d(${dx}px, ${dy}px, 0)`;
 }
 
 /** Reset scroll baseline and update clip mask. */
@@ -64,7 +68,7 @@ export function reposition(
 ): void {
     state.baseScrollLeft = scrollLeft;
     state.baseScrollTop = scrollTop;
-    state.container.style.transform = "translate(0px, 0px)";
+    state.container.style.transform = "translate3d(0px, 0px, 0)";
 
     const gridState = state.gridApi.getState();
     const columns: any[] = gridState._columns ?? [];

@@ -1,6 +1,7 @@
 <script lang="ts">
     import {
         cellRangeToPixels,
+        toTranslate3d,
         type CellRange,
         type SheetObjectsState,
         type PixelRect,
@@ -42,8 +43,7 @@
 {#if show}
     <div
         class="focus-overlay"
-        style:left="{rect!.left}px"
-        style:top="{rect!.top}px"
+        style:transform={toTranslate3d(rect!)}
         style:width="{Math.max(
             rect!.width,
             isEditing ? editorInputWidth : 0,
@@ -75,11 +75,10 @@
         border-radius: 4px;
         background: transparent;
         box-sizing: border-box;
-        will-change: left, top, width, height;
+        will-change: transform, width, height;
         pointer-events: none;
         --transition-base:
-            left 30ms cubic-bezier(0, 0, 0.2, 1),
-            top 30ms cubic-bezier(0, 0, 0.2, 1),
+            transform 30ms cubic-bezier(0, 0, 0.2, 1),
             width 30ms cubic-bezier(0, 0, 0.2, 1),
             height 30ms cubic-bezier(0, 0, 0.2, 1);
         transition: var(--transition-base);

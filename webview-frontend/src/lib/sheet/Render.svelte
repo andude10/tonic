@@ -765,6 +765,5 @@
         inset: 0;
         pointer-events: none;
         will-change: transform;
-        contain: layout paint;
     }
 </style>
