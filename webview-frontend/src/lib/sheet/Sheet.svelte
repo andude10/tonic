@@ -31,19 +31,145 @@
     );
     if (helpers) initNotice(helpers.showNotice);
 
-    const contextMenuOptions = [
-        { id: "copy", text: "Copy", icon: "wxi wxi-content-copy" },
-        {
-            id: "copy-values",
-            text: "Copy Values",
-            icon: "wxi wxi-content-copy",
-        },
-        { id: "paste", text: "Paste", icon: "wxi wxi-content-paste" },
-        { id: "create-table", text: "Create Table" },
-    ];
+    type ContextMenuTarget =
+        | { kind: "cell"; cell: CellId }
+        | { kind: "row"; row: number }
+        | { kind: "column"; col: number };
 
-    function handleContextMenuClick(ev: IMenuOptionClick) {
+    let contextMenuTarget: ContextMenuTarget | null = $state(null);
+
+    let contextMenuOptions = $derived.by(() => {
+        if (contextMenuTarget?.kind === "column") {
+            return [
+                { id: "insert-column-left", text: "Insert 1 column left" },
+                { id: "insert-column-right", text: "Insert 1 column right" },
+            ];
+        }
+
+        if (contextMenuTarget?.kind === "row") {
+            return [
+                { id: "insert-row-above", text: "Insert 1 row above" },
+                { id: "insert-row-below", text: "Insert 1 row below" },
+            ];
+        }
+
+        return [
+            { id: "copy", text: "Copy", icon: "wxi wxi-content-copy" },
+            {
+                id: "copy-values",
+                text: "Copy Values",
+                icon: "wxi wxi-content-copy",
+            },
+            { id: "paste", text: "Paste", icon: "wxi wxi-content-paste" },
+            { id: "create-table", text: "Create Table" },
+        ];
+    });
+
+    async function handleContextMenuClick(ev: IMenuOptionClick) {
         if (!ev.option) return;
+
+        // todo: reduce code duplication below
+
+        if (
+            ev.option.id === "insert-column-left" &&
+            contextMenuTarget?.kind === "column"
+        ) {
+            const col = contextMenuTarget.col;
+            invoke("insert_column", { col, left: true })
+                .then(() => {
+                    columnCount += 1;
+                    if (rowCount > 0) {
+                        selectRange(
+                            { row: 0, col },
+                            {
+                                minR: 0,
+                                maxR: rowCount - 1,
+                                minC: col,
+                                maxC: col,
+                            },
+                        );
+                    }
+                    requestAnimationFrame(() => render?.repositionOverlays());
+                })
+                .catch((e) => showError(String(e)));
+            return;
+        }
+
+        if (
+            ev.option.id === "insert-column-right" &&
+            contextMenuTarget?.kind === "column"
+        ) {
+            const col = contextMenuTarget.col + 1;
+            invoke("insert_column", { col: contextMenuTarget.col, left: false })
+                .then(() => {
+                    columnCount += 1;
+                    if (rowCount > 0) {
+                        selectRange(
+                            { row: 0, col },
+                            {
+                                minR: 0,
+                                maxR: rowCount - 1,
+                                minC: col,
+                                maxC: col,
+                            },
+                        );
+                    }
+                    requestAnimationFrame(() => render?.repositionOverlays());
+                })
+                .catch((e) => showError(String(e)));
+            return;
+        }
+
+        if (
+            ev.option.id === "insert-row-above" &&
+            contextMenuTarget?.kind === "row"
+        ) {
+            const row = contextMenuTarget.row;
+            invoke("insert_row", { row: contextMenuTarget.row, below: false })
+                .then(() => {
+                    rowCount += 1;
+                    if (columnCount > 0) {
+                        selectRange(
+                            { row, col: 0 },
+                            {
+                                minR: row,
+                                maxR: row,
+                                minC: 0,
+                                maxC: columnCount - 1,
+                            },
+                        );
+                    }
+                    requestAnimationFrame(() => render?.repositionOverlays());
+                })
+                .catch((e) => showError(String(e)));
+            return;
+        }
+
+        if (
+            ev.option.id === "insert-row-below" &&
+            contextMenuTarget?.kind === "row"
+        ) {
+            const row = contextMenuTarget.row + 1;
+            invoke("insert_row", { row: contextMenuTarget.row, below: true })
+                .then(() => {
+                    rowCount += 1;
+                    if (columnCount > 0) {
+                        selectRange(
+                            { row, col: 0 },
+                            {
+                                minR: row,
+                                maxR: row,
+                                minC: 0,
+                                maxC: columnCount - 1,
+                            },
+                        );
+                    }
+                    requestAnimationFrame(() => render?.repositionOverlays());
+                })
+                .catch((e) => showError(String(e)));
+            return;
+        }
+
         if (ev.option.id === "copy") copySelection();
         else if (ev.option.id === "copy-values") copySelectionValues();
         else if (ev.option.id === "paste") pasteFromClipboard();
@@ -90,15 +216,57 @@
 
     function contextMenuResolver(_: any, event: MouseEvent) {
         // before the grid's context menu opens, ...
+        const target = event.target as HTMLElement;
+        contextMenuTarget = null;
 
-        const el = (event.target as HTMLElement).closest<HTMLElement>(
-            ".wx-cell",
+        // if right-clicked column header, select full column and show insert actions
+        const clickedHeader = target.closest<HTMLElement>(
+            "[role='columnheader']",
         );
+        if (clickedHeader) {
+            const headerId = parseSvarID(clickedHeader.dataset.headerId);
+            if (typeof headerId !== "string" || headerId === "rowNumber") {
+                return null;
+            }
+
+            const col = columnLetterToIndex(headerId);
+            if (rowCount > 0) {
+                selectRange(
+                    { row: 0, col },
+                    { minR: 0, maxR: rowCount - 1, minC: col, maxC: col },
+                );
+            }
+            contextMenuTarget = { kind: "column", col };
+            return contextMenuTarget;
+        }
+
+        const el = target.closest<HTMLElement>(".wx-cell");
         if (!el) return null;
 
-        // ... ignore if clicked outside of grid (row or column headers)
         const { rowId, colId } = el.dataset;
-        if (!rowId || !colId || parseSvarID(colId) === "rowNumber") return null;
+        if (!rowId || !colId) return null;
+
+        // if right-clicked row header, select full row and show insert actions
+        if (parseSvarID(colId) === "rowNumber") {
+            const parsedRow = parseSvarID(rowId);
+            if (typeof parsedRow !== "number") return null;
+
+            const row = parsedRow - 1;
+            if (columnCount > 0) {
+                selectRange(
+                    { row, col: 0 },
+                    {
+                        minR: row,
+                        maxR: row,
+                        minC: 0,
+                        maxC: columnCount - 1,
+                    },
+                );
+            }
+            contextMenuTarget = { kind: "row", row };
+            return contextMenuTarget;
+        }
+
         const clicked = domToCellId(rowId, colId);
 
         // if right-clicked cell is outside the current selection, move focus there
@@ -112,7 +280,9 @@
             hoveredCell = clicked;
             selections = [];
         }
-        return clicked;
+
+        contextMenuTarget = { kind: "cell", cell: clicked };
+        return contextMenuTarget;
     }
 
     // -- backend (tauri) communication setup --

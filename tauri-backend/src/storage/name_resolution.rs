@@ -74,6 +74,24 @@ impl SpreadsheetNames {
         self.cell_names_lookup.insert(*id, name.to_string());
         Some(())
     }
+
+    // move existing cell name from source cell to dest cell
+    pub fn move_cell_name(&mut self, source: &AbsoluteCellId, dest: &AbsoluteCellId) {
+        if source == dest {
+            return;
+        }
+
+        let Some(name) = self.cell_names_lookup.remove(source) else {
+            return;
+        };
+
+        if let Some(old_name) = self.cell_names_lookup.remove(dest) {
+            self.cell_names.remove(&old_name);
+        }
+
+        self.cell_names.insert(name.clone(), *dest);
+        self.cell_names_lookup.insert(*dest, name);
+    }
 }
 
 /// Convert 0-indexed column to letter(s): 0->A, 25->Z, 26->AA

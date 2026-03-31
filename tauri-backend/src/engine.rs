@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 
 use rust_decimal::Decimal;
@@ -10,8 +11,8 @@ use crate::file_api;
 use crate::parser::{lex_formula, parse_formula, FormulaState};
 use crate::storage::grid::{Cell, CellValue, GridCellId};
 use crate::storage::types::{
-    AbsoluteCellId, AtomType, Expr, ExprAtom, Formula, FormulaId, ProjectionFilterOption,
-    Reference, SheetId, Sheets, Spreadsheet,
+    AbsoluteCellId, AtomType, CellRange, Coordinate, Expr, ExprAtom, Formula, FormulaId,
+    ProjectionFilterOption, Reference, SheetId, Sheets, Spreadsheet,
 };
 
 /// A single cell mutation: (cell_id, old_value, new_value).
@@ -119,6 +120,8 @@ impl Engine {
 
         old_cell
     }
+
+    // todo: simplify?
 
     fn record_cell_change(&mut self, id: AbsoluteCellId, new_cell: Option<Cell>) {
         let old_cell = self.set_cell(&id, new_cell.clone());
@@ -446,6 +449,228 @@ impl Engine {
 
             proj.filter_options_per_column[col_idx] = old_opts;
         }
+    }
+
+    pub fn insert_column_or_row(
+        &mut self,
+        sheet_id: u32,
+        inserting_row: bool,
+        index: u32,
+        include_index: bool,
+    ) {
+        let collect_time = std::time::Instant::now();
+        let shift_start = if include_index {
+            index
+        } else {
+            index.saturating_add(1)
+        };
+
+        // range of addresses that are shifted by insertion
+        let shift_range = if inserting_row {
+            CellRange::new(sheet_id, index, 0, u32::MAX, u32::MAX)
+        } else {
+            CellRange::new(sheet_id, 0, index, u32::MAX, u32::MAX)
+        };
+
+        // affected = direct dependants of shifted range + cells inside shifted range
+        let mut affected_cells = self
+            .spreadsheet
+            .dependency_graph
+            .direct_dependants_for_range(shift_range);
+        let mut seen_cells: HashSet<AbsoluteCellId> = affected_cells.iter().copied().collect();
+        // todo: remove check over whole grid?
+        self.spreadsheet.sheets[sheet_id as usize].for_each_cell(|cell_id, _| {
+            if cell_id.row < shift_range.start_row
+                || cell_id.row > shift_range.end_row
+                || cell_id.col < shift_range.start_col
+                || cell_id.col > shift_range.end_col
+            {
+                return;
+            }
+
+            let id = AbsoluteCellId {
+                sheet_id,
+                row: cell_id.row,
+                col: cell_id.col,
+            };
+            if seen_cells.insert(id) {
+                affected_cells.push(id);
+            }
+        });
+
+        let dependants_duration = collect_time.elapsed();
+        let formula_time = std::time::Instant::now();
+        let mut replaced_formulas: HashMap<FormulaId, FormulaId> = HashMap::new();
+
+        for dependant_id in affected_cells {
+            let Some(dependant) = self.spreadsheet.get_cell(&dependant_id).cloned() else {
+                continue;
+            };
+            let Some(formula_id) = dependant.defined_by_formula else {
+                continue;
+            };
+
+            let dependant_with_shifted_references;
+
+            // if already replaced this formula, then just insert replacement formula's id
+            if let Some(replacement_id) = replaced_formulas.get(&formula_id) {
+                dependant_with_shifted_references = Cell {
+                    defined_by_formula: Some(*replacement_id),
+                    val: dependant.val.clone(),
+                    pending_dependencies: 0,
+                };
+            } else {
+                // otherwise, create new formula with shifted AST (add 1 to the column or row depending on inserting_row)
+                let mut formula = self
+                    .spreadsheet
+                    .formulas
+                    .get(formula_id)
+                    .expect("formula_id to exist")
+                    .clone();
+
+                for expr in formula.ast.iter_mut() {
+                    let Expr::Atom(ExprAtom::Reference(reference)) = expr else {
+                        continue;
+                    };
+                    if reference.to_cell_range(&dependant_id).sheet_id != sheet_id {
+                        continue;
+                    }
+
+                    // keep absolute and relative coordinates consistent after insert
+                    let shift = |coord: &Coordinate, source_base: u32| {
+                        let source_abs = coord.to_index(source_base);
+                        let shifted_abs = if source_abs >= shift_start {
+                            source_abs.saturating_add(1)
+                        } else {
+                            source_abs
+                        };
+                        let shifted_base = if source_base >= shift_start {
+                            source_base.saturating_add(1)
+                        } else {
+                            source_base
+                        };
+
+                        match coord {
+                            Coordinate::Absolute(_) => Coordinate::Absolute(shifted_abs),
+                            Coordinate::Relative(_) => {
+                                let delta = shifted_abs as i64 - shifted_base as i64;
+                                Coordinate::Relative(
+                                    delta.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+                                )
+                            }
+                        }
+                    };
+
+                    *reference = match reference {
+                        Reference::Single { sheet_id, row, col } => {
+                            if inserting_row {
+                                Reference::Single {
+                                    sheet_id: *sheet_id,
+                                    row: shift(row, dependant_id.row),
+                                    col: *col,
+                                }
+                            } else {
+                                Reference::Single {
+                                    sheet_id: *sheet_id,
+                                    row: *row,
+                                    col: shift(col, dependant_id.col),
+                                }
+                            }
+                        }
+                        Reference::Range {
+                            sheet_id,
+                            start_row,
+                            start_col,
+                            end_row,
+                            end_col,
+                        } => {
+                            if inserting_row {
+                                Reference::Range {
+                                    sheet_id: *sheet_id,
+                                    start_row: shift(start_row, dependant_id.row),
+                                    start_col: *start_col,
+                                    end_row: shift(end_row, dependant_id.row),
+                                    end_col: *end_col,
+                                }
+                            } else {
+                                Reference::Range {
+                                    sheet_id: *sheet_id,
+                                    start_row: *start_row,
+                                    start_col: shift(start_col, dependant_id.col),
+                                    end_row: *end_row,
+                                    end_col: shift(end_col, dependant_id.col),
+                                }
+                            }
+                        }
+                    };
+                }
+
+                let replacement_id = self.spreadsheet.formulas.insert(formula);
+                replaced_formulas.insert(formula_id, replacement_id);
+                dependant_with_shifted_references = Cell {
+                    defined_by_formula: Some(replacement_id),
+                    val: dependant.val.clone(),
+                    pending_dependencies: 0,
+                };
+            }
+
+            self.set_cell(&dependant_id, Some(dependant_with_shifted_references));
+        }
+        let formula_duration = formula_time.elapsed();
+
+        let bounds_time = std::time::Instant::now();
+        let max_row = self.spreadsheet.sheets[sheet_id as usize].find_biggest_row();
+        let max_col = self.spreadsheet.sheets[sheet_id as usize].find_biggest_column();
+        let bounds_duration = bounds_time.elapsed();
+
+        let move_time = std::time::Instant::now();
+        if inserting_row {
+            // move cells from bottom to top, so each destination is free when we write into it
+            for row in (shift_start..=max_row).rev() {
+                for col in 0..=max_col {
+                    let source_id = AbsoluteCellId { sheet_id, row, col };
+                    let dest_id = AbsoluteCellId {
+                        sheet_id,
+                        row: row + 1,
+                        col,
+                    };
+                    let Some(cell) = self.spreadsheet.get_cell(&source_id).cloned() else {
+                        continue;
+                    };
+
+                    self.set_cell(&dest_id, Some(cell));
+                    self.set_cell(&source_id, None);
+                    self.spreadsheet.names.move_cell_name(&source_id, &dest_id);
+                }
+            }
+        } else {
+            // move cells from right to left, so each destination is free when we write into it
+            for col in (shift_start..=max_col).rev() {
+                for row in 0..=max_row {
+                    let source_id = AbsoluteCellId { sheet_id, row, col };
+                    let dest_id = AbsoluteCellId {
+                        sheet_id,
+                        row,
+                        col: col + 1,
+                    };
+                    let Some(cell) = self.spreadsheet.get_cell(&source_id).cloned() else {
+                        continue;
+                    };
+
+                    self.set_cell(&dest_id, Some(cell));
+                    self.set_cell(&source_id, None);
+                    self.spreadsheet.names.move_cell_name(&source_id, &dest_id);
+                }
+            }
+        }
+
+        debug!(
+            "Insert (dependencies & dependants) took: {:?}",
+            dependants_duration
+        );
+        debug!("Insert (rewriting formulas) took: {:?}", formula_duration);
+        debug!("Insert (finding bounds) took: {:?}", bounds_duration);
+        debug!("Insert (moving cells) took: {:?}", move_time.elapsed());
     }
 
     /// Sort table by column by reordering the current projected rows.

@@ -118,6 +118,40 @@ impl Default for Grid {
 }
 
 impl Grid {
+    pub fn find_biggest_row(&self) -> u32 {
+        let mut biggest_row = 0;
+        for (block_idx, block) in self.blocks.iter().enumerate() {
+            let Some(block) = block.as_ref() else {
+                continue;
+            };
+            let block_row = block_idx / self.stride;
+            for row in (0..32).rev() {
+                if block.cells[row].iter().any(|cell| cell.is_some()) {
+                    biggest_row = biggest_row.max(block_row as u32 * 32 + row as u32);
+                    break;
+                }
+            }
+        }
+        biggest_row
+    }
+
+    pub fn find_biggest_column(&self) -> u32 {
+        let mut biggest_col = 0;
+        for (block_idx, block) in self.blocks.iter().enumerate() {
+            let Some(block) = block.as_ref() else {
+                continue;
+            };
+            let block_col = block_idx % self.stride;
+            for col in (0..32).rev() {
+                if (0..32).any(|row| block.cells[row][col].is_some()) {
+                    biggest_col = biggest_col.max(block_col as u32 * 32 + col as u32);
+                    break;
+                }
+            }
+        }
+        biggest_col
+    }
+
     pub fn get_cell(&self, id: &GridCellId) -> Option<&Cell> {
         let idx = id.block_idx(self.stride);
         let block = self.blocks.get(idx)?.as_ref()?;

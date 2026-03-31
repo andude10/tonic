@@ -142,7 +142,11 @@ pub fn create_lexer<'src>(
         text::int(10)
             .then(just('.').then(text::digits(10)).or_not())
             .to_slice()
-            .map(|s: &str| Token::Number(s.parse::<Decimal>().unwrap())),
+            .try_map(|s: &str, span| {
+                s.parse::<Decimal>()
+                    .map(Token::Number)
+                    .map_err(|_| Rich::custom(span, "number is too large"))
+            }),
     ))
     .spanned()
     .padded()

@@ -10,7 +10,7 @@ use rstar::{RTree, RTreeObject, AABB};
 
 use crate::storage::{
     grid::{Grid, GridCellId},
-    types::{AbsoluteCellId, CellRange, Expr, ExprAtom, Reference},
+    types::{AbsoluteCellId, CellRange, Expr, ExprAtom},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,7 +65,7 @@ struct PendingEdgeInsert {
 #[derive(Clone, Copy)]
 struct IndexedVertex {
     vertex_index: NodeIndex,
-    envelope: AABB<[i32; 3]>,
+    envelope: AABB<[i64; 3]>,
 }
 
 impl IndexedVertex {
@@ -86,7 +86,7 @@ impl PartialEq for IndexedVertex {
 impl Eq for IndexedVertex {}
 
 impl RTreeObject for IndexedVertex {
-    type Envelope = AABB<[i32; 3]>;
+    type Envelope = AABB<[i64; 3]>;
 
     fn envelope(&self) -> Self::Envelope {
         self.envelope
@@ -369,6 +369,14 @@ impl DependencyGraph {
         }
 
         &self.ready_cells
+    }
+
+    pub fn direct_dependants_for_range(
+        &mut self,
+        dependency_range: CellRange,
+    ) -> Vec<AbsoluteCellId> {
+        self.collect_direct_dependants_for_range(dependency_range);
+        self.current_dependants.clone()
     }
 
     pub fn to_dot(&self) -> String {
@@ -737,35 +745,10 @@ fn dependency_ranges_from_ast(ast: &[Expr], source_cell: &AbsoluteCellId) -> Vec
         let Expr::Atom(ExprAtom::Reference(reference)) = expr else {
             continue;
         };
-        dependency_ranges.push(resolve_reference_range(reference, source_cell));
+        dependency_ranges.push(reference.to_cell_range(source_cell));
     }
 
     dependency_ranges
-}
-
-fn resolve_reference_range(reference: &Reference, source_cell: &AbsoluteCellId) -> CellRange {
-    match reference {
-        Reference::Single { sheet_id, row, col } => CellRange::new(
-            *sheet_id,
-            row.to_index(source_cell.row),
-            col.to_index(source_cell.col),
-            row.to_index(source_cell.row),
-            col.to_index(source_cell.col),
-        ),
-        Reference::Range {
-            sheet_id,
-            start_row,
-            start_col,
-            end_row,
-            end_col,
-        } => CellRange::new(
-            *sheet_id,
-            start_row.to_index(source_cell.row),
-            start_col.to_index(source_cell.col),
-            end_row.to_index(source_cell.row),
-            end_col.to_index(source_cell.col),
-        ),
-    }
 }
 
 fn try_extend_with_pattern(
@@ -1160,17 +1143,17 @@ fn column_name(col: u32) -> String {
     letters.iter().rev().collect()
 }
 
-fn vertex_envelope(range: CellRange) -> AABB<[i32; 3]> {
+fn vertex_envelope(range: CellRange) -> AABB<[i64; 3]> {
     AABB::from_corners(
         [
-            range.sheet_id as i32,
-            range.start_row as i32,
-            range.start_col as i32,
+            range.sheet_id as i64,
+            range.start_row as i64,
+            range.start_col as i64,
         ],
         [
-            range.sheet_id as i32,
-            range.end_row as i32,
-            range.end_col as i32,
+            range.sheet_id as i64,
+            range.end_row as i64,
+            range.end_col as i64,
         ],
     )
 }

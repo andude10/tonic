@@ -264,6 +264,36 @@ impl Coordinate {
             Coordinate::Relative(offset) => (base as i32 + offset).max(0) as u32,
         }
     }
+
+    // less than equals
+    pub fn leq(&self, other: u32) -> bool {
+        match self {
+            Coordinate::Absolute(a) => *a <= other,
+            Coordinate::Relative(a) => *a <= other as i32,
+        }
+    }
+
+    // less than
+    pub fn lt(&self, other: u32) -> bool {
+        match self {
+            Coordinate::Absolute(a) => *a < other,
+            Coordinate::Relative(a) => *a < other as i32,
+        }
+    }
+
+    pub fn increase(&self) -> Coordinate {
+        match self {
+            Coordinate::Absolute(index) => Coordinate::Absolute(index + 1),
+            Coordinate::Relative(offset) => Coordinate::Relative(offset + 1),
+        }
+    }
+
+    pub fn decrease(&self) -> Coordinate {
+        match self {
+            Coordinate::Absolute(index) => Coordinate::Absolute((index - 1).max(0)),
+            Coordinate::Relative(offset) => Coordinate::Relative((offset - 1).max(0)),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -280,6 +310,33 @@ pub enum Reference {
         end_row: Coordinate,
         end_col: Coordinate,
     },
+}
+
+impl Reference {
+    pub fn to_cell_range(&self, source_cell: &AbsoluteCellId) -> CellRange {
+        match self {
+            Reference::Single { sheet_id, row, col } => CellRange::new(
+                *sheet_id,
+                row.to_index(source_cell.row),
+                col.to_index(source_cell.col),
+                row.to_index(source_cell.row),
+                col.to_index(source_cell.col),
+            ),
+            Reference::Range {
+                sheet_id,
+                start_row,
+                start_col,
+                end_row,
+                end_col,
+            } => CellRange::new(
+                *sheet_id,
+                start_row.to_index(source_cell.row),
+                start_col.to_index(source_cell.col),
+                end_row.to_index(source_cell.row),
+                end_col.to_index(source_cell.col),
+            ),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -325,7 +382,7 @@ pub enum Expr {
 /// When new formula is entered by user, it is parsed and preserved. During parsing, all references
 /// are converted into R1C1 format (meaning AST stores relative offsets, instead of exact IDs of cells) .
 /// If the formula is cloned, then it becomes shared formula (multiple cells will contain same FormulaId)
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Formula {
     /// Abstract syntax tree (result of parsing `formula_string`)
     pub ast: Vec<Expr>,
@@ -427,7 +484,7 @@ impl Spreadsheet {
 
     pub fn get_projected_cell(&self, id: &AbsoluteCellId) -> Option<&Cell> {
         if let Some((_, table)) = self.find_table_containing_cell(id) {
-            let projection = self.projections.get(table.projection_id).unwrap();
+            let projection = self.projections.get(table.projection_id)?;
             if projection.active {
                 let visual_idx = (id.row - projection.projection_start.row) as usize;
                 if visual_idx < projection.projected_rows.len() {

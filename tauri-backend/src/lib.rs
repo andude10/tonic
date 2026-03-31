@@ -7,7 +7,13 @@
 // When user modifies the spreadsheet, the main thread is blocked until the
 // backend reacts to modification (inserts values, recomputes dependencies, etc)
 
-use std::{error::Error, sync::Mutex};
+use std::{
+    error::Error,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, MutexGuard,
+    },
+};
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -19,7 +25,9 @@ use std::collections::BTreeMap;
 use crate::engine::{ChangeBounds, Engine};
 use crate::parser::shift_formula_refs;
 use crate::storage::grid::{Cell, CellValue, GridCellId};
-use crate::storage::types::{AbsoluteCellId, Projection, ProjectionFilterOption, Table};
+use crate::storage::types::{
+    AbsoluteCellId, Projection, ProjectionFilterOption, Spreadsheet, Table,
+};
 
 mod engine;
 mod file_api;
@@ -67,6 +75,21 @@ impl TonicState {
             last_viewport_range: (u32::MAX, u32::MAX, u32::MAX, u32::MAX),
             file_name: None,
             file_path: None,
+        }
+    }
+}
+
+static STATE_LOCK_POISONED: AtomicBool = AtomicBool::new(false);
+
+fn lock_state(state: &Mutex<TonicState>) -> MutexGuard<'_, TonicState> {
+    match state.lock() {
+        Ok(state) => state,
+        Err(err) => {
+            // if some command panicked while holding the state lock, recover instead of cascading panics
+            if !STATE_LOCK_POISONED.swap(true, Ordering::Relaxed) {
+                error!("backend state lock was poisoned; recovering existing state");
+            }
+            err.into_inner()
         }
     }
 }
@@ -148,7 +171,7 @@ fn get_editor_value_for_cell(
     state: tauri::State<'_, Mutex<TonicState>>,
     cell_id: CellId,
 ) -> tauri::ipc::Response {
-    let state = state.lock().unwrap();
+    let state = lock_state(state.inner());
     let value = get_editor_value(&state, cell_id);
     tauri::ipc::Response::new(value.into_bytes())
 }
@@ -158,7 +181,7 @@ fn get_name_for_cell(
     state: tauri::State<'_, Mutex<TonicState>>,
     cell_id: CellId,
 ) -> tauri::ipc::Response {
-    let state = state.lock().unwrap();
+    let state = lock_state(state.inner());
     let abs_id = cell_id.to_absolute();
     let name = state.engine.spreadsheet.names.cell_id_to_name(&abs_id);
     tauri::ipc::Response::new(name.into_bytes())
@@ -170,7 +193,7 @@ fn rename_cell(
     cell_id: CellId,
     name: String,
 ) -> Result<(), String> {
-    let mut state = state.lock().unwrap();
+    let mut state = lock_state(state.inner());
     let abs_id = cell_id.to_absolute();
     state
         .engine
@@ -185,7 +208,7 @@ fn get_editor_value_for_cells(
     state: tauri::State<'_, Mutex<TonicState>>,
     cells: Vec<CellId>,
 ) -> tauri::ipc::Response {
-    let state = state.lock().unwrap();
+    let state = lock_state(state.inner());
     // Encode as: [count: u32 LE] then for each cell: [len: u32 LE][bytes]
     let mut buf = Vec::new();
     buf.extend_from_slice(&(cells.len() as u32).to_le_bytes());
@@ -200,7 +223,7 @@ fn get_editor_value_for_cells(
 
 #[tauri::command(async)]
 fn init_viewport(state: tauri::State<'_, Mutex<TonicState>>) {
-    let mut state = state.lock().unwrap();
+    let mut state = lock_state(state.inner());
     state.last_viewport_buf.clear();
     state.last_viewport_range = (u32::MAX, u32::MAX, u32::MAX, u32::MAX);
 }
@@ -226,11 +249,17 @@ fn get_cells_in_viewport(
         return tauri::ipc::Response::new(Vec::new());
     };
 
-    let state = &mut *state.lock().unwrap();
-    let buf = &mut state.current_buf;
-    let spreadsheet = &state.engine.spreadsheet;
+    let mut state = lock_state(state.inner());
+    let TonicState {
+        engine,
+        current_buf,
+        last_viewport_buf,
+        last_viewport_range,
+        ..
+    } = &mut *state;
+    let spreadsheet = &engine.spreadsheet;
 
-    buf.clear();
+    current_buf.clear();
     for row in row_start..=row_end {
         for col in col_start..=col_end {
             let id = AbsoluteCellId {
@@ -239,21 +268,21 @@ fn get_cells_in_viewport(
                 col,
             };
             let cell = spreadsheet.get_projected_cell(&id);
-            encode_cell(buf, row, col, cell);
+            encode_cell(current_buf, row, col, cell);
         }
     }
 
     let range = (row_start, row_end, col_start, col_end);
-    let viewport_changed = range != state.last_viewport_range;
-    state.last_viewport_range = range;
+    let viewport_changed = range != *last_viewport_range;
+    *last_viewport_range = range;
 
     // return nothing if viewport range didn't change and
     // buffer that was sent previously is the same as the new buffer (no cell was updated in the current viewport)
-    if !viewport_changed && state.current_buf == state.last_viewport_buf {
+    if !viewport_changed && *current_buf == *last_viewport_buf {
         return tauri::ipc::Response::new(Vec::new());
     }
-    std::mem::swap(&mut state.current_buf, &mut state.last_viewport_buf);
-    tauri::ipc::Response::new(state.last_viewport_buf.clone())
+    std::mem::swap(current_buf, last_viewport_buf);
+    tauri::ipc::Response::new(last_viewport_buf.clone())
 }
 
 #[tauri::command(async)]
@@ -263,7 +292,7 @@ fn enter_input(
     user_input: &str,
     state: tauri::State<'_, Mutex<TonicState>>,
 ) {
-    let mut state = state.lock().unwrap();
+    let mut state = lock_state(state.inner());
     let t = state.engine.start_batch();
     state
         .engine
@@ -275,7 +304,7 @@ fn enter_input(
 #[tauri::command(async)]
 fn delete_cells(app: AppHandle, state: tauri::State<'_, Mutex<TonicState>>, cells: Vec<CellId>) {
     let timer = std::time::Instant::now();
-    let mut state = state.lock().unwrap();
+    let mut state = lock_state(state.inner());
     let t = state.engine.start_batch();
     for cell_id in cells {
         state.engine.delete(&t, cell_id.to_absolute());
@@ -301,7 +330,7 @@ fn fill_cells(
     }
 
     let timer = std::time::Instant::now();
-    let mut state = state.lock().unwrap();
+    let mut state = lock_state(state.inner());
     let line_value = |first_value: Decimal, step: Decimal, offset: i64| {
         first_value + step * Decimal::from(offset)
     };
@@ -459,7 +488,7 @@ fn paste_values(
     cells: Vec<(CellId, String)>,
 ) {
     let timer = std::time::Instant::now();
-    let mut state = state.lock().unwrap();
+    let mut state = lock_state(state.inner());
     let t = state.engine.start_batch();
     for (cell_id, text) in cells {
         if text.is_empty() {
@@ -478,7 +507,7 @@ fn paste_values(
 #[tauri::command(async)]
 fn undo_input(app: AppHandle, state: tauri::State<'_, Mutex<TonicState>>) -> Option<ChangeBounds> {
     let timer = std::time::Instant::now();
-    let mut state = state.lock().unwrap();
+    let mut state = lock_state(state.inner());
     let bounds = state.engine.undo();
     debug!("Undo took: {:?}", timer.elapsed());
     emit_save_status(&app, &state);
@@ -488,11 +517,89 @@ fn undo_input(app: AppHandle, state: tauri::State<'_, Mutex<TonicState>>) -> Opt
 #[tauri::command(async)]
 fn redo_input(app: AppHandle, state: tauri::State<'_, Mutex<TonicState>>) -> Option<ChangeBounds> {
     let timer = std::time::Instant::now();
-    let mut state = state.lock().unwrap();
+    let mut state = lock_state(state.inner());
     let bounds = state.engine.redo();
     debug!("Redo took: {:?}", timer.elapsed());
     emit_save_status(&app, &state);
     bounds
+}
+
+fn disable_table_projection_by_id(sp: &mut Spreadsheet, table_id: u32) -> Result<(), String> {
+    let table = sp.tables.get(table_id).ok_or("Table not found")?;
+    let proj = sp
+        .projections
+        .get_mut(table.projection_id)
+        .ok_or("Projection not found")?;
+    let num_cols = (table.body_end.col - table.body_start.col + 1) as usize;
+
+    proj.active = false;
+    proj.projected_rows = (table.body_start.row..=table.body_end.row).collect();
+    proj.hidden_rows_count = 0;
+    proj.filter_show_blanks = vec![true; num_cols];
+    proj.filter_options_per_column
+        .resize_with(num_cols, BTreeMap::new);
+
+    // reset all filter options to selected
+    for col_opts in proj.filter_options_per_column.iter_mut() {
+        for opt in col_opts.values_mut() {
+            opt.selected = true;
+        }
+    }
+
+    Ok(())
+}
+
+fn disable_all_table_projections(app: &AppHandle, sp: &mut Spreadsheet) -> Result<(), String> {
+    let table_ids: Vec<u32> = sp
+        .tables
+        .iter()
+        .enumerate()
+        .filter_map(|(table_id, table)| table.as_ref().map(|_| table_id as u32))
+        .collect();
+
+    for table_id in table_ids {
+        disable_table_projection_by_id(sp, table_id)?;
+        let _ = app.emit("disable-table-projection", table_id);
+        let _ = app.emit("update-table-hidden-rows", (table_id, 0u32));
+    }
+
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn insert_column(
+    app: AppHandle,
+    state: tauri::State<'_, Mutex<TonicState>>,
+    col: u32,
+    left: bool,
+) -> Result<(), String> {
+    let timer = std::time::Instant::now();
+    let mut state = lock_state(state.inner());
+
+    state.engine.insert_column_or_row(0, false, col, left);
+    disable_all_table_projections(&app, &mut state.engine.spreadsheet)?;
+
+    debug!("insert_column took: {:?}", timer.elapsed());
+    emit_save_status(&app, &state);
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn insert_row(
+    app: AppHandle,
+    state: tauri::State<'_, Mutex<TonicState>>,
+    row: u32,
+    below: bool,
+) -> Result<(), String> {
+    let timer = std::time::Instant::now();
+    let mut state = lock_state(state.inner());
+
+    state.engine.insert_column_or_row(0, true, row, !below);
+    disable_all_table_projections(&app, &mut state.engine.spreadsheet)?;
+
+    debug!("insert_row took: {:?}", timer.elapsed());
+    emit_save_status(&app, &state);
+    Ok(())
 }
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn Error + 'static>> {
@@ -518,7 +625,7 @@ fn save_file(
     } else {
         format!("{}.tcs", path)
     };
-    let mut state = state.lock().unwrap();
+    let mut state = lock_state(state.inner());
     if let Err(e) = state.engine.save_spreadsheet(&path, ui_decorations_json) {
         error!("Failed to save file '{}': {}", path, e);
         return Err(e.to_string());
@@ -534,7 +641,7 @@ fn rename_current_file(
     state: tauri::State<'_, Mutex<TonicState>>,
     new_name: &str,
 ) -> Result<(), String> {
-    let mut state = state.lock().unwrap();
+    let mut state = lock_state(state.inner());
     let Some(old_path) = state.file_path.clone() else {
         state.file_name = Some(new_name.to_string());
         return Ok(());
@@ -560,7 +667,7 @@ fn open_file(
     state: tauri::State<'_, Mutex<TonicState>>,
     path: &str,
 ) -> Result<String, String> {
-    let mut state = state.lock().unwrap();
+    let mut state = lock_state(state.inner());
     let decorations = state.engine.open_spreadsheet(path).map_err(|e| {
         error!("Failed to open file '{}': {}", path, e);
         e.to_string()
@@ -574,7 +681,7 @@ fn open_file(
 
 #[tauri::command(async)]
 fn new_file(app: AppHandle, state: tauri::State<'_, Mutex<TonicState>>) {
-    let mut state = state.lock().unwrap();
+    let mut state = lock_state(state.inner());
     state.file_name = Some("Untitled.tcv".to_string());
     state.file_path = None;
     state.engine.create_empty_spreadsheet();
@@ -583,13 +690,13 @@ fn new_file(app: AppHandle, state: tauri::State<'_, Mutex<TonicState>>) {
 
 #[tauri::command(async)]
 fn get_file_info(state: tauri::State<'_, Mutex<TonicState>>) -> (Option<String>, Option<String>) {
-    let state = state.lock().unwrap();
+    let state = lock_state(state.inner());
     (state.file_name.clone(), state.file_path.clone())
 }
 
 #[tauri::command(async)]
 fn get_dependency_graph_dot(state: tauri::State<'_, Mutex<TonicState>>) -> String {
-    let state = state.lock().unwrap();
+    let state = lock_state(state.inner());
     state.engine.spreadsheet.dependency_graph.to_dot()
 }
 
@@ -602,7 +709,7 @@ fn create_table(
     body_start: GridCellId,
     body_end: GridCellId,
 ) -> Result<u32, String> {
-    let mut state = state.lock().unwrap();
+    let mut state = lock_state(state.inner());
     let sp = &mut state.engine.spreadsheet;
 
     if first_header.row != last_header.row {
@@ -695,7 +802,7 @@ fn change_table_name(
     old_name: String,
     new_name: String,
 ) -> Result<(), String> {
-    let mut state = state.lock().unwrap();
+    let mut state = lock_state(state.inner());
     let sp = &mut state.engine.spreadsheet;
 
     let id = *sp
@@ -734,7 +841,7 @@ fn toggle_table_sort(
 
     // todo: remove code duplication with other sort and filter commands
 
-    let mut state = state.lock().unwrap();
+    let mut state = lock_state(state.inner());
     let sp = &state.engine.spreadsheet;
 
     let (table_id, table) = sp
@@ -766,7 +873,7 @@ fn toggle_table_filter(
 ) -> Result<(), String> {
     let timer = std::time::Instant::now();
 
-    let mut state = state.lock().unwrap();
+    let mut state = lock_state(state.inner());
     let sp = &state.engine.spreadsheet;
 
     let (table_id, table) = sp
@@ -799,7 +906,7 @@ fn select_all_table_filters(
 ) -> Result<(), String> {
     let timer = std::time::Instant::now();
 
-    let mut state = state.lock().unwrap();
+    let mut state = lock_state(state.inner());
     let sp = &state.engine.spreadsheet;
 
     let (table_id, table) = sp
@@ -832,7 +939,7 @@ fn clear_all_table_filters(
 ) -> Result<(), String> {
     let timer = std::time::Instant::now();
 
-    let mut state = state.lock().unwrap();
+    let mut state = lock_state(state.inner());
     let sp = &state.engine.spreadsheet;
 
     let (table_id, table) = sp
@@ -864,7 +971,7 @@ fn apply_table_projection(
     table_name: String,
 ) -> Result<(), String> {
     let timer = std::time::Instant::now();
-    let mut state = state.lock().unwrap();
+    let mut state = lock_state(state.inner());
     let sp = &state.engine.spreadsheet;
 
     let &table_id = sp
@@ -928,7 +1035,7 @@ fn apply_table_projection(
         .spreadsheet
         .projections
         .get_mut(proj_id)
-        .unwrap();
+        .ok_or("Projection not found")?;
     let num_cols = (col_end - col_start + 1) as usize;
     proj.active = false;
     proj.projected_rows = (body_start_row..=body_end_row).collect();
@@ -949,7 +1056,7 @@ fn disable_table_projection(
     state: tauri::State<'_, Mutex<TonicState>>,
     table_name: String,
 ) -> Result<(), String> {
-    let mut state = state.lock().unwrap();
+    let mut state = lock_state(state.inner());
     let sp = &mut state.engine.spreadsheet;
 
     let &table_id = sp
@@ -957,31 +1064,10 @@ fn disable_table_projection(
         .table_names
         .get(&table_name)
         .ok_or_else(|| format!("Table '{}' not found", table_name))?;
-    let table = sp.tables.get(table_id).ok_or("Table not found")?;
-    let proj_id = table.projection_id;
-    let col_start = table.body_start.col;
-    let col_end = table.body_end.col;
-    let body_start_row = table.body_start.row;
-    let body_end_row = table.body_end.row;
-
-    let proj = sp
-        .projections
-        .get_mut(proj_id)
-        .ok_or("Projection not found")?;
-    let num_cols = (col_end - col_start + 1) as usize;
-    proj.active = false;
-    proj.projected_rows = (body_start_row..=body_end_row).collect();
-    proj.hidden_rows_count = 0;
-    proj.filter_show_blanks = vec![true; num_cols];
-
-    // reset all filter options to selected
-    for col_opts in proj.filter_options_per_column.iter_mut() {
-        for opt in col_opts.values_mut() {
-            opt.selected = true;
-        }
-    }
+    disable_table_projection_by_id(sp, table_id)?;
 
     let _ = app.emit("disable-table-projection", table_id);
+    let _ = app.emit("update-table-hidden-rows", (table_id, 0u32));
     Ok(())
 }
 
@@ -998,7 +1084,7 @@ fn get_filter_options_for_table_column(
     header: GridCellId,
 ) -> Result<Vec<FilterOptionResponse>, String> {
     let timer = std::time::Instant::now();
-    let state = state.lock().unwrap();
+    let state = lock_state(state.inner());
     let sp = &state.engine.spreadsheet;
 
     let (_, table) = sp
@@ -1056,6 +1142,8 @@ pub fn run() {
             fill_cells,
             delete_cells,
             paste_values,
+            insert_column,
+            insert_row,
             get_cells_in_viewport,
             get_editor_value_for_cell,
             get_editor_value_for_cells,
