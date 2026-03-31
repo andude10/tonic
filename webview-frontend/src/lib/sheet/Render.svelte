@@ -206,17 +206,9 @@
 
     // --- render loop ---
 
-    let rafId = 0;
     let _scrolling = false;
 
-    function setViewportRows(start: number, end: number) {
-        viewportRowStart = start;
-        viewportRowEnd = end;
-    }
-
     function renderLoop() {
-        if (document.hidden) return;
-
         const rowStart = viewportRowStart;
         const rowEnd = viewportRowEnd;
         const colStart = viewportColumnStart;
@@ -249,6 +241,16 @@
 
         Promise.all([cellsPromise, editorPromise, namePromise]).then(
             ([cellsBuf, editorBuf, nameBuf]) => {
+                // if viewport changed since we made IPC call, it means that cellsBuf is stale, and we can discard it
+                if (
+                    rowStart != viewportRowStart ||
+                    rowEnd != viewportRowEnd ||
+                    colStart != viewportColumnStart ||
+                    colEnd != viewportColumnEnd
+                ) {
+                    return;
+                }
+
                 // "cellsBuf" length is 0 when the cells in the current viewport did not change,
                 // in which case we do nothing
                 if (cellsBuf.byteLength > 0) {
@@ -272,14 +274,13 @@
                     );
                 }
             },
+            () => {},
         );
 
         requestAnimationFrame(renderLoop);
     }
 
     function startRenderLoop() {
-        if (rafId) cancelAnimationFrame(rafId);
-
         invoke("init_viewport").then(() => {
             updateApproximateColumnViewportBounds();
             requestAnimationFrame(renderLoop);
@@ -451,7 +452,8 @@
     function handleRequestData(
         ev: { row: { start: number; end: number } } & { [key: string]: any },
     ): void {
-        setViewportRows(ev.row.start, ev.row.end);
+        viewportRowStart = ev.row.start;
+        viewportRowEnd = ev.row.end;
     }
 
     // --- public API ---
@@ -566,10 +568,6 @@
         initOverlays();
         updateApproximateColumnViewportBounds();
         startRenderLoop();
-
-        return () => {
-            cancelAnimationFrame(rafId);
-        };
     });
 </script>
 

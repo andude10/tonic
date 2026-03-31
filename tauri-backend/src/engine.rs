@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
+use std::time::Instant;
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use tauri_plugin_log::log::debug;
+use tauri_plugin_log::log::{debug, info};
 
 use std::io;
 
@@ -331,8 +332,8 @@ impl Engine {
     /// todo: write comments
     fn post_cell_changes_hook(&mut self, changes: Vec<CellUpdate>) {
         self.debug.eval_number += 1;
-        debug!("Eval #{}", self.debug.eval_number);
-        let dep_time = std::time::Instant::now();
+        info!("Eval #{}", self.debug.eval_number);
+        let dep_time = Instant::now();
 
         // step 1.
         //
@@ -379,7 +380,7 @@ impl Engine {
             if let Some(formula_id) = formula_id {
                 if let Some(formula) = self.spreadsheet.formulas.get(formula_id) {
                     let ast = &formula.ast;
-                    let t = std::time::Instant::now();
+                    let t = Instant::now();
                     let new_value = match eval_formula(
                         ast,
                         &cell_id,
@@ -397,7 +398,7 @@ impl Engine {
             }
 
             // Decrement pending_dependencies_count of dependents, add to wave if ready
-            let t = std::time::Instant::now();
+            let t = Instant::now();
             {
                 let spreadsheet = &mut self.spreadsheet;
                 let ready_cells = spreadsheet
@@ -414,7 +415,7 @@ impl Engine {
         }
 
         // todo: add normal cycle detection
-        let t = std::time::Instant::now();
+        let t = Instant::now();
         let unresolved_cells = {
             let spreadsheet = &mut self.spreadsheet;
             spreadsheet
@@ -439,14 +440,14 @@ impl Engine {
         }
         dep_duration += t.elapsed();
 
-        let table_time = std::time::Instant::now();
+        let table_time = Instant::now();
         for table_id in affected_tables {
             self.post_table_cells_change_hook(table_id);
         }
 
-        debug!("Eval (dependencies & dependants) took: {:?}", dep_duration);
-        debug!("Eval (running expressions) took: {:?}", eval_duration);
-        debug!("Eval (updating tables) took: {:?}", table_time.elapsed());
+        info!("Eval (dependencies & dependants) took: {:?}", dep_duration);
+        info!("Eval (running expressions) took: {:?}", eval_duration);
+        info!("Eval (updating tables) took: {:?}", table_time.elapsed());
     }
 
     /// Finalize the batch: push to undo log, truncate redo history.
@@ -965,16 +966,16 @@ impl Engine {
     }
 
     fn apply_column_or_row_change(&mut self, spec: ColumnOrRowChangeSpec) -> Vec<CellUpdate> {
-        let collect_time = std::time::Instant::now();
+        let collect_time = Instant::now();
         let affected_cells = self.collect_affected_cells_for_column_or_row_change(spec);
         let dependants_duration = collect_time.elapsed();
 
         let mut changes = Vec::new();
-        let formula_time = std::time::Instant::now();
+        let formula_time = Instant::now();
         self.rewrite_formulas_for_column_or_row_change(spec, affected_cells, &mut changes);
         let formula_duration = formula_time.elapsed();
 
-        let move_time = std::time::Instant::now();
+        let move_time = Instant::now();
         self.move_cells_for_column_or_row_change(spec, &mut changes);
         let move_duration = move_time.elapsed();
 
@@ -1260,7 +1261,14 @@ impl Engine {
     pub fn open_spreadsheet(&mut self, path: &str) -> io::Result<String> {
         let (spreadsheet, decorations) = file_api::load(path)?;
         self.spreadsheet = spreadsheet;
+
+        let dependency_graph_time = Instant::now();
         self.spreadsheet.rebuild_dependency_graph();
+        info!(
+            "open_spreadsheet: dependency graph built in {:?}",
+            dependency_graph_time.elapsed()
+        );
+
         self.history = History::new();
         self.batch.clear();
         self.mark_saved();
@@ -1473,6 +1481,8 @@ fn compute_bounds(changes: &[CellUpdate]) -> ChangeBounds {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use super::*;
 
     fn cell(row: u32, col: u32) -> AbsoluteCellId {
@@ -1635,5 +1645,59 @@ mod tests {
             .any(|expr| matches!(expr, Expr::Atom(ExprAtom::InvalidReferenceError(msg)) if msg == "#REF!")));
 
         assert!(engine.spreadsheet.get_cell(&cell(5, 6)).is_none());
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_eval_insert_and_recalc() {
+        const ROWS: u32 = 400;
+        const DATA_COLS: u32 = 12; // A..L
+        const EDITS: u32 = 500;
+
+        let mut engine = Engine::new();
+
+        // create dense numeric block + one row sum per row (M) + one global sum (N)
+        let guard = engine.start_batch();
+        for row in 0..ROWS {
+            for col in 0..DATA_COLS {
+                engine.insert_number(&guard, cell(row, col), Decimal::from((row + col) as i64));
+            }
+            engine.parse_and_insert_string(
+                &guard,
+                cell(row, DATA_COLS),
+                &format!("=SUM(A{}:L{})", row + 1, row + 1),
+            );
+        }
+        engine.parse_and_insert_string(
+            &guard,
+            cell(ROWS, DATA_COLS + 1),
+            &format!("=SUM(M1:M{})", ROWS),
+        );
+        engine.end_batch(guard);
+
+        // warm up to stabilize caches / branch predictors
+        for i in 0..50 {
+            let row = i % ROWS;
+            let g = engine.start_batch();
+            engine.insert_number(&g, cell(row, 0), Decimal::from((i * 3) as i64));
+            engine.end_batch(g);
+        }
+
+        // benchmark steady-state edit + recalculation path
+        let timer = Instant::now();
+        for i in 0..EDITS {
+            let row = i % ROWS;
+            let g = engine.start_batch();
+            engine.insert_number(&g, cell(row, 0), Decimal::from((i * 7) as i64));
+            engine.end_batch(g);
+        }
+        let elapsed = timer.elapsed();
+
+        eprintln!(
+            "bench_eval_insert_and_recalc: edits={}, total={:?}, per_edit={:?}",
+            EDITS,
+            elapsed,
+            elapsed / EDITS
+        );
     }
 }
