@@ -496,11 +496,21 @@ pub fn shift_formula_refs(
 ) -> String {
     use crate::storage::types::{ExprAtom, Reference};
 
-    // collect all references from AST in order
-    let mut refs: Vec<&Reference> = Vec::new();
+    enum AstRef<'a> {
+        Reference(&'a Reference),
+        InvalidReference(&'a str),
+    }
+
+    // collect references (and invalid-reference markers) from AST in order
+    let mut refs: Vec<AstRef<'_>> = Vec::new();
     for expr in ast {
-        if let Expr::Atom(ExprAtom::Reference(r)) = expr {
-            refs.push(r);
+        let Expr::Atom(atom) = expr else {
+            continue;
+        };
+        match atom {
+            ExprAtom::Reference(r) => refs.push(AstRef::Reference(r)),
+            ExprAtom::InvalidReferenceError(msg) => refs.push(AstRef::InvalidReference(msg)),
+            _ => {}
         }
     }
 
@@ -539,10 +549,10 @@ pub fn shift_formula_refs(
 
                 // Use AST reference if available
                 if ref_idx < refs.len() {
-                    let r = refs[ref_idx];
+                    let r = &refs[ref_idx];
                     ref_idx += 1;
                     match r {
-                        Reference::Single { sheet_id, row, col } => {
+                        AstRef::Reference(Reference::Single { sheet_id, row, col }) => {
                             let abs_row = row.to_index(cell_id.row);
                             let abs_col = col.to_index(cell_id.col);
                             let abs_id = AbsoluteCellId {
@@ -556,13 +566,13 @@ pub fn shift_formula_refs(
                                 matches!(row, Coordinate::Absolute(_)),
                             ));
                         }
-                        Reference::Range {
+                        AstRef::Reference(Reference::Range {
                             sheet_id,
                             start_row,
                             start_col,
                             end_row,
                             end_col,
-                        } => {
+                        }) => {
                             let start_row_abs = start_row.to_index(cell_id.row);
                             let start_col_abs = start_col.to_index(cell_id.col);
                             let end_row_abs = end_row.to_index(cell_id.row);
@@ -589,6 +599,7 @@ pub fn shift_formula_refs(
                                 matches!(end_row, Coordinate::Absolute(_)),
                             ));
                         }
+                        AstRef::InvalidReference(msg) => result.push_str(msg),
                     }
                     pos = final_end;
                     continue;
@@ -903,5 +914,18 @@ mod tests {
                 col: Coordinate::Absolute(5),
             }))]
         );
+    }
+
+    #[test]
+    fn shift_formula_refs_replaces_invalid_reference_with_error_marker() {
+        let names = SpreadsheetNames::new();
+        let ast = vec![
+            Expr::Atom(ExprAtom::InvalidReferenceError("#REF!".into())),
+            Expr::Atom(ExprAtom::Number(dec!(5))),
+            Expr::Add(0, 1),
+        ];
+
+        let shifted = shift_formula_refs("A1+5", &GridCellId { row: 0, col: 0 }, &ast, &names);
+        assert_eq!(shifted, "#REF!+5");
     }
 }

@@ -28,10 +28,64 @@ pub struct ChangeBounds {
     pub max_col: u32,
 }
 
-struct HistoryLogEntry {
-    id: u64,
-    changes: Vec<CellUpdate>,
-    bounds: ChangeBounds,
+enum HistoryLogEntry {
+    Update {
+        id: u64,
+        changes: Vec<CellUpdate>,
+        bounds: ChangeBounds,
+    },
+    InsertRow {
+        id: u64,
+        changes: Vec<CellUpdate>,
+        bounds: ChangeBounds,
+    },
+    InsertColumn {
+        id: u64,
+        changes: Vec<CellUpdate>,
+        bounds: ChangeBounds,
+    },
+    RemoveRow {
+        id: u64,
+        changes: Vec<CellUpdate>,
+        bounds: ChangeBounds,
+    },
+    RemoveColumn {
+        id: u64,
+        changes: Vec<CellUpdate>,
+        bounds: ChangeBounds,
+    },
+}
+
+impl HistoryLogEntry {
+    fn id(&self) -> u64 {
+        match self {
+            HistoryLogEntry::Update { id, .. }
+            | HistoryLogEntry::InsertRow { id, .. }
+            | HistoryLogEntry::InsertColumn { id, .. }
+            | HistoryLogEntry::RemoveRow { id, .. }
+            | HistoryLogEntry::RemoveColumn { id, .. } => *id,
+        }
+    }
+
+    fn bounds(&self) -> &ChangeBounds {
+        match self {
+            HistoryLogEntry::Update { bounds, .. }
+            | HistoryLogEntry::InsertRow { bounds, .. }
+            | HistoryLogEntry::InsertColumn { bounds, .. }
+            | HistoryLogEntry::RemoveRow { bounds, .. }
+            | HistoryLogEntry::RemoveColumn { bounds, .. } => bounds,
+        }
+    }
+
+    fn changes(&self) -> &Vec<CellUpdate> {
+        match self {
+            HistoryLogEntry::Update { changes, .. }
+            | HistoryLogEntry::InsertRow { changes, .. }
+            | HistoryLogEntry::InsertColumn { changes, .. }
+            | HistoryLogEntry::RemoveRow { changes, .. }
+            | HistoryLogEntry::RemoveColumn { changes, .. } => changes,
+        }
+    }
 }
 
 /// Tracks undo/redo history.
@@ -58,6 +112,7 @@ pub struct EngineGuard(PhantomData<()>);
 #[derive(Debug)]
 pub enum EvalError {
     TypeError { expected: AtomType, got: AtomType },
+    Error(String),
 }
 
 struct DebugInfo {
@@ -76,6 +131,59 @@ pub struct Engine {
     history: History,
     batch: Vec<CellUpdate>,
     debug: DebugInfo,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ColumnOrRowChange {
+    Insert,
+    Remove,
+}
+
+#[derive(Clone, Copy)]
+struct ColumnOrRowChangeSpec {
+    change: ColumnOrRowChange,
+    sheet_id: u32,
+    changing_row: bool,
+    index: u32,
+    shift_start: u32,
+    deleted_index: Option<u32>,
+}
+
+impl ColumnOrRowChangeSpec {
+    fn for_insert(sheet_id: u32, changing_row: bool, index: u32, include_index: bool) -> Self {
+        let shift_start = if include_index {
+            index
+        } else {
+            index.saturating_add(1)
+        };
+        Self {
+            change: ColumnOrRowChange::Insert,
+            sheet_id,
+            changing_row,
+            index,
+            shift_start,
+            deleted_index: None,
+        }
+    }
+
+    fn for_remove(sheet_id: u32, changing_row: bool, index: u32) -> Self {
+        Self {
+            change: ColumnOrRowChange::Remove,
+            sheet_id,
+            changing_row,
+            index,
+            shift_start: index.saturating_add(1),
+            deleted_index: Some(index),
+        }
+    }
+
+    fn operation_name(&self) -> &'static str {
+        if self.change == ColumnOrRowChange::Insert {
+            "Insert"
+        } else {
+            "Remove"
+        }
+    }
 }
 
 // todo: add more comments (explain what happens with dependencies, dependants and the grid)
@@ -279,6 +387,7 @@ impl Engine {
                         &mut eval_store,
                     ) {
                         Ok(v) => v,
+                        Err(EvalError::Error(msg)) => CellValue::Error(msg),
                         Err(e) => CellValue::Error(format!("{:?}", e)),
                     };
                     eval_duration += t.elapsed();
@@ -354,7 +463,7 @@ impl Engine {
         let id = self.history.next_log_id;
         self.history.next_log_id += 1;
 
-        self.history.log.push(HistoryLogEntry {
+        self.history.log.push(HistoryLogEntry::Update {
             id,
             changes,
             bounds,
@@ -364,17 +473,29 @@ impl Engine {
         self.post_cell_changes_hook(eval_changes);
     }
 
+    fn apply_history_changes(&mut self, changes: &[CellUpdate], use_new: bool) {
+        if use_new {
+            for CellUpdate(id, _, new) in changes {
+                self.set_cell(id, new.clone());
+            }
+        } else {
+            // when undoing, walk backward to revert writes in exact reverse order
+            for CellUpdate(id, old, _) in changes.iter().rev() {
+                self.set_cell(id, old.clone());
+            }
+        }
+    }
+
     pub fn undo(&mut self) -> Option<ChangeBounds> {
         if self.history.log_position == 0 {
             return None;
         }
         self.history.log_position -= 1;
         let entry = &self.history.log[self.history.log_position];
-        let bounds = entry.bounds.clone();
-        let changes = entry.changes.clone();
-        for CellUpdate(id, old, _) in &changes {
-            self.set_cell(id, old.clone());
-        }
+        let bounds = entry.bounds().clone();
+        let changes = entry.changes().clone();
+
+        self.apply_history_changes(&changes, false);
         self.post_cell_changes_hook(changes);
         Some(bounds)
     }
@@ -384,12 +505,11 @@ impl Engine {
             return None;
         }
         let entry = &self.history.log[self.history.log_position];
-        let bounds = entry.bounds.clone();
-        let changes = entry.changes.clone();
+        let bounds = entry.bounds().clone();
+        let changes = entry.changes().clone();
         self.history.log_position += 1;
-        for CellUpdate(id, _, new) in &changes {
-            self.set_cell(id, new.clone());
-        }
+
+        self.apply_history_changes(&changes, true);
         self.post_cell_changes_hook(changes);
         Some(bounds)
     }
@@ -398,7 +518,7 @@ impl Engine {
         let current_id = if self.history.log_position == 0 {
             Some(0)
         } else {
-            Some(self.history.log[self.history.log_position - 1].id)
+            Some(self.history.log[self.history.log_position - 1].id())
         };
         current_id == self.history.last_saved_log_id
     }
@@ -451,56 +571,74 @@ impl Engine {
         }
     }
 
-    pub fn insert_column_or_row(
+    fn collect_affected_cells_for_column_or_row_change(
         &mut self,
-        sheet_id: u32,
-        inserting_row: bool,
-        index: u32,
-        include_index: bool,
-    ) {
-        let collect_time = std::time::Instant::now();
-        let shift_start = if include_index {
-            index
+        spec: ColumnOrRowChangeSpec,
+    ) -> Vec<AbsoluteCellId> {
+        // references into shift range must be rewritten
+        let shift_range = if spec.changing_row {
+            CellRange::new(spec.sheet_id, spec.shift_start, 0, u32::MAX, u32::MAX)
         } else {
-            index.saturating_add(1)
+            CellRange::new(spec.sheet_id, 0, spec.shift_start, u32::MAX, u32::MAX)
         };
 
-        // range of addresses that are shifted by insertion
-        let shift_range = if inserting_row {
-            CellRange::new(sheet_id, index, 0, u32::MAX, u32::MAX)
-        } else {
-            CellRange::new(sheet_id, 0, index, u32::MAX, u32::MAX)
-        };
-
-        // affected = direct dependants of shifted range + cells inside shifted range
+        // affected = dependants of shifted range + moved cells that depend on unshifted side
         let mut affected_cells = self
             .spreadsheet
             .dependency_graph
             .direct_dependants_for_range(shift_range);
         let mut seen_cells: HashSet<AbsoluteCellId> = affected_cells.iter().copied().collect();
-        // todo: remove check over whole grid?
-        self.spreadsheet.sheets[sheet_id as usize].for_each_cell(|cell_id, _| {
-            if cell_id.row < shift_range.start_row
-                || cell_id.row > shift_range.end_row
-                || cell_id.col < shift_range.start_col
-                || cell_id.col > shift_range.end_col
-            {
-                return;
-            }
-
-            let id = AbsoluteCellId {
-                sheet_id,
-                row: cell_id.row,
-                col: cell_id.col,
+        if spec.shift_start > 0 {
+            let unshifted_range = if spec.changing_row {
+                CellRange::new(spec.sheet_id, 0, 0, spec.shift_start - 1, u32::MAX)
+            } else {
+                CellRange::new(spec.sheet_id, 0, 0, u32::MAX, spec.shift_start - 1)
             };
-            if seen_cells.insert(id) {
-                affected_cells.push(id);
+            for dependant_id in self
+                .spreadsheet
+                .dependency_graph
+                .direct_dependants_for_range(unshifted_range)
+            {
+                let is_moved_cell = dependant_id.sheet_id == spec.sheet_id
+                    && if spec.changing_row {
+                        dependant_id.row >= spec.shift_start
+                    } else {
+                        dependant_id.col >= spec.shift_start
+                    };
+                if is_moved_cell && seen_cells.insert(dependant_id) {
+                    affected_cells.push(dependant_id);
+                }
             }
-        });
+        }
 
-        let dependants_duration = collect_time.elapsed();
-        let formula_time = std::time::Instant::now();
-        let mut replaced_formulas: HashMap<FormulaId, FormulaId> = HashMap::new();
+        // on remove, formulas that point directly into deleted axis must be rewritten too
+        if let Some(deleted_axis) = spec.deleted_index {
+            let deleted_range = if spec.changing_row {
+                CellRange::new(spec.sheet_id, deleted_axis, 0, deleted_axis, u32::MAX)
+            } else {
+                CellRange::new(spec.sheet_id, 0, deleted_axis, u32::MAX, deleted_axis)
+            };
+            for dependant_id in self
+                .spreadsheet
+                .dependency_graph
+                .direct_dependants_for_range(deleted_range)
+            {
+                if seen_cells.insert(dependant_id) {
+                    affected_cells.push(dependant_id);
+                }
+            }
+        }
+
+        affected_cells
+    }
+
+    fn rewrite_formulas_for_column_or_row_change(
+        &mut self,
+        spec: ColumnOrRowChangeSpec,
+        affected_cells: Vec<AbsoluteCellId>,
+        changes: &mut Vec<CellUpdate>,
+    ) {
+        let mut replaced_formulas: HashMap<(FormulaId, u32), FormulaId> = HashMap::new();
 
         for dependant_id in affected_cells {
             let Some(dependant) = self.spreadsheet.get_cell(&dependant_id).cloned() else {
@@ -510,17 +648,25 @@ impl Engine {
                 continue;
             };
 
+            let source_axis = if spec.changing_row {
+                dependant_id.row
+            } else {
+                dependant_id.col
+            };
+            let source_moves =
+                dependant_id.sheet_id == spec.sheet_id && source_axis >= spec.shift_start;
+            let cache_key = (formula_id, source_axis);
             let dependant_with_shifted_references;
 
             // if already replaced this formula, then just insert replacement formula's id
-            if let Some(replacement_id) = replaced_formulas.get(&formula_id) {
+            if let Some(replacement_id) = replaced_formulas.get(&cache_key) {
                 dependant_with_shifted_references = Cell {
                     defined_by_formula: Some(*replacement_id),
                     val: dependant.val.clone(),
                     pending_dependencies: 0,
                 };
             } else {
-                // otherwise, create new formula with shifted AST (add 1 to the column or row depending on inserting_row)
+                // otherwise, create new formula with shifted AST for structure update
                 let mut formula = self
                     .spreadsheet
                     .formulas
@@ -529,84 +675,102 @@ impl Engine {
                     .clone();
 
                 for expr in formula.ast.iter_mut() {
-                    let Expr::Atom(ExprAtom::Reference(reference)) = expr else {
+                    let Expr::Atom(atom) = expr else {
                         continue;
                     };
-                    if reference.to_cell_range(&dependant_id).sheet_id != sheet_id {
-                        continue;
+
+                    let mut replace_with_error = false;
+
+                    if let ExprAtom::Reference(reference) = atom {
+                        let reference_range = reference.to_cell_range(&dependant_id);
+                        if reference_range.sheet_id != spec.sheet_id {
+                            continue;
+                        }
+
+                        if let Some(deleted_axis) = spec.deleted_index {
+                            let points_to_deleted = if spec.changing_row {
+                                reference_range.start_row <= deleted_axis
+                                    && deleted_axis <= reference_range.end_row
+                            } else {
+                                reference_range.start_col <= deleted_axis
+                                    && deleted_axis <= reference_range.end_col
+                            };
+                            if points_to_deleted {
+                                replace_with_error = true;
+                            }
+                        }
+
+                        if !replace_with_error {
+                            // keep absolute and relative coordinates consistent after structure change
+                            let source_base = if spec.changing_row {
+                                dependant_id.row
+                            } else {
+                                dependant_id.col
+                            };
+                            let shifted_base = if source_moves {
+                                match spec.change {
+                                    ColumnOrRowChange::Insert => source_base.saturating_add(1),
+                                    ColumnOrRowChange::Remove => source_base.saturating_sub(1),
+                                }
+                            } else {
+                                source_base
+                            };
+                            let shift = |coord: &mut Coordinate| {
+                                let source_abs = coord.to_index(source_base);
+                                let shifted_abs = match spec.change {
+                                    ColumnOrRowChange::Insert if source_abs >= spec.shift_start => {
+                                        source_abs.saturating_add(1)
+                                    }
+                                    ColumnOrRowChange::Remove if source_abs >= spec.shift_start => {
+                                        source_abs.saturating_sub(1)
+                                    }
+                                    _ => source_abs,
+                                };
+                                *coord = match coord {
+                                    Coordinate::Absolute(_) => Coordinate::Absolute(shifted_abs),
+                                    Coordinate::Relative(_) => Coordinate::Relative(
+                                        (shifted_abs as i64 - shifted_base as i64)
+                                            .clamp(i32::MIN as i64, i32::MAX as i64)
+                                            as i32,
+                                    ),
+                                };
+                            };
+
+                            match reference {
+                                Reference::Single { row, col, .. } => {
+                                    if spec.changing_row {
+                                        shift(row);
+                                    } else {
+                                        shift(col);
+                                    }
+                                }
+                                Reference::Range {
+                                    start_row,
+                                    start_col,
+                                    end_row,
+                                    end_col,
+                                    ..
+                                } => {
+                                    if spec.changing_row {
+                                        shift(start_row);
+                                        shift(end_row);
+                                    } else {
+                                        shift(start_col);
+                                        shift(end_col);
+                                    }
+                                }
+                            }
+                        }
                     }
 
-                    // keep absolute and relative coordinates consistent after insert
-                    let shift = |coord: &Coordinate, source_base: u32| {
-                        let source_abs = coord.to_index(source_base);
-                        let shifted_abs = if source_abs >= shift_start {
-                            source_abs.saturating_add(1)
-                        } else {
-                            source_abs
-                        };
-                        let shifted_base = if source_base >= shift_start {
-                            source_base.saturating_add(1)
-                        } else {
-                            source_base
-                        };
-
-                        match coord {
-                            Coordinate::Absolute(_) => Coordinate::Absolute(shifted_abs),
-                            Coordinate::Relative(_) => {
-                                let delta = shifted_abs as i64 - shifted_base as i64;
-                                Coordinate::Relative(
-                                    delta.clamp(i32::MIN as i64, i32::MAX as i64) as i32
-                                )
-                            }
-                        }
-                    };
-
-                    *reference = match reference {
-                        Reference::Single { sheet_id, row, col } => {
-                            if inserting_row {
-                                Reference::Single {
-                                    sheet_id: *sheet_id,
-                                    row: shift(row, dependant_id.row),
-                                    col: *col,
-                                }
-                            } else {
-                                Reference::Single {
-                                    sheet_id: *sheet_id,
-                                    row: *row,
-                                    col: shift(col, dependant_id.col),
-                                }
-                            }
-                        }
-                        Reference::Range {
-                            sheet_id,
-                            start_row,
-                            start_col,
-                            end_row,
-                            end_col,
-                        } => {
-                            if inserting_row {
-                                Reference::Range {
-                                    sheet_id: *sheet_id,
-                                    start_row: shift(start_row, dependant_id.row),
-                                    start_col: *start_col,
-                                    end_row: shift(end_row, dependant_id.row),
-                                    end_col: *end_col,
-                                }
-                            } else {
-                                Reference::Range {
-                                    sheet_id: *sheet_id,
-                                    start_row: *start_row,
-                                    start_col: shift(start_col, dependant_id.col),
-                                    end_row: *end_row,
-                                    end_col: shift(end_col, dependant_id.col),
-                                }
-                            }
-                        }
-                    };
+                    if replace_with_error {
+                        // keep formula shape, but mark deleted reference as error atom
+                        *atom = ExprAtom::InvalidReferenceError("#REF!".into());
+                    }
                 }
 
                 let replacement_id = self.spreadsheet.formulas.insert(formula);
-                replaced_formulas.insert(formula_id, replacement_id);
+                replaced_formulas.insert(cache_key, replacement_id);
                 dependant_with_shifted_references = Cell {
                     defined_by_formula: Some(replacement_id),
                     val: dependant.val.clone(),
@@ -614,63 +778,303 @@ impl Engine {
                 };
             }
 
-            self.set_cell(&dependant_id, Some(dependant_with_shifted_references));
+            let old = self.set_cell(
+                &dependant_id,
+                Some(dependant_with_shifted_references.clone()),
+            );
+            changes.push(CellUpdate(
+                dependant_id,
+                old,
+                Some(dependant_with_shifted_references),
+            ));
         }
+    }
+
+    fn move_cells_for_column_or_row_change(
+        &mut self,
+        spec: ColumnOrRowChangeSpec,
+        changes: &mut Vec<CellUpdate>,
+    ) {
+        let max_row = self.spreadsheet.sheets[spec.sheet_id as usize].find_biggest_row();
+        let max_col = self.spreadsheet.sheets[spec.sheet_id as usize].find_biggest_column();
+
+        match (spec.changing_row, spec.change) {
+            (true, ColumnOrRowChange::Insert) => {
+                // move cells from bottom to top, so each destination is free when we write into it
+                if spec.shift_start <= max_row {
+                    for row in (spec.shift_start..=max_row).rev() {
+                        for col in 0..=max_col {
+                            let source_id = AbsoluteCellId {
+                                sheet_id: spec.sheet_id,
+                                row,
+                                col,
+                            };
+                            let dest_id = AbsoluteCellId {
+                                sheet_id: spec.sheet_id,
+                                row: row + 1,
+                                col,
+                            };
+                            let Some(cell) = self.spreadsheet.get_cell(&source_id).cloned() else {
+                                continue;
+                            };
+
+                            let old_dest = self.set_cell(&dest_id, Some(cell.clone()));
+                            let old_source = self.set_cell(&source_id, None);
+                            self.spreadsheet.names.move_cell_name(&source_id, &dest_id);
+
+                            changes.push(CellUpdate(dest_id, old_dest, Some(cell)));
+                            changes.push(CellUpdate(source_id, old_source, None));
+                        }
+                    }
+                }
+            }
+            (false, ColumnOrRowChange::Insert) => {
+                // move cells from right to left, so each destination is free when we write into it
+                if spec.shift_start <= max_col {
+                    for col in (spec.shift_start..=max_col).rev() {
+                        for row in 0..=max_row {
+                            let source_id = AbsoluteCellId {
+                                sheet_id: spec.sheet_id,
+                                row,
+                                col,
+                            };
+                            let dest_id = AbsoluteCellId {
+                                sheet_id: spec.sheet_id,
+                                row,
+                                col: col + 1,
+                            };
+                            let Some(cell) = self.spreadsheet.get_cell(&source_id).cloned() else {
+                                continue;
+                            };
+
+                            let old_dest = self.set_cell(&dest_id, Some(cell.clone()));
+                            let old_source = self.set_cell(&source_id, None);
+                            self.spreadsheet.names.move_cell_name(&source_id, &dest_id);
+
+                            changes.push(CellUpdate(dest_id, old_dest, Some(cell)));
+                            changes.push(CellUpdate(source_id, old_source, None));
+                        }
+                    }
+                }
+            }
+            (true, ColumnOrRowChange::Remove) => {
+                // move cells from top to bottom when deleting row, so each source is read once
+                if spec.shift_start > max_row {
+                    // deleting the last used row: just clear deleted row
+                    if spec.index <= max_row {
+                        for col in 0..=max_col {
+                            let deleted_id = AbsoluteCellId {
+                                sheet_id: spec.sheet_id,
+                                row: spec.index,
+                                col,
+                            };
+                            let old = self.set_cell(&deleted_id, None);
+                            changes.push(CellUpdate(deleted_id, old, None));
+                        }
+                    }
+                } else {
+                    for row in spec.shift_start..=max_row {
+                        for col in 0..=max_col {
+                            let source_id = AbsoluteCellId {
+                                sheet_id: spec.sheet_id,
+                                row,
+                                col,
+                            };
+                            let dest_id = AbsoluteCellId {
+                                sheet_id: spec.sheet_id,
+                                row: row - 1,
+                                col,
+                            };
+                            let Some(cell) = self.spreadsheet.get_cell(&source_id).cloned() else {
+                                continue;
+                            };
+
+                            let old_dest = self.set_cell(&dest_id, Some(cell.clone()));
+                            let old_source = self.set_cell(&source_id, None);
+                            self.spreadsheet.names.move_cell_name(&source_id, &dest_id);
+
+                            changes.push(CellUpdate(dest_id, old_dest, Some(cell)));
+                            changes.push(CellUpdate(source_id, old_source, None));
+                        }
+                    }
+
+                    for col in 0..=max_col {
+                        let trailing_id = AbsoluteCellId {
+                            sheet_id: spec.sheet_id,
+                            row: max_row,
+                            col,
+                        };
+                        let old = self.set_cell(&trailing_id, None);
+                        changes.push(CellUpdate(trailing_id, old, None));
+                    }
+                }
+            }
+            (false, ColumnOrRowChange::Remove) => {
+                // move cells from left to right when deleting column, so each source is read once
+                if spec.shift_start > max_col {
+                    // deleting the last used column: just clear deleted column
+                    if spec.index <= max_col {
+                        for row in 0..=max_row {
+                            let deleted_id = AbsoluteCellId {
+                                sheet_id: spec.sheet_id,
+                                row,
+                                col: spec.index,
+                            };
+                            let old = self.set_cell(&deleted_id, None);
+                            changes.push(CellUpdate(deleted_id, old, None));
+                        }
+                    }
+                } else {
+                    for col in spec.shift_start..=max_col {
+                        for row in 0..=max_row {
+                            let source_id = AbsoluteCellId {
+                                sheet_id: spec.sheet_id,
+                                row,
+                                col,
+                            };
+                            let dest_id = AbsoluteCellId {
+                                sheet_id: spec.sheet_id,
+                                row,
+                                col: col - 1,
+                            };
+                            let Some(cell) = self.spreadsheet.get_cell(&source_id).cloned() else {
+                                continue;
+                            };
+
+                            let old_dest = self.set_cell(&dest_id, Some(cell.clone()));
+                            let old_source = self.set_cell(&source_id, None);
+                            self.spreadsheet.names.move_cell_name(&source_id, &dest_id);
+
+                            changes.push(CellUpdate(dest_id, old_dest, Some(cell)));
+                            changes.push(CellUpdate(source_id, old_source, None));
+                        }
+                    }
+
+                    for row in 0..=max_row {
+                        let trailing_id = AbsoluteCellId {
+                            sheet_id: spec.sheet_id,
+                            row,
+                            col: max_col,
+                        };
+                        let old = self.set_cell(&trailing_id, None);
+                        changes.push(CellUpdate(trailing_id, old, None));
+                    }
+                }
+            }
+        }
+    }
+
+    fn apply_column_or_row_change(&mut self, spec: ColumnOrRowChangeSpec) -> Vec<CellUpdate> {
+        let collect_time = std::time::Instant::now();
+        let affected_cells = self.collect_affected_cells_for_column_or_row_change(spec);
+        let dependants_duration = collect_time.elapsed();
+
+        let mut changes = Vec::new();
+        let formula_time = std::time::Instant::now();
+        self.rewrite_formulas_for_column_or_row_change(spec, affected_cells, &mut changes);
         let formula_duration = formula_time.elapsed();
 
-        let bounds_time = std::time::Instant::now();
-        let max_row = self.spreadsheet.sheets[sheet_id as usize].find_biggest_row();
-        let max_col = self.spreadsheet.sheets[sheet_id as usize].find_biggest_column();
-        let bounds_duration = bounds_time.elapsed();
-
         let move_time = std::time::Instant::now();
-        if inserting_row {
-            // move cells from bottom to top, so each destination is free when we write into it
-            for row in (shift_start..=max_row).rev() {
-                for col in 0..=max_col {
-                    let source_id = AbsoluteCellId { sheet_id, row, col };
-                    let dest_id = AbsoluteCellId {
-                        sheet_id,
-                        row: row + 1,
-                        col,
-                    };
-                    let Some(cell) = self.spreadsheet.get_cell(&source_id).cloned() else {
-                        continue;
-                    };
+        self.move_cells_for_column_or_row_change(spec, &mut changes);
+        let move_duration = move_time.elapsed();
 
-                    self.set_cell(&dest_id, Some(cell));
-                    self.set_cell(&source_id, None);
-                    self.spreadsheet.names.move_cell_name(&source_id, &dest_id);
+        debug!(
+            "{} (dependencies & dependants) took: {:?}",
+            spec.operation_name(),
+            dependants_duration
+        );
+        debug!(
+            "{} (rewriting formulas) took: {:?}",
+            spec.operation_name(),
+            formula_duration
+        );
+        debug!(
+            "{} (moving cells) took: {:?}",
+            spec.operation_name(),
+            move_duration
+        );
+
+        changes
+    }
+
+    fn push_structural_history_entry(
+        &mut self,
+        spec: ColumnOrRowChangeSpec,
+        changes: Vec<CellUpdate>,
+    ) {
+        let bounds = if changes.is_empty() {
+            if spec.changing_row {
+                ChangeBounds {
+                    min_row: spec.index,
+                    max_row: spec.index,
+                    min_col: 0,
+                    max_col: 0,
+                }
+            } else {
+                ChangeBounds {
+                    min_row: 0,
+                    max_row: 0,
+                    min_col: spec.index,
+                    max_col: spec.index,
                 }
             }
         } else {
-            // move cells from right to left, so each destination is free when we write into it
-            for col in (shift_start..=max_col).rev() {
-                for row in 0..=max_row {
-                    let source_id = AbsoluteCellId { sheet_id, row, col };
-                    let dest_id = AbsoluteCellId {
-                        sheet_id,
-                        row,
-                        col: col + 1,
-                    };
-                    let Some(cell) = self.spreadsheet.get_cell(&source_id).cloned() else {
-                        continue;
-                    };
+            compute_bounds(&changes)
+        };
 
-                    self.set_cell(&dest_id, Some(cell));
-                    self.set_cell(&source_id, None);
-                    self.spreadsheet.names.move_cell_name(&source_id, &dest_id);
-                }
-            }
+        self.history.log.truncate(self.history.log_position);
+        let id = self.history.next_log_id;
+        self.history.next_log_id += 1;
+
+        let entry = match (spec.change, spec.changing_row) {
+            (ColumnOrRowChange::Insert, true) => HistoryLogEntry::InsertRow {
+                id,
+                changes,
+                bounds,
+            },
+            (ColumnOrRowChange::Insert, false) => HistoryLogEntry::InsertColumn {
+                id,
+                changes,
+                bounds,
+            },
+            (ColumnOrRowChange::Remove, true) => HistoryLogEntry::RemoveRow {
+                id,
+                changes,
+                bounds,
+            },
+            (ColumnOrRowChange::Remove, false) => HistoryLogEntry::RemoveColumn {
+                id,
+                changes,
+                bounds,
+            },
+        };
+        self.history.log.push(entry);
+        self.history.log_position = self.history.log.len();
+    }
+
+    pub fn insert_column_or_row(
+        &mut self,
+        sheet_id: u32,
+        inserting_row: bool,
+        index: u32,
+        include_index: bool,
+    ) {
+        // one path for insert, split by row/column and include_index inside spec
+        let spec = ColumnOrRowChangeSpec::for_insert(sheet_id, inserting_row, index, include_index);
+        let changes = self.apply_column_or_row_change(spec);
+        self.push_structural_history_entry(spec, changes);
+        self.history.last_saved_log_id = None;
+    }
+
+    pub fn remove_column_or_row(&mut self, sheet_id: u32, removing_row: bool, index: u32) {
+        // one path for remove, split by row/column inside spec
+        let spec = ColumnOrRowChangeSpec::for_remove(sheet_id, removing_row, index);
+        let changes = self.apply_column_or_row_change(spec);
+        self.push_structural_history_entry(spec, changes.clone());
+        if !changes.is_empty() {
+            self.post_cell_changes_hook(changes);
         }
-
-        debug!(
-            "Insert (dependencies & dependants) took: {:?}",
-            dependants_duration
-        );
-        debug!("Insert (rewriting formulas) took: {:?}", formula_duration);
-        debug!("Insert (finding bounds) took: {:?}", bounds_duration);
-        debug!("Insert (moving cells) took: {:?}", move_time.elapsed());
+        self.history.last_saved_log_id = None;
     }
 
     /// Sort table by column by reordering the current projected rows.
@@ -874,7 +1278,7 @@ impl Engine {
         self.history.last_saved_log_id = if self.history.log_position == 0 {
             Some(0)
         } else {
-            Some(self.history.log[self.history.log_position - 1].id)
+            Some(self.history.log[self.history.log_position - 1].id())
         };
     }
 }
@@ -887,6 +1291,7 @@ fn resolve_number(
 ) -> Result<Decimal, EvalError> {
     match expr {
         ExprAtom::Number(n) => Ok(*n),
+        ExprAtom::InvalidReferenceError(msg) => Err(EvalError::Error(msg.clone())),
         ExprAtom::Reference(r) => match r {
             Reference::Single { sheet_id, row, col } => {
                 let row = row.to_index(source_cell.row);
@@ -894,10 +1299,11 @@ fn resolve_number(
                 let gid = GridCellId { row, col };
                 match sheets[*sheet_id as usize].get_value(&gid) {
                     Some(CellValue::Number(n)) => Ok(*n),
-                    Some(_) => Err(EvalError::TypeError {
+                    Some(CellValue::Text(_)) => Err(EvalError::TypeError {
                         expected: AtomType::Number,
                         got: AtomType::Text,
                     }),
+                    Some(CellValue::Error(msg)) => Err(EvalError::Error(msg.clone())),
                     None => Ok(Decimal::ZERO),
                 }
             }
@@ -911,6 +1317,7 @@ fn resolve_number(
             got: match expr {
                 ExprAtom::Boolean(_) => AtomType::Boolean,
                 ExprAtom::Text(_) => AtomType::Text,
+                ExprAtom::InvalidReferenceError(_) => AtomType::InvalidReferenceError,
                 ExprAtom::Function(_) => AtomType::Function,
                 _ => unreachable!(),
             },
@@ -925,6 +1332,7 @@ fn resolve_range(
     _sheets: &Sheets,
 ) -> Result<(SheetId, u32, u32, u32, u32), EvalError> {
     match expr {
+        ExprAtom::InvalidReferenceError(msg) => Err(EvalError::Error(msg.clone())),
         ExprAtom::Reference(Reference::Range {
             sheet_id,
             start_row,
@@ -944,6 +1352,7 @@ fn resolve_range(
                 ExprAtom::Boolean(_) => AtomType::Boolean,
                 ExprAtom::Number(_) => AtomType::Number,
                 ExprAtom::Text(_) => AtomType::Text,
+                ExprAtom::InvalidReferenceError(_) => AtomType::InvalidReferenceError,
                 ExprAtom::Function(_) => AtomType::Function,
                 ExprAtom::Reference(Reference::Single { .. }) => AtomType::Reference,
                 _ => unreachable!(),
@@ -1034,6 +1443,7 @@ fn eval_formula(
     let value = match eval_store.pop() {
         Some(ExprAtom::Number(n)) => CellValue::Number(n),
         Some(ExprAtom::Text(s)) => CellValue::Text(s),
+        Some(ExprAtom::InvalidReferenceError(s)) => CellValue::Error(s),
         Some(ExprAtom::Boolean(b)) => CellValue::Text(b.to_string()),
         Some(other) => CellValue::Text(format!("{:?}", other)),
         None => unreachable!(),
@@ -1107,5 +1517,123 @@ mod tests {
         assert_cycle_error(&engine, cell(0, 0));
         assert_cycle_error(&engine, cell(0, 1));
         assert_cycle_error(&engine, cell(1, 0));
+    }
+
+    #[test]
+    fn remove_column_removes_selected_column() {
+        let mut engine = Engine::new();
+        let guard = engine.start_batch();
+        engine.insert_value(&guard, cell(0, 0), CellValue::Text("A".into()));
+        engine.insert_value(&guard, cell(0, 1), CellValue::Text("B".into()));
+        engine.insert_value(&guard, cell(0, 2), CellValue::Text("C".into()));
+        engine.end_batch(guard);
+
+        engine.remove_column_or_row(0, false, 1);
+
+        assert!(matches!(
+            engine.spreadsheet.get_cell(&cell(0, 0)).map(|c| &c.val),
+            Some(CellValue::Text(v)) if v == "A"
+        ));
+        assert!(matches!(
+            engine.spreadsheet.get_cell(&cell(0, 1)).map(|c| &c.val),
+            Some(CellValue::Text(v)) if v == "C"
+        ));
+        assert!(engine.spreadsheet.get_cell(&cell(0, 2)).is_none());
+    }
+
+    #[test]
+    fn remove_row_removes_selected_row() {
+        let mut engine = Engine::new();
+        let guard = engine.start_batch();
+        engine.insert_value(&guard, cell(0, 0), CellValue::Text("R0".into()));
+        engine.insert_value(&guard, cell(1, 0), CellValue::Text("R1".into()));
+        engine.insert_value(&guard, cell(2, 0), CellValue::Text("R2".into()));
+        engine.end_batch(guard);
+
+        engine.remove_column_or_row(0, true, 1);
+
+        assert!(matches!(
+            engine.spreadsheet.get_cell(&cell(0, 0)).map(|c| &c.val),
+            Some(CellValue::Text(v)) if v == "R0"
+        ));
+        assert!(matches!(
+            engine.spreadsheet.get_cell(&cell(1, 0)).map(|c| &c.val),
+            Some(CellValue::Text(v)) if v == "R2"
+        ));
+        assert!(engine.spreadsheet.get_cell(&cell(2, 0)).is_none());
+    }
+
+    #[test]
+    fn undo_redo_insert_row_reverts_and_reapplies_structure() {
+        let mut engine = Engine::new();
+        let guard = engine.start_batch();
+        engine.insert_value(&guard, cell(0, 0), CellValue::Text("R0".into()));
+        engine.insert_value(&guard, cell(1, 0), CellValue::Text("R1".into()));
+        engine.end_batch(guard);
+
+        engine.insert_column_or_row(0, true, 1, true);
+        assert!(engine.spreadsheet.get_cell(&cell(1, 0)).is_none());
+        assert!(matches!(
+            engine.spreadsheet.get_cell(&cell(2, 0)).map(|c| &c.val),
+            Some(CellValue::Text(v)) if v == "R1"
+        ));
+
+        engine.undo();
+        assert!(matches!(
+            engine.spreadsheet.get_cell(&cell(1, 0)).map(|c| &c.val),
+            Some(CellValue::Text(v)) if v == "R1"
+        ));
+        assert!(engine.spreadsheet.get_cell(&cell(2, 0)).is_none());
+
+        engine.redo();
+        assert!(engine.spreadsheet.get_cell(&cell(1, 0)).is_none());
+        assert!(matches!(
+            engine.spreadsheet.get_cell(&cell(2, 0)).map(|c| &c.val),
+            Some(CellValue::Text(v)) if v == "R1"
+        ));
+    }
+
+    #[test]
+    fn remove_last_column_rewrites_deleted_reference_to_error_atom() {
+        let mut engine = Engine::new();
+        let guard = engine.start_batch();
+        engine.parse_and_insert_string(&guard, cell(5, 6), "5");
+        engine.parse_and_insert_string(&guard, cell(5, 5), "=G6+5");
+        engine.end_batch(guard);
+
+        let old_formula_id = engine
+            .spreadsheet
+            .get_cell(&cell(5, 5))
+            .and_then(|c| c.defined_by_formula)
+            .expect("formula in F6");
+        let old_len = engine
+            .spreadsheet
+            .formulas
+            .get(old_formula_id)
+            .expect("formula to exist")
+            .ast
+            .len();
+
+        engine.remove_column_or_row(0, false, 6);
+
+        let formula_cell = engine
+            .spreadsheet
+            .get_cell(&cell(5, 5))
+            .expect("F6 cell to exist");
+        assert_eq!(formula_cell.val, CellValue::Error("#REF!".into()));
+
+        let new_formula_id = formula_cell.defined_by_formula.expect("formula id");
+        let new_formula = engine
+            .spreadsheet
+            .formulas
+            .get(new_formula_id)
+            .expect("formula to exist");
+        assert_eq!(new_formula.ast.len(), old_len);
+        assert!(new_formula
+            .ast
+            .iter()
+            .any(|expr| matches!(expr, Expr::Atom(ExprAtom::InvalidReferenceError(msg)) if msg == "#REF!")));
+
+        assert!(engine.spreadsheet.get_cell(&cell(5, 6)).is_none());
     }
 }

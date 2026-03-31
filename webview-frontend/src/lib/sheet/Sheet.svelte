@@ -43,6 +43,7 @@
             return [
                 { id: "insert-column-left", text: "Insert 1 column left" },
                 { id: "insert-column-right", text: "Insert 1 column right" },
+                { id: "remove-column", text: "Remove column" },
             ];
         }
 
@@ -50,6 +51,7 @@
             return [
                 { id: "insert-row-above", text: "Insert 1 row above" },
                 { id: "insert-row-below", text: "Insert 1 row below" },
+                { id: "remove-row", text: "Remove row" },
             ];
         }
 
@@ -163,6 +165,62 @@
                                 maxC: columnCount - 1,
                             },
                         );
+                    }
+                    requestAnimationFrame(() => render?.repositionOverlays());
+                })
+                .catch((e) => showError(String(e)));
+            return;
+        }
+
+        if (
+            ev.option.id === "remove-column" &&
+            contextMenuTarget?.kind === "column"
+        ) {
+            const removedCol = contextMenuTarget.col;
+            invoke("remove_column", { col: removedCol })
+                .then(() => {
+                    columnCount = Math.max(0, columnCount - 1);
+                    if (rowCount > 0 && columnCount > 0) {
+                        const col = Math.min(removedCol, columnCount - 1);
+                        selectRange(
+                            { row: 0, col },
+                            {
+                                minR: 0,
+                                maxR: rowCount - 1,
+                                minC: col,
+                                maxC: col,
+                            },
+                        );
+                    } else {
+                        clearFocus();
+                    }
+                    requestAnimationFrame(() => render?.repositionOverlays());
+                })
+                .catch((e) => showError(String(e)));
+            return;
+        }
+
+        if (
+            ev.option.id === "remove-row" &&
+            contextMenuTarget?.kind === "row"
+        ) {
+            const removedRow = contextMenuTarget.row;
+            invoke("remove_row", { row: removedRow })
+                .then(() => {
+                    rowCount = Math.max(0, rowCount - 1);
+                    if (columnCount > 0 && rowCount > 0) {
+                        const row = Math.min(removedRow, rowCount - 1);
+                        selectRange(
+                            { row, col: 0 },
+                            {
+                                minR: row,
+                                maxR: row,
+                                minC: 0,
+                                maxC: columnCount - 1,
+                            },
+                        );
+                    } else {
+                        clearFocus();
                     }
                     requestAnimationFrame(() => render?.repositionOverlays());
                 })

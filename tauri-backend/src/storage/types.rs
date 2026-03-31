@@ -344,6 +344,7 @@ pub enum ExprAtom {
     Boolean(bool),
     Number(Decimal),
     Text(String),
+    InvalidReferenceError(String),
     Function(UserFuncId),
     Reference(Reference),
 }
@@ -353,6 +354,7 @@ pub enum AtomType {
     Boolean,
     Number,
     Text,
+    InvalidReferenceError,
     Function,
     Reference,
 }

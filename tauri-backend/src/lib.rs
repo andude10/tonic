@@ -140,6 +140,7 @@ fn encode_cell(buf: &mut Vec<u8>, row: u32, col: u32, cell: Option<&Cell>) {
 /// Get the editor value for a cell.
 /// For regular data, returns the string representation.
 /// For formulas, returns the formula string with shifted references.
+/// Invalid references are rendered as error markers (for example `#REF!`).
 fn get_editor_value(state: &TonicState, cell_id: CellId) -> String {
     let abs_id = cell_id.to_absolute();
     let Some(cell) = state.engine.spreadsheet.get_cell(&abs_id) else {
@@ -598,6 +599,40 @@ fn insert_row(
     disable_all_table_projections(&app, &mut state.engine.spreadsheet)?;
 
     debug!("insert_row took: {:?}", timer.elapsed());
+    emit_save_status(&app, &state);
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn remove_column(
+    app: AppHandle,
+    state: tauri::State<'_, Mutex<TonicState>>,
+    col: u32,
+) -> Result<(), String> {
+    let timer = std::time::Instant::now();
+    let mut state = lock_state(state.inner());
+
+    state.engine.remove_column_or_row(0, false, col);
+    disable_all_table_projections(&app, &mut state.engine.spreadsheet)?;
+
+    debug!("remove_column took: {:?}", timer.elapsed());
+    emit_save_status(&app, &state);
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn remove_row(
+    app: AppHandle,
+    state: tauri::State<'_, Mutex<TonicState>>,
+    row: u32,
+) -> Result<(), String> {
+    let timer = std::time::Instant::now();
+    let mut state = lock_state(state.inner());
+
+    state.engine.remove_column_or_row(0, true, row);
+    disable_all_table_projections(&app, &mut state.engine.spreadsheet)?;
+
+    debug!("remove_row took: {:?}", timer.elapsed());
     emit_save_status(&app, &state);
     Ok(())
 }
@@ -1144,6 +1179,8 @@ pub fn run() {
             paste_values,
             insert_column,
             insert_row,
+            remove_column,
+            remove_row,
             get_cells_in_viewport,
             get_editor_value_for_cell,
             get_editor_value_for_cells,
