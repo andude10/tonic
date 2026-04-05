@@ -25,8 +25,12 @@ export type TableData = {
     hiddenRowsCount: number;
 };
 
+export type CellFormattingData = { extraWidth: number; extraHeight: number };
+
 export type SheetSharedState = {
     focusedCell: CellId | null;
+    hoveredCell: CellId | null;
+    selections: CellRange[];
     cellName: string;
     isEditing: boolean;
     isEditingCellName: boolean;
@@ -36,7 +40,11 @@ export type SheetSharedState = {
     caretPosition: number;
     editorInputWidth: number;
     tables: TableData[];
-    readonly tableCellStyles: Map<string, string>;
+    readonly cellStyles: Map<string, string>;
+    expandedCells: Map<string, CellFormattingData>;
+    expandModeActive: boolean;
+    getCellDisplayValue(row: number, col: number): string;
+    getCellIsFormula(row: number, col: number): boolean;
     commitEdit(): void;
 };
 

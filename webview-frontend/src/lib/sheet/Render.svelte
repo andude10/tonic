@@ -26,6 +26,7 @@
     import CloneSourceOverlay from "./overlays/CloneSourceOverlay.svelte";
     import RefOverlay from "./overlays/RefOverlay.svelte";
     import TableOverlay from "./overlays/TableOverlay.svelte";
+    import ExpandedCellOverlay from "./overlays/ExpandedCellOverlay.svelte";
 
     const REF_COLORS = [
         "#4184BF",
@@ -147,7 +148,7 @@
     let gridApi: IApi | null = $state(null);
 
     function cellStyle(row: any, col: any): string {
-        return shared.tableCellStyles.get(`${row.id},${col.id}`) ?? "";
+        return shared.cellStyles.get(`${row.id},${col.id}`) ?? "";
     }
 
     // --- viewport tracking ---
@@ -297,6 +298,7 @@
         cloneSource: null as CloneSourceOverlay | null,
         refs: [] as RefOverlay[],
         tables: [] as (TableOverlay | undefined)[],
+        expands: [] as (ExpandedCellOverlay | undefined)[],
     });
     let gridWrapperEl: HTMLElement | null = null;
     let clipWrapperEl: HTMLElement | null = null;
@@ -376,6 +378,7 @@
         o.cloneSource?.reposition();
         for (const r of o.refs) r?.reposition();
         for (const t of o.tables) t?.reposition();
+        for (const e of o.expands) e?.reposition();
     }
 
     function applyHeaderHighlights() {
@@ -445,6 +448,8 @@
         fillOriginalBounds;
         clonedFormulaBounds;
         parsedFormulaReferencesHighlights;
+        shared.expandedCells;
+        shared.expandModeActive;
         applyHeaderHighlights();
         repositionOverlays();
     });
@@ -466,6 +471,16 @@
         if (isCellData(cell)) return cell;
         return null;
     }
+
+    // Expanded cell keys: the map entries + the focused cell in expand mode
+    let expandKeys = $derived.by(() => {
+        const keys = [...shared.expandedCells.keys()];
+        if (shared.expandModeActive && shared.focusedCell) {
+            const fk = `${shared.focusedCell.row},${shared.focusedCell.col}`;
+            if (!shared.expandedCells.has(fk)) keys.push(fk);
+        }
+        return keys;
+    });
 
     export function getOverlaysEl(): HTMLElement | null {
         return overlaysEl;
@@ -651,14 +666,19 @@
                         active={i === activeRefIndex}
                     />
                 {/each}
+                {#each expandKeys as cellKey, i}
+                    <ExpandedCellOverlay
+                        bind:this={overlayRefs.expands[i]}
+                        {sos}
+                        {cellKey}
+                    />
+                {/each}
                 <FocusOverlay
                     bind:this={overlayRefs.focus}
                     {sos}
                     bounds={activeSelectionBounds}
                     visible={!!activeSelectionBounds}
                     {isFilling}
-                    isEditing={shared.isEditing}
-                    editorInputWidth={shared.editorInputWidth}
                     showBorder={activeFocusHasBorder}
                     showBackground={activeFocusHasBackground}
                     {onfillstart}
@@ -708,7 +728,9 @@
 
     .add-bar button {
         cursor: pointer;
-        transition: background 100ms ease, border-color 100ms ease;
+        transition:
+            background 100ms ease,
+            border-color 100ms ease;
     }
 
     .add-bar button:hover {

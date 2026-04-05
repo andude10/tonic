@@ -13,7 +13,7 @@
     } from "$lib/sheet/shared";
     import { invoke } from "@tauri-apps/api/core";
     import SheetFormulaPanel from "./SheetFormulaPanel.svelte";
-    import { onMount, untrack } from "svelte";
+    import { onMount, tick, untrack } from "svelte";
     import {
         cellsInBounds,
         cellsOutside,
@@ -383,7 +383,7 @@
     let tables: TableData[] = $state([]);
 
     // Map of "row,col" -> CSS class name for table cells
-    let tableCellStyles = $derived.by(() => {
+    let cellStyles = $derived.by(() => {
         const map = new Map<string, string>();
         for (const t of tables) {
             const hRow = t.headerBounds.minR;
@@ -413,10 +413,12 @@
 
     let render: Render | null = $state(null);
     let gridApi: IApi | null = $state(null);
-    let overlaysEl: HTMLElement | null = $state(null);
+    function getOverlaysEl(): HTMLElement | null {
+        return render?.getOverlaysEl() ?? null;
+    }
 
     function isOverlayEvent(ev: Event): boolean {
-        return !!overlaysEl?.contains(ev.target as Node);
+        return !!getOverlaysEl()?.contains(ev.target as Node);
     }
 
     // --- selection state ---
@@ -444,6 +446,24 @@
 
     let editorInputWidth = $state(0);
     let editorInputIsFormula = $derived(editorInput.startsWith("="));
+
+    // --- cell expand ---
+    let expandedCells: Map<
+        string,
+        import("$lib/sheet/shared").CellFormattingData
+    > = $state(new Map());
+    let expandModeActive = $state(false);
+
+    function detectDoubleKey(): boolean {
+        const now = Date.now();
+        if (now - _lastKeyUpTime < 300) {
+            _lastKeyUpTime = 0;
+            return true;
+        }
+        _lastKeyUpTime = now;
+        return false;
+    }
+    let _lastKeyUpTime = 0;
 
     const REF_COLORS = [
         "#4184BF",
@@ -541,6 +561,18 @@
         set focusedCell(v) {
             focusedCell = v;
         },
+        get hoveredCell() {
+            return hoveredCell;
+        },
+        set hoveredCell(v) {
+            hoveredCell = v;
+        },
+        get selections() {
+            return selections;
+        },
+        set selections(v) {
+            selections = v;
+        },
         get isEditing() {
             return isEditing;
         },
@@ -586,8 +618,28 @@
         get tables() {
             return tables;
         },
-        get tableCellStyles() {
-            return tableCellStyles;
+        get cellStyles() {
+            return cellStyles;
+        },
+        get expandedCells() {
+            return expandedCells;
+        },
+        set expandedCells(v) {
+            expandedCells = v;
+        },
+        get expandModeActive() {
+            return expandModeActive;
+        },
+        set expandModeActive(v) {
+            expandModeActive = v;
+        },
+        getCellDisplayValue(row: number, col: number): string {
+            const cell = render?.getCell({ row, col });
+            return cell?.computedValue ?? "";
+        },
+        getCellIsFormula(row: number, col: number): boolean {
+            const cell = render?.getCell({ row, col });
+            return cell?.isFormula ?? false;
         },
         commitEdit,
     });
@@ -700,14 +752,14 @@
         return focusedCellBounds;
     });
 
-    let activeFocusHasBorder = $derived.by(() => {
+    let showFocusBorder = $derived.by(() => {
         if (!activeSelectionBounds) return false;
         if (isFilling) return true;
         if (isSelecting) return isSingleCellRange(activeSelectionBounds);
         return true;
     });
 
-    let activeFocusHasBackground = $derived.by(() => {
+    let showFocusBackground = $derived.by(() => {
         if (!activeSelectionBounds) return false;
         if (isFilling) return false;
         if (isSelecting) return !isSingleCellRange(activeSelectionBounds);
@@ -993,29 +1045,59 @@
         isSelecting = false;
         appendSelectionOnMouseUp = false;
         isSingleCellSelectionOnMouseUp = false;
+        expandModeActive = false;
         gridApi?.exec("focus-cell", {
             row: undefined,
             column: undefined,
         });
     }
 
-    function moveFocusToInlineEditor(cell: CellId) {
+    async function moveFocusToInlineEditor(cell: CellId) {
+        // wait for Svelte to flush DOM updates (InputCell appears after isEditing becomes true)
+        await tick();
+        await new Promise((r) => requestAnimationFrame(r));
+
+        const expandKey = `${cell.row},${cell.col}`;
+        const hasExpand =
+            expandedCells.has(expandKey) ||
+            (expandModeActive &&
+                focusedCell?.row === cell.row &&
+                focusedCell?.col === cell.col);
+
+        console.log("[moveFocus] cell:", expandKey,
+            "hasExpand:", hasExpand,
+            "getOverlaysEl():", !!getOverlaysEl(),
+            "expandedCells.has:", expandedCells.has(expandKey),
+            "expandModeActive:", expandModeActive,
+            "isEditing:", isEditing);
+
+        const oel = getOverlaysEl();
+        if (hasExpand && oel) {
+            const editor = oel.querySelector<HTMLInputElement>(
+                ".expanded-cell .editor",
+            );
+            console.log("[moveFocus] overlay editor found:", !!editor,
+                "all .expanded-cell:", oel.querySelectorAll(".expanded-cell").length,
+                "all .editor:", oel.querySelectorAll(".editor").length);
+            if (editor) { editor.focus(); return; }
+        }
+
+        // regular grid cell
         const ui = toUICell(cell);
-        requestAnimationFrame(() => {
-            document
-                .querySelector<HTMLInputElement>(
-                    `.wx-cell[data-row-id="${ui.row}"][data-col-id=":${ui.column}"] .editor`,
-                )
-                ?.focus();
-        });
+        const gridEditor = document.querySelector<HTMLInputElement>(
+            `.wx-cell[data-row-id="${ui.row}"][data-col-id=":${ui.column}"] .editor`,
+        );
+        console.log("[moveFocus] grid editor found:", !!gridEditor);
+        gridEditor?.focus();
     }
 
     function handleGridInit(api: IApi) {
         gridApi = api;
-        overlaysEl = render?.getOverlaysEl() ?? null;
     }
 
     function handleMouseMove(ev: MouseEvent) {
+        if (isOverlayEvent(ev)) return;
+
         // if select is active but left-button on mouse is not pressed, stop selection
         if (isSelecting && !(ev.buttons & 1)) {
             isSelecting = false;
@@ -1076,6 +1158,11 @@
     }
 
     function handleMouseDown(ev: MouseEvent) {
+        // clicking anywhere on the grid (not on the overlay, which stopPropagates) exits resize mode
+        if (expandModeActive) {
+            expandModeActive = false;
+        }
+
         // right-click inside current selection: let context menu handle it
         if (
             ev.button === 2 &&
@@ -1118,11 +1205,9 @@
             return;
         }
 
-        // if clicked while holding alt, move focus only
+        // if clicked while holding alt, move focus only (discard any in-progress edit)
         if (ev.altKey) {
-            if (isEditing) {
-                commitEdit();
-            }
+            isEditing = false;
             focusedCell = clicked;
             hoveredCell = clicked;
             isSelecting = false;
@@ -1170,6 +1255,8 @@
     }
 
     function handleMouseUp(ev: MouseEvent) {
+        if (isOverlayEvent(ev)) return;
+
         // fill cells on release
         if (isFilling && fillOriginalBounds && hoveredCell) {
             const bounds = rangeFromBoundsAndCell(
@@ -1520,13 +1607,25 @@
 
         if (ev.key === "Shift" && !isEditing) {
             isSelecting = false;
+            if (detectDoubleKey() && focusedCell) {
+                expandModeActive = !expandModeActive;
+            }
         }
     }
 
     // --- public API (delegated to Render or handled here) ---
 
     export function saveDecorationsToJson(): string {
-        return render?.saveDecorationsToJson() ?? "{}";
+        const base = JSON.parse(render?.saveDecorationsToJson() ?? "{}");
+        if (expandedCells.size > 0) {
+            const obj: Record<
+                string,
+                { extraWidth: number; extraHeight: number }
+            > = {};
+            for (const [k, v] of expandedCells) obj[k] = v;
+            base.expandedCells = obj;
+        }
+        return JSON.stringify(base);
     }
 
     export function onFileLoad(decorationsJson?: string) {
@@ -1545,13 +1644,26 @@
         editorInsertReferenceStart = null;
         editorInsertReferenceEnd = null;
         editorInsertReference = false;
+        expandModeActive = false;
 
-        // restore table decorations
+        // restore decorations
         if (decorationsJson) {
             const dec = JSON.parse(decorationsJson);
             if (dec.tables) tables = dec.tables;
+            if (dec.expandedCells) {
+                const map = new Map<
+                    string,
+                    { extraWidth: number; extraHeight: number }
+                >();
+                for (const [k, v] of Object.entries(dec.expandedCells))
+                    map.set(k, v as any);
+                expandedCells = map;
+            } else {
+                expandedCells = new Map();
+            }
         } else {
             tables = [];
+            expandedCells = new Map();
         }
 
         // delegate data/grid/polling reset to Render
@@ -1626,8 +1738,8 @@
             {activeRefIndex}
             {selections}
             {activeSelectionBounds}
-            {activeFocusHasBorder}
-            {activeFocusHasBackground}
+            activeFocusHasBorder={showFocusBorder}
+            activeFocusHasBackground={showFocusBackground}
             {focusedCellBounds}
             {isSelecting}
             bind:rowCount

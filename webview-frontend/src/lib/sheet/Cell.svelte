@@ -37,6 +37,13 @@
             shared.focusedCell?.col === colIndex,
     );
 
+    // Hide cell content when an ExpandedCellOverlay renders this cell
+    const expandKey = `${(row.id as number) - 1},${colIndex}`;
+    let hasExpandOverlay = $derived(
+        shared.expandedCells.has(expandKey) ||
+            (shared.expandModeActive && focusedThisCell),
+    );
+
     const cell = $derived(row[column.id]);
     const displayContent = $derived(
         isCellData(cell) ? cell.computedValue : (cell ?? ""),
@@ -44,8 +51,7 @@
     const hasFormula = $derived(isCellData(cell) && cell.isFormula);
 
     const isTableHeader = $derived(
-        shared.tableCellStyles.get(`${row.id},${column.id}`) ===
-            "table-header-cell",
+        shared.cellStyles.get(`${row.id},${column.id}`) === "table-header-cell",
     );
 
     function headerCellId() {
@@ -140,7 +146,9 @@
     });
 </script>
 
-{#if shared.isEditing && focusedThisCell}
+{#if hasExpandOverlay}
+    <!-- ExpandedCellOverlay renders this cell -->
+{:else if shared.isEditing && focusedThisCell}
     <div
         class="editing-cell"
         class:formula={shared.editorInputIsFormula}
@@ -249,7 +257,7 @@
         padding: 0 0.15em;
         background: none;
         border: none;
-        color: rgba(255, 255, 255, 0.30);
+        color: rgba(255, 255, 255, 0.3);
         cursor: pointer;
         font-size: 0.875em;
         flex-shrink: 0;
