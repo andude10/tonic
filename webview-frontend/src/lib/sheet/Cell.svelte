@@ -236,7 +236,8 @@
         padding: 0.15em;
         flex-shrink: 0;
         color: rgba(255, 255, 255, 0.15);
-        border: var(--wx-border);
+        border: 1px solid #35373d;
+        border-radius: 1px;
     }
 
     .display-cell > :global(span:has(.table-header-btn)) {
@@ -248,7 +249,7 @@
         padding: 0 0.15em;
         background: none;
         border: none;
-        color: rgba(255, 255, 255, 0.35);
+        color: rgba(255, 255, 255, 0.30);
         cursor: pointer;
         font-size: 0.875em;
         flex-shrink: 0;
@@ -256,9 +257,10 @@
         display: flex;
         align-items: center;
         pointer-events: auto;
+        transition: color 100ms ease;
     }
 
     .table-header-btn:hover {
-        color: rgba(255, 255, 255, 0.8);
+        color: rgba(255, 255, 255, 0.7);
     }
 </style>

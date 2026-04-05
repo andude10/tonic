@@ -5,6 +5,9 @@ description = "A Tauri App"
 authors = ["andude10"]
 edition = "2021"
 
+[features]
+rust_decimal_align16 = ["rust_decimal/align16"]
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
@@ -32,3 +35,15 @@ tar = "0.4"
 rust_decimal = { version = "1.40.0", features = ["serde-with-str"] }
 rstar = "0.12"
 petgraph = "0.8"
+
+# Optimize dependencies even in dev builds — huge speedup for
+# serde, flate2, chumsky etc. while keeping tonic_lib itself debuggable.
+[profile.dev.package."*"]
+opt-level = 2
+
+# Release profile: full optimizations + LTO
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

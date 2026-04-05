@@ -78,6 +78,7 @@
         display: flex;
         align-items: center;
         width: 100%;
+        border-bottom: 1px solid #3c3e44;
     }
 
     .window-controls {
@@ -90,20 +91,23 @@
     .window-controls button {
         background: none;
         border: none;
-        color: inherit;
+        color: rgba(255, 255, 255, 0.5);
         width: 46px;
         height: 32px;
         cursor: pointer;
         display: flex;
         align-items: center;
         justify-content: center;
+        transition: background 100ms ease, color 100ms ease;
     }
 
     .window-controls button:hover {
         background: rgba(255, 255, 255, 0.1);
+        color: rgba(255, 255, 255, 0.9);
     }
 
     .window-controls .close:hover {
-        background: #ff6b70;
+        background: rgba(248, 113, 113, 0.8);
+        color: white;
     }
 </style>

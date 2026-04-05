@@ -105,7 +105,7 @@
     }
 
     .backdrop :global(.formula-fn-name) {
-        color: #e0a050;
+        color: #F2A516;
     }
 
     .backdrop :global(.formula-cell-reference) {

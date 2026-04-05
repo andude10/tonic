@@ -72,7 +72,7 @@
     .focus-overlay {
         position: absolute;
         border: 2px solid transparent;
-        border-radius: 4px;
+        border-radius: 1px;
         background: transparent;
         box-sizing: border-box;
         will-change: transform, width, height;
@@ -88,20 +88,21 @@
         position: absolute;
         bottom: -4px;
         right: -4px;
-        width: 9px;
-        height: 9px;
+        width: 8px;
+        height: 8px;
         background: var(--wx-color-primary);
         border: 1px solid var(--wx-background);
+        border-radius: 1px;
         cursor: crosshair;
         pointer-events: auto;
         z-index: 10;
     }
 
     .fill-handle.filling {
-        width: 12px;
-        height: 12px;
-        bottom: -6px;
-        right: -6px;
+        width: 10px;
+        height: 10px;
+        bottom: -5px;
+        right: -5px;
         animation: fill-spin 0.8s linear infinite;
     }
 

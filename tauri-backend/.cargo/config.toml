@@ -1,0 +1,3 @@
+[build]
+# Use lld for faster linking on Linux
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]

@@ -41,7 +41,7 @@
     .ref-overlay {
         position: absolute;
         border: 2px solid currentColor;
-        border-radius: 4px;
+        border-radius: 1px;
         will-change: transform, width, height;
         pointer-events: none;
         --transition-base:
@@ -57,9 +57,9 @@
         content: "";
         position: absolute;
         inset: -2px;
-        border: 2px solid currentColor;
-        border-radius: 4px;
-        opacity: 0.7;
+        border: 1px solid currentColor;
+        border-radius: 1px;
+        opacity: 0.5;
     }
 
     .ref-overlay.active {

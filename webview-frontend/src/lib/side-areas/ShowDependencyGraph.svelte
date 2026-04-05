@@ -96,8 +96,8 @@
         flex-direction: column;
         gap: 12px;
         background: var(--wx-background);
-        color: rgba(255, 255, 255, 0.88);
-        border-left: var(--wx-border);
+        color: rgba(255, 255, 255, 0.80);
+        border-left: 1px solid #44464c;
     }
 
     .header {
@@ -106,19 +106,23 @@
         justify-content: space-between;
         gap: 14px;
         padding: 12px 14px;
-        border: var(--wx-border);
-        border-radius: var(--wx-border-radius);
+        border: 1px solid #44464c;
+        border-radius: 2px;
         background: var(--wx-background-alt);
     }
 
     .header h2 {
         margin: 0;
-        font-size: 14px;
+        font-size: 13px;
+        font-family: "JetBrains Mono", monospace;
+        color: rgba(255, 255, 255, 0.8);
+        letter-spacing: 0.03em;
     }
 
     .header p {
         margin: 3px 0 0;
-        opacity: 0.5;
+        opacity: 0.4;
+        font-size: 11px;
     }
 
     .actions {
@@ -131,8 +135,8 @@
         flex: 1;
         min-height: 0;
         overflow: auto;
-        border: var(--wx-border);
-        border-radius: var(--wx-border-radius);
+        border: 1px solid #35373d;
+        border-radius: 2px;
         padding: 16px;
         background: var(--wx-background-hover);
     }
@@ -150,9 +154,11 @@
         justify-content: center;
         flex: 1;
         padding: 16px;
-        border: 1px dashed #3e4042;
-        border-radius: var(--wx-border-radius);
+        border: 1px dashed #44464c;
+        border-radius: 2px;
         opacity: 0.6;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 11px;
     }
 
     .error {
@@ -165,8 +171,8 @@
     }
 
     .dot-source {
-        border: var(--wx-border);
-        border-radius: var(--wx-border-radius);
+        border: 1px solid #35373d;
+        border-radius: 2px;
         background: var(--wx-background-hover);
         overflow: hidden;
     }
@@ -175,6 +181,9 @@
         padding: 10px 14px;
         background: var(--wx-background-alt);
         cursor: pointer;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 11px;
+        color: rgba(255, 255, 255, 0.5);
     }
 
     .dot-source pre {
@@ -183,7 +192,7 @@
         max-height: 180px;
         overflow: auto;
         font-size: 11px;
-        opacity: 0.6;
+        opacity: 0.5;
     }
 
     @media (max-width: 900px) {

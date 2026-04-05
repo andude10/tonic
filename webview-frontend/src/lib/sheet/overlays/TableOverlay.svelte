@@ -174,11 +174,11 @@
 <style>
     .table-border {
         position: absolute;
-        border-radius: 4px;
+        border-radius: 1px;
         pointer-events: none;
-        border: 1px solid #1a1a1a;
-        outline: 1px solid #1a1a1a;
-        transition: box-shadow 0.3s ease;
+        /* important to have both border and outline of this size, otherwise cell's border is going to be visible */
+        border: 1px solid #1a1c22;
+        outline: 1px solid #1a1c22;
         box-shadow:
             0 0 0 0 transparent,
             0 0 0 transparent,
@@ -191,7 +191,8 @@
         content: "";
         position: absolute;
         inset: -2px;
-        border-radius: 4px;
+        border-radius: 1px;
+        will-change: background-position;
         background:
             linear-gradient(90deg, var(--wx-color-primary) 50%, transparent 0) 0
                 0 / 20px 1px repeat-x,
@@ -216,16 +217,18 @@
 
     .table-title {
         position: absolute;
-        color: #a1a1aa;
-        font-size: 12px;
+        color: #b0b0b0;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 11px;
         font-weight: 600;
+        letter-spacing: 0.03em;
         display: flex;
         align-items: center;
         justify-content: center;
         pointer-events: auto;
         overflow: hidden;
         white-space: nowrap;
-        background: #1a1a1a;
+        background: #1a1c22;
     }
 
     .title-text {
@@ -276,18 +279,16 @@
 
     .table-border.has-projection {
         box-shadow:
-        /* tight outline */
             0 0 0 1px rgba(255, 255, 255, 0.06),
-            /* inner glow for metallic edge */ inset 0 1px 0
-                rgba(255, 255, 255, 0.08),
+            inset 0 1px 0 rgba(255, 255, 255, 0.08),
             inset 0 -1px 0 rgba(0, 0, 0, 0.3),
-            /* symmetric ambient shadow */ 0 0 12px rgba(0, 0, 0, 0.5),
+            0 0 12px rgba(0, 0, 0, 0.5),
             0 0 30px rgba(0, 0, 0, 0.3);
     }
 
     .hidden-rows-overlay {
         position: absolute;
-        background: rgba(26, 26, 26);
+        background: rgba(30, 32, 36, 0.95);
         pointer-events: none;
         display: flex;
         align-items: flex-start;
@@ -296,8 +297,10 @@
     }
 
     .hidden-rows-text {
-        color: #a1a1aa;
-        font-size: 11px;
-        font-weight: 600;
+        color: rgba(255, 255, 255, 0.5);
+        font-family: "JetBrains Mono", monospace;
+        font-size: 10px;
+        font-weight: 500;
+        letter-spacing: 0.05em;
     }
 </style>

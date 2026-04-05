@@ -38,13 +38,9 @@
 <style>
     .selection-overlay {
         position: absolute;
-        border: 1px solid color-mix(in srgb, var(--wx-color-primary), white 18%);
-        border-radius: 3px;
-        background: color-mix(
-            in srgb,
-            var(--wx-color-primary),
-            transparent 95%
-        );
+        border: 1px solid rgba(65, 132, 191, 0.5);
+        border-radius: 1px;
+        background: rgba(65, 132, 191, 0.06);
         will-change: transform, width, height;
         pointer-events: none;
         transition:

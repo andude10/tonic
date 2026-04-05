@@ -180,7 +180,7 @@
                                 fill="none"
                             >
                                 <g
-                                    fill="#aaa"
+                                    fill="#4184BF"
                                     fill-rule="evenodd"
                                     clip-rule="evenodd"
                                 >
@@ -201,7 +201,7 @@
                             >
                                 <title>All changes are saved</title>
                                 <path
-                                    fill="#699f4c"
+                                    fill="#08A64D"
                                     fill-rule="evenodd"
                                     d="M30 0a30 30 0 110 60 30 30 0 010-60zm-16.986 36.765a3.484 3.484 0 010-4.9l1.766-1.756a3.185 3.185 0 014.574.051l3.12 3.237a1.592 1.592 0 002.311 0l15.9-16.39a3.187 3.187 0 014.6-.027L47 18.714a3.482 3.482 0 010 4.846l-21.109 21.451a3.185 3.185 0 01-4.552.03z"
                                 />
@@ -214,7 +214,7 @@
                             >
                                 <title>Changes are not saved</title>
                                 <path
-                                    fill="#9f4c4c"
+                                    fill="#ef4444"
                                     fill-rule="evenodd"
                                     d="M940,510a30,30,0,1,1,30-30A30,30,0,0,1,940,510Zm15-20.047A3.408,3.408,0,0,1,955,494.77l-0.221.22a3.42,3.42,0,0,1-4.833,0l-8.764-8.755a1.71,1.71,0,0,0-2.417,0l-8.741,8.747a3.419,3.419,0,0,1-4.836,0l-0.194-.193a3.408,3.408,0,0,1,.017-4.842l8.834-8.735a1.7,1.7,0,0,0,0-2.43l-8.831-8.725a3.409,3.409,0,0,1-.018-4.844l0.193-.193a3.413,3.413,0,0,1,2.418-1c0.944,0,3.255,1.835,3.872,2.455l7.286,7.287a1.708,1.708,0,0,0,2.417,0l8.764-8.748a3.419,3.419,0,0,1,4.832,0L955,465.243a3.408,3.408,0,0,1,0,4.818l-8.727,8.737a1.7,1.7,0,0,0,0,2.407Z"
                                     transform="translate(-910 -450)"
@@ -246,7 +246,7 @@
 </div>
 
 <style>
-    /* Side areas — position below WindowBar, above grid scrollbars */
+    /* Side areas - position below WindowBar, above grid scrollbars */
     :global(.wx-sidearea) {
         top: 32px !important;
         right: 0 !important;
@@ -262,25 +262,53 @@
     :global(.wx-sidearea button) {
         border: var(--wx-border);
         background: var(--wx-button-background);
-        color: rgba(255, 255, 255, 0.88);
+        color: rgba(255, 255, 255, 0.8);
         border-radius: var(--wx-border-radius);
         padding: 7px 13px;
         font-size: 12px;
         font-weight: 500;
         cursor: pointer;
-        transition: background 120ms ease;
+        transition:
+            background 120ms ease,
+            border-color 120ms ease;
     }
 
     :global(.wx-sidearea button:hover) {
-        background: #3e4042;
+        background: #3c3e44;
     }
 
     :global(.wx-popup) {
-        --wx-popup-border: 1px solid rgba(255, 255, 255, 0.08) !important;
-        --wx-popup-border-radius: 8px !important;
-        --wx-popup-shadow:
-            0 8px 24px rgba(0, 0, 0, 0.35), 0 2px 6px rgba(0, 0, 0, 0.2) !important;
-        --wx-popup-background: #1e1f22 !important;
+        --wx-popup-border: 1px solid #44464c !important;
+        --wx-popup-border-radius: 2px !important;
+        --wx-popup-shadow: 0 8px 24px rgba(0, 0, 0, 0.5) !important;
+        --wx-popup-background: #1e2024 !important;
+    }
+
+    /* Override SVAR WillowDark theme background */
+    :global(.wx-willow-dark-theme) {
+        --wx-background: #2a2c32 !important;
+    }
+
+    /* MenuBar — override SVAR default background */
+    :global(.wx-menubar) {
+        background: transparent !important;
+    }
+
+    /* Context menu & dropdown menu backgrounds (portaled outside .layout-container) */
+    :global([data-wx-menu].wx-menu) {
+        background: #1e2024 !important;
+        border: 1px solid #44464c !important;
+        border-radius: 2px !important;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5) !important;
+    }
+
+    /* Dropdown list background */
+    :global(.wx-dropdown .wx-list) {
+        --wx-input-padding: 4px 8px;
+        --wx-input-font-size: 12px;
+        --wx-checkbox-size: 14px;
+        --wx-checkbox-height: 14px;
+        background: #1e2024;
     }
 
     /* Menu options */
@@ -294,13 +322,14 @@
         border-radius: 4px !important;
         margin: 1px 4px !important;
         padding: 0 8px !important;
+        background: transparent !important;
         transition: background 100ms ease;
     }
     :global([data-wx-menu] .wx-option:hover) {
-        background: rgba(126, 93, 171, 0.15) !important;
+        background: rgba(65, 132, 191, 0.12) !important;
     }
     :global([data-wx-menu] .wx-option.wx-active) {
-        background: rgba(126, 93, 171, 0.22) !important;
+        background: rgba(65, 132, 191, 0.18) !important;
     }
     :global([data-wx-menu] .wx-option.filter-option),
     :global([data-wx-menu] .wx-option.filter-option:hover) {
@@ -310,7 +339,7 @@
     }
     :global([data-wx-menu] .wx-separator) {
         margin: 4px 8px !important;
-        border-color: rgba(255, 255, 255, 0.06) !important;
+        border-color: #35373d !important;
     }
 
     /* Menu bar icons */
@@ -319,6 +348,7 @@
         align-items: center !important;
         justify-content: center !important;
         font-size: 12px !important;
+        color: #c0c0c0 !important;
     }
 
     /* Filter MultiCombo in dropdown */
@@ -328,22 +358,18 @@
         --wx-input-font-size: 12px;
         --wx-input-padding: 0 6px;
         --wx-input-icon-size: 14px;
-        --wx-input-border: 1px solid rgba(255, 255, 255, 0.08);
+        --wx-input-border: 1px solid #3c3e44;
         --wx-input-border-focus: 1px solid var(--wx-color-primary);
-        --wx-input-background: #262729;
+        --wx-input-background: #1e2024;
     }
     :global(.filter-option .wx-multicombo .wx-wrapper) {
         min-height: 0 !important;
-        border-radius: 6px !important;
-    }
-    :global(.wx-dropdown .wx-list) {
-        --wx-input-padding: 4px 8px;
-        --wx-input-font-size: 12px;
-        --wx-checkbox-size: 14px;
-        --wx-checkbox-height: 14px;
+        border-radius: 2px !important;
     }
     :global(.wx-dropdown) {
-        border-radius: 6px !important;
+        border-radius: 2px !important;
+        background: #1e2024 !important;
+        border: 1px solid #44464c !important;
     }
     :global(.wx-dropdown .wx-list .wx-checkbox) {
         margin-right: 6px !important;
@@ -358,13 +384,13 @@
     }
 
     :global(.wx-dropdown .wx-list .wx-item:hover) {
-        background: rgba(126, 93, 171, 0.12) !important;
+        background: rgba(65, 132, 191, 0.12) !important;
     }
     .dialog-overlay {
         position: fixed;
         inset: 0;
         z-index: 9999;
-        background: rgba(0, 0, 0, 0.3);
+        background: rgba(0, 0, 0, 0.35);
         display: flex;
         align-items: center;
         justify-content: center;
@@ -374,7 +400,7 @@
 
     .loading-text {
         width: fit-content;
-        font-size: 40px;
+        font-size: 44px;
         line-height: 1.5;
         font-family: system-ui, sans-serif;
         font-weight: bold;
@@ -416,7 +442,9 @@
         margin-left: 1em;
         margin-right: 1em;
         font-weight: 500;
-        color: rgba(255, 255, 255, 0.7);
+        font-family: "JetBrains Mono", monospace;
+        font-size: 11px;
+        letter-spacing: 0.02em;
         white-space: nowrap;
     }
 
@@ -453,7 +481,7 @@
     /* scroll bars */
     :global(*) {
         scrollbar-width: thin;
-        scrollbar-color: #3e4042 transparent;
+        scrollbar-color: #3c3e44 transparent;
     }
     :global(::-webkit-scrollbar) {
         width: 0.5rem;
@@ -463,11 +491,11 @@
         background: transparent;
     }
     :global(::-webkit-scrollbar-thumb) {
-        background: #3e4042;
-        border-radius: 0.25rem;
+        background: #3c3e44;
+        border-radius: 1px;
     }
     :global(::-webkit-scrollbar-thumb:hover) {
-        background: var(--wx-color-primary, #7e5dab);
+        background: #52545a;
     }
     :global(::-webkit-scrollbar-corner) {
         background: transparent;
@@ -504,50 +532,49 @@
         /* Font size */
         --wx-font-size: 12px;
 
-        /* Vibrant Summer color palette overrides */
-
-        /* Primary: Dusty Grape */
-        --wx-color-primary: #7e5dab;
-        --wx-color-primary-selected: rgba(126, 93, 171, 0.3);
+        /* Primary: Misso Blue */
+        --wx-color-primary: #4184bf;
+        --wx-color-primary-selected: rgba(65, 132, 191, 0.25);
         --wx-color-primary-font: #fff;
         --wx-color-secondary: transparent;
-        --wx-color-secondary-hover: rgba(126, 93, 171, 0.12);
+        --wx-color-secondary-hover: rgba(65, 132, 191, 0.1);
         --wx-color-secondary-font: var(--wx-color-primary);
         --wx-color-secondary-font-hover: var(--wx-color-primary);
         --wx-color-secondary-border: var(--wx-color-primary);
 
-        /* Semantic colors from Vibrant Summer palette */
-        --wx-color-success: #22c55e;
-        --wx-color-warning: #eab308;
-        --wx-color-danger: #ef4444;
-        --wx-color-info: #3b82f6;
+        /* Semantic */
+        --wx-color-success: #4ade80;
+        --wx-color-warning: #fbbf24;
+        --wx-color-danger: #f87171;
+        --wx-color-info: #67b4e0;
 
-        /* Secondary font color for icons */
-        --wx-color-font-alt: white;
+        /* Icon color */
+        --wx-color-font-alt: black;
 
-        /* Dark backgrounds — neutral grey with slight cool tint */
-        --wx-background: #2b2d30;
-        --wx-background-alt: #363839;
-        --wx-background-hover: #222426;
+        /* Backgrounds — neutral grey with subtle cool tint */
+        --wx-background: #2a2c32;
+        --wx-background-alt: #32343a;
+        --wx-background-hover: #232529;
 
         /* Borders */
-        --wx-border: 1px solid #3e4042;
-        --wx-border-light: 1px solid #3e4042;
-        --wx-border-medium: 1px solid #3e4042;
-        --wx-border-radius: 6px;
+        --wx-border: 1px solid #3c3e44;
+        --wx-border-light: 1px solid #35373d;
+        --wx-border-medium: 1px solid #44464c;
+        --wx-border-radius: 2px;
 
-        /* Table overrides */
-        --wx-table-header-background: #222426;
-        --wx-table-select-background: #363839;
+        /* Table / grid */
+        --wx-table-header-background: #232529;
+        --wx-table-select-background: #32343a;
+        --wx-table-cell-border: 1px solid #35373d;
 
         /* Buttons */
-        --wx-button-background: #363839;
-        --wx-button-pressed: #2e3032;
-        --wx-button-primary-pressed: #4a3566;
+        --wx-button-background: #32343a;
+        --wx-button-pressed: #2a2c32;
+        --wx-button-primary-pressed: #2d6a9e;
 
         /* Input */
         --wx-input-background: var(--wx-background);
-        --wx-input-background-disabled: #363839;
+        --wx-input-background-disabled: #32343a;
         --wx-input-border: var(--wx-border);
         --wx-input-border-focus: 1px solid var(--wx-color-primary);
 
@@ -556,22 +583,20 @@
         --wx-tabs-active-border: var(--wx-color-primary);
 
         /* Switch/slider */
-        --wx-switch-background: #3e4042;
-        --wx-slider-background: #363839;
+        --wx-switch-background: #3c3e44;
+        --wx-slider-background: #32343a;
 
-        /* Color disabled */
-        --wx-color-disabled: #3e4042;
-        --wx-color-disabled-alt: #464849;
+        /* Disabled */
+        --wx-color-disabled: #44464c;
+        --wx-color-disabled-alt: #52545a;
 
-        /* Popups (context menus, etc.) above grid overlays */
+        /* Popups above grid overlays */
         --wx-popup-z-index: 10;
 
-        background: var(--wx-background);
-
-        /* Notice overrides */
-        --wx-notice-background: #363839;
-        --wx-notice-border: 1px solid #3e4042;
-        --wx-notice-border-radius: 6px;
-        --wx-notice-type-icon-color: white;
+        /* Notice */
+        --wx-notice-background: #32343a;
+        --wx-notice-border: 1px solid #3c3e44;
+        --wx-notice-border-radius: 2px;
+        --wx-notice-type-icon-color: #a0a0a0;
     }
 </style>

@@ -38,10 +38,9 @@
 <style>
     .fill-origin-overlay {
         position: absolute;
-        background: color-mix(in srgb, var(--wx-color-primary) 8%, transparent);
-        border: 2px dashed
-            color-mix(in srgb, var(--wx-color-primary) 40%, transparent);
-        border-radius: 2px;
+        background: rgba(65, 132, 191, 0.06);
+        border: 1px dashed rgba(65, 132, 191, 0.35);
+        border-radius: 1px;
         pointer-events: none;
     }
 </style>

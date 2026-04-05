@@ -76,8 +76,6 @@
             />
         </div>
 
-        <div class="separator">|</div>
-
         <div class="content-group" onfocusin={handleFocus}>
             <div class="formula-label">ƒ(x)</div>
 
@@ -101,6 +99,7 @@
         height: 1.875rem;
         padding: 0 0.25rem;
         user-select: none;
+        border-bottom: 1px solid #3c3e44;
     }
 
     .panel-content {
@@ -114,6 +113,9 @@
     .cell-ref-group {
         display: flex;
         align-items: center;
+        border-right: 1px solid #3c3e44;
+        margin: -1px 0.25rem -1px 0;
+        padding: 1px 0.375rem 1px 0;
     }
 
     .cell-ref-input {
@@ -123,7 +125,7 @@
         padding-right: 0.8rem;
         border: none;
         background: transparent;
-        color: var(--wx-input-font-color, rgba(255, 255, 255, 0.9));
+        color: rgba(255, 255, 255, 0.7);
         font-family: "JetBrains Mono", monospace;
         font-size: 0.75rem;
         font-weight: 500;
@@ -132,19 +134,13 @@
     }
 
     .cell-ref-input:focus {
-        outline: 1px solid var(--wx-color-primary, #5a8dee);
+        outline: 1px solid var(--wx-color-primary);
         cursor: text;
+        color: rgba(255, 255, 255, 0.9);
     }
 
     .cell-ref-input::placeholder {
-        color: var(--wx-input-placeholder-color, #9fa1ae);
-    }
-
-    .separator {
-        color: var(--wx-border-light, #384047);
-        font-size: 1rem;
-        line-height: 1;
-        opacity: 0.5;
+        color: rgba(255, 255, 255, 0.20);
     }
 
     .content-group {
@@ -156,10 +152,10 @@
     }
 
     .formula-label {
-        font-family: var(--wx-font-family, sans-serif);
-        font-size: 0.8125rem;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 0.6875rem;
         font-weight: 500;
-        color: var(--wx-color-font-alt, #9fa1ae);
+        color: rgba(255, 255, 255, 0.30);
         min-width: fit-content;
         display: flex;
         align-items: center;

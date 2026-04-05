@@ -65,27 +65,30 @@
         flex-wrap: wrap;
         gap: 8px;
         padding: 8px;
-        font-family: monospace;
+        font-family: "JetBrains Mono", monospace;
         user-select: none;
+        border-top: 1px solid #35373d;
     }
     .stat-group {
         display: flex;
         flex-direction: column;
-        border-radius: 4px;
+        border-radius: 2px;
         padding: 4px 8px;
         min-width: 110px;
+        border: 1px solid #35373d;
     }
     .header {
         display: flex;
         justify-content: space-between;
         align-items: center;
         margin-bottom: 4px;
+        color: rgba(255, 255, 255, 0.5);
     }
     button {
         background: none;
         border: none;
         cursor: pointer;
-        color: #999;
+        color: rgba(255, 255, 255, 0.3);
         padding: 2px;
         display: flex;
         align-items: center;
@@ -93,7 +96,7 @@
         transition: all 0.2s;
     }
     button:hover {
-        color: #f44;
+        color: #f87171;
         opacity: 1;
         transform: rotate(-30deg);
     }
@@ -105,20 +108,22 @@
         display: flex;
         justify-content: space-between;
         gap: 10px;
-        font-size: 13px;
+        font-size: 12px;
+        color: rgba(255, 255, 255, 0.5);
     }
     .high {
-        color: #888;
+        color: rgba(255, 255, 255, 0.25);
         font-size: 0.85em;
         align-self: center;
     }
     .count {
-        color: #888;
+        color: rgba(255, 255, 255, 0.25);
         font-size: 0.85em;
         align-self: center;
     }
     small {
         font-size: 0.7em;
-        opacity: 0.6;
+        opacity: 0.5;
+        color: rgba(255, 255, 255, 0.35);
     }
 </style>

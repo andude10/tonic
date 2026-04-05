@@ -28,12 +28,12 @@
     import TableOverlay from "./overlays/TableOverlay.svelte";
 
     const REF_COLORS = [
-        "#2a96d6",
-        "#ff6b70",
-        "#ffd24d",
-        "#9ad636",
-        "#f0527a",
-        "#7e5dab",
+        "#4184BF",
+        "#F27405",
+        "#08A64D",
+        "#F2A516",
+        "#4B93BF",
+        "#d3869b",
     ];
 
     type FormulaReferenceHighlight = {
@@ -688,8 +688,11 @@
         gap: 0.5em;
         padding: 0.75em 1.5em;
         font-size: 0.8rem;
-        background: var(--wx-table-header-background);
-        border-radius: 0.4em;
+        font-family: "JetBrains Mono", monospace;
+        background: var(--wx-background);
+        border: 1px solid #44464c;
+        border-radius: 2px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
     }
 
     .add-bar button,
@@ -698,12 +701,14 @@
         font: inherit;
         color: inherit;
         padding: 0.35em 0.6em;
-        border-radius: 0.25em;
+        border-radius: 2px;
         background: rgba(255, 255, 255, 0.07);
+        border: none;
     }
 
     .add-bar button {
         cursor: pointer;
+        transition: background 100ms ease, border-color 100ms ease;
     }
 
     .add-bar button:hover {

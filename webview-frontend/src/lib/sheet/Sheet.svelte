@@ -446,12 +446,12 @@
     let editorInputIsFormula = $derived(editorInput.startsWith("="));
 
     const REF_COLORS = [
-        "#2a96d6",
-        "#ff6b70",
-        "#ffd24d",
-        "#9ad636",
-        "#f0527a",
-        "#7e5dab",
+        "#4184BF",
+        "#F27405",
+        "#08A64D",
+        "#F2A516",
+        "#4B93BF",
+        "#d3869b",
     ];
 
     type FormulaReferenceHighlight = {
@@ -1649,18 +1649,22 @@
         outline: none;
     }
 
+    :global(.wx-table-box) {
+        border-top: none !important;
+    }
+
     :global(.wx-cell[data-col-id=":rowNumber"]) {
         background: var(--wx-table-header-background) !important;
         font-weight: var(--wx-header-font-weight) !important;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 10px;
+        color: rgba(255, 255, 255, 0.55);
         text-align: center;
         display: flex !important;
         align-items: center;
         justify-content: center;
         user-select: none;
         border-right: var(--wx-table-cell-border) !important;
-        transition:
-            background-color 30ms cubic-bezier(0, 0, 0.2, 1),
-            box-shadow 30ms cubic-bezier(0, 0, 0.2, 1);
         -webkit-user-select: none;
     }
 
@@ -1669,27 +1673,22 @@
     }
 
     :global(div[role="columnheader"]) {
-        transition:
-            background-color 30ms cubic-bezier(0, 0, 0.2, 1),
-            box-shadow 30ms cubic-bezier(0, 0, 0.2, 1);
+        font-family: "JetBrains Mono", monospace;
+        font-size: 10px;
+        letter-spacing: 0.04em;
+        color: rgba(255, 255, 255, 0.6);
     }
 
     :global(div[role="columnheader"].highlight-col) {
-        box-shadow: inset 0 3px 0 var(--wx-color-primary) !important;
-        background-color: color-mix(
-            in srgb,
-            var(--wx-table-header-background),
-            black 10%
-        ) !important;
+        box-shadow: inset 0 -2px 0 var(--wx-color-primary) !important;
+        background-color: #1e2024 !important;
+        color: var(--wx-color-primary) !important;
     }
 
     :global(.wx-cell.highlight-row) {
-        box-shadow: inset 3px 0 0 var(--wx-color-primary) !important;
-        background-color: color-mix(
-            in srgb,
-            var(--wx-table-header-background),
-            black 10%
-        ) !important;
+        box-shadow: inset 2px 0 0 var(--wx-color-primary) !important;
+        background-color: #1e2024 !important;
+        color: var(--wx-color-primary) !important;
     }
 
     :global(.wx-cell:focus) {
@@ -1697,20 +1696,20 @@
     }
 
     :global(.table-header-cell) {
-        background: #1a1a1a !important;
-        border-bottom: 1px solid #333 !important;
+        background: #1a1c22 !important;
+        border-bottom: 1px solid #44464c !important;
         border-right: 0px !important;
         font-weight: 500;
-        color: #a1a1aa;
+        color: #c0c0c0;
     }
 
     :global(.table-row-even) {
-        background: #1e1f22 !important;
-        border-bottom: 1px solid #2a2a2a !important;
+        background: #1e2026 !important;
+        border-bottom: 1px solid #35373d !important;
     }
 
     :global(.table-row-odd) {
-        background: #232527 !important;
-        border-bottom: 1px solid #2a2a2a !important;
+        background: #22242a !important;
+        border-bottom: 1px solid #35373d !important;
     }
 </style>

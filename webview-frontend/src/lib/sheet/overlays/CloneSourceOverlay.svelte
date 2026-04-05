@@ -38,8 +38,8 @@
 <style>
     .clone-source-overlay {
         position: absolute;
-        border: 2px dashed var(--wx-color-primary);
-        border-radius: 4px;
+        border: 1px dashed rgba(65, 132, 191, 0.55);
+        border-radius: 1px;
         will-change: transform, width, height;
         pointer-events: none;
     }

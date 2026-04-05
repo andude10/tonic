@@ -51,7 +51,7 @@
         border: none;
         padding: 0;
         font-size: 12px;
-        color: var(--wx-color-primary, #7e5dab);
+        color: var(--wx-color-primary, #4184BF);
         cursor: pointer;
         opacity: 0.8;
     }
