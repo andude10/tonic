@@ -81,7 +81,7 @@ export function columnIndexToLetter(index: number): string {
     return s;
 }
 
-// todo: remove, indexing is messy enough
+// todo: remove, indexing is messy again
 export function parseSvarID(
     raw: string | undefined,
 ): string | number | undefined {

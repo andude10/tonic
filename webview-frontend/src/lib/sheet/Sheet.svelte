@@ -1064,22 +1064,38 @@
                 focusedCell?.row === cell.row &&
                 focusedCell?.col === cell.col);
 
-        console.log("[moveFocus] cell:", expandKey,
-            "hasExpand:", hasExpand,
-            "getOverlaysEl():", !!getOverlaysEl(),
-            "expandedCells.has:", expandedCells.has(expandKey),
-            "expandModeActive:", expandModeActive,
-            "isEditing:", isEditing);
+        console.log(
+            "[moveFocus] cell:",
+            expandKey,
+            "hasExpand:",
+            hasExpand,
+            "getOverlaysEl():",
+            !!getOverlaysEl(),
+            "expandedCells.has:",
+            expandedCells.has(expandKey),
+            "expandModeActive:",
+            expandModeActive,
+            "isEditing:",
+            isEditing,
+        );
 
         const oel = getOverlaysEl();
         if (hasExpand && oel) {
             const editor = oel.querySelector<HTMLInputElement>(
                 ".expanded-cell .editor",
             );
-            console.log("[moveFocus] overlay editor found:", !!editor,
-                "all .expanded-cell:", oel.querySelectorAll(".expanded-cell").length,
-                "all .editor:", oel.querySelectorAll(".editor").length);
-            if (editor) { editor.focus(); return; }
+            console.log(
+                "[moveFocus] overlay editor found:",
+                !!editor,
+                "all .expanded-cell:",
+                oel.querySelectorAll(".expanded-cell").length,
+                "all .editor:",
+                oel.querySelectorAll(".editor").length,
+            );
+            if (editor) {
+                editor.focus();
+                return;
+            }
         }
 
         // regular grid cell
@@ -1499,6 +1515,8 @@
             ev.key === "ArrowRight";
 
         if (pressedArrowButton && focusedCell) {
+            // arrow navigation exits expand mode
+            if (expandModeActive) expandModeActive = false;
             // if pressing arrow key without alt in edit mode ...
             if (isEditing && !ev.altKey) {
                 // .. then use arrow key to navigate inside editor
