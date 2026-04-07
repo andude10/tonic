@@ -16,9 +16,11 @@
     import { open, save } from "@tauri-apps/plugin-dialog";
     import { listen } from "@tauri-apps/api/event";
     import { onMount } from "svelte";
+    import { initExtensionDispatcher } from "$lib/extensions/dispatcher";
 
     attachConsole();
     trackFps();
+    initExtensionDispatcher();
 
     let sheet: Sheet;
     let currentFilePath: string | null = $state(null);

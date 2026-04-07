@@ -13,7 +13,6 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::ops::ControlFlow;
-use std::time::Instant;
 
 use petgraph::{
     dot::{Config, Dot, RankDir},
@@ -22,7 +21,6 @@ use petgraph::{
     Direction,
 };
 use rstar::{RTree, RTreeObject, AABB};
-use tauri_plugin_log::log::debug;
 
 use crate::storage::{
     grid::{Grid, GridCellId},
@@ -169,7 +167,6 @@ impl RTreeObject for VisitedRange {
 pub struct DependencyGraph {
     graph: StableDiGraph<CellRange, CompressedEdgeData>,
     vertex_index: RTree<IndexedVertex>,
-    ranges_buf: Vec<CellRange>,
 }
 
 impl Default for DependencyGraph {
@@ -177,7 +174,6 @@ impl Default for DependencyGraph {
         Self {
             graph: StableDiGraph::new(),
             vertex_index: RTree::new(),
-            ranges_buf: Vec::new(),
         }
     }
 }
@@ -252,12 +248,13 @@ impl DependencyGraph {
     //
     // counter == 0 means ready (no unprocessed predecessors).
     pub fn init_pending_counter_for_new_recalculation(
-        &mut self,
-        sheets: &mut [Grid],
+        &self,
+        sheets: &[Grid],
         changed_ranges: &[CellRange],
     ) {
         let mut queue = VecDeque::new();
         let mut visited: RTree<VisitedRange> = RTree::new();
+        let mut ranges_buf = Vec::new();
 
         for &changed_range in changed_ranges {
             queue.push_back(changed_range);
@@ -295,9 +292,9 @@ impl DependencyGraph {
             }
 
             // discover new dependant ranges at range level and enqueue unvisited portions
-            self.collect_direct_dependant_ranges(prec_to_visit);
-            for i in 0..self.ranges_buf.len() {
-                for new_range in subtract_visited(&self.ranges_buf[i], &visited) {
+            self.collect_direct_dependant_ranges(prec_to_visit, &mut ranges_buf);
+            for i in 0..ranges_buf.len() {
+                for new_range in subtract_visited(&ranges_buf[i], &visited) {
                     visited.insert(VisitedRange::new(new_range));
                     queue.push_back(new_range);
                 }
@@ -305,22 +302,39 @@ impl DependencyGraph {
         }
     }
 
-    // decrement pending counters of direct dependants after evaluating a cell
-    //
-    // after a cell is evaluated, its dependants have one fewer predecessor to wait for.
+    // decrement pending counters of direct dependants after evaluating a cell.
     // returns cells that became ready (counter dropped to 0).
+    // thread-safe: allocates its own scratch buffer.
     pub fn decrease_pending_counter(
-        &mut self,
-        sheets: &mut [Grid],
+        &self,
+        sheets: &[Grid],
         evaluated_range: CellRange,
     ) -> Vec<AbsoluteCellId> {
         let mut ready_cells = Vec::new();
+        let mut ranges_buf = Vec::new();
+        let envelope = vertex_envelope(evaluated_range);
 
-        self.collect_direct_dependant_ranges(evaluated_range);
-        for i in 0..self.ranges_buf.len() {
-            self.ranges_buf[i].for_each_cell(|cell| {
-                decrease_pending_counter(sheets, cell);
-                if get_pending_counter(sheets, cell) == 0 {
+        for iv in self.vertex_index.locate_in_envelope_intersecting(&envelope) {
+            let Some(&vertex_range) = self.graph.node_weight(iv.vertex_index) else {
+                continue;
+            };
+            let Some(overlap) = vertex_range.intersection(&evaluated_range) else {
+                continue;
+            };
+
+            for edge in self
+                .graph
+                .edges_directed(iv.vertex_index, Direction::Outgoing)
+            {
+                if let Some(dep_range) = find_dependant_range(&self.graph, edge.id(), overlap) {
+                    ranges_buf.push(dep_range);
+                }
+            }
+        }
+
+        for range in &ranges_buf {
+            range.for_each_cell(|cell| {
+                if decrease_pending_counter(sheets, cell) == 0 {
                     ready_cells.push(cell);
                 }
             });
@@ -366,12 +380,15 @@ impl DependencyGraph {
         dependants
     }
 
-    // collect direct dependant ranges into self.ranges_buf (reused across calls)
-    //
+    // collect direct dependant ranges into buf.
     // walks outgoing edges of overlapping vertices, using findDep (paper Sec. III)
     // to compute the actual affected sub-range of each dependant.
-    fn collect_direct_dependant_ranges(&mut self, dependency_range: CellRange) {
-        self.ranges_buf.clear();
+    fn collect_direct_dependant_ranges(
+        &self,
+        dependency_range: CellRange,
+        buf: &mut Vec<CellRange>,
+    ) {
+        buf.clear();
         let envelope = vertex_envelope(dependency_range);
 
         for iv in self.vertex_index.locate_in_envelope_intersecting(&envelope) {
@@ -387,7 +404,7 @@ impl DependencyGraph {
                 .edges_directed(iv.vertex_index, Direction::Outgoing)
             {
                 if let Some(dep_range) = find_dependant_range(&self.graph, edge.id(), overlap) {
-                    self.ranges_buf.push(dep_range);
+                    buf.push(dep_range);
                 }
             }
         }
@@ -1179,17 +1196,19 @@ fn vertex_envelope(range: CellRange) -> AABB<[i64; 3]> {
 
 // --- free functions: pending counter helpers ---
 
-fn increase_pending_counter(sheets: &mut [Grid], cell_id: AbsoluteCellId) {
+// atomic: no &mut needed
+fn increase_pending_counter(sheets: &[Grid], cell_id: AbsoluteCellId) {
     let grid_cell_id: GridCellId = (&cell_id).into();
     sheets[cell_id.sheet_id as usize].increase_pending_dependencies(&grid_cell_id);
 }
 
-fn decrease_pending_counter(sheets: &mut [Grid], cell_id: AbsoluteCellId) {
+// atomic: returns value after decrement
+fn decrease_pending_counter(sheets: &[Grid], cell_id: AbsoluteCellId) -> u16 {
     let grid_cell_id: GridCellId = (&cell_id).into();
-    sheets[cell_id.sheet_id as usize].decrease_pending_dependencies(&grid_cell_id);
+    sheets[cell_id.sheet_id as usize].decrease_pending_dependencies(&grid_cell_id)
 }
 
-fn get_pending_counter(sheets: &[Grid], cell_id: AbsoluteCellId) -> u32 {
+fn get_pending_counter(sheets: &[Grid], cell_id: AbsoluteCellId) -> u16 {
     let grid_cell_id: GridCellId = (&cell_id).into();
     sheets[cell_id.sheet_id as usize].get_pending_dependencies(&grid_cell_id)
 }
@@ -1230,6 +1249,8 @@ fn subtract_visited(range: &CellRange, visited: &RTree<VisitedRange>) -> Vec<Cel
 mod tests {
     use super::*;
 
+    use std::sync::atomic::AtomicU16;
+
     use crate::storage::{
         grid::{Cell, CellValue},
         types::FormulaId,
@@ -1257,8 +1278,8 @@ mod tests {
                 &grid_cell_id,
                 Cell {
                     defined_by_formula: None,
-                    val: CellValue::Error(String::new()),
-                    pending_dependencies: 0,
+                    val: CellValue::Error("".into()),
+                    pending_dependencies: AtomicU16::new(0),
                 },
             );
         }
@@ -1276,8 +1297,8 @@ mod tests {
                 &grid_cell_id,
                 Cell {
                     defined_by_formula: Some(*formula_id),
-                    val: CellValue::Error(String::new()),
-                    pending_dependencies: 0,
+                    val: CellValue::Error("".into()),
+                    pending_dependencies: AtomicU16::new(0),
                 },
             );
         }

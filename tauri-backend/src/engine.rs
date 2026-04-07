@@ -1,10 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicU16, AtomicU64};
+use std::sync::Arc;
 use std::time::Instant;
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter, Listener};
 use tauri_plugin_log::log::{debug, info};
+use tokio_stream::StreamExt;
 
 use std::io;
 
@@ -19,6 +23,73 @@ use crate::storage::types::{
 /// A single cell mutation: (cell_id, old_value, new_value).
 #[derive(Clone)]
 pub struct CellUpdate(pub AbsoluteCellId, pub Option<Cell>, pub Option<Cell>);
+
+/// Typed argument sent to JS for external function calls.
+/// References are pre-resolved to absolute coordinates.
+#[derive(Serialize, Clone, Debug)]
+#[serde(tag = "type", content = "value")]
+enum ExternArg {
+    #[serde(rename = "number")]
+    Number(String),
+    #[serde(rename = "text")]
+    Text(String),
+    #[serde(rename = "boolean")]
+    Boolean(bool),
+    #[serde(rename = "single_ref")]
+    SingleRef { sheet_id: u32, row: u32, col: u32 },
+    #[serde(rename = "range_ref")]
+    RangeRef {
+        sheet_id: u32,
+        start_row: u32,
+        start_col: u32,
+        end_row: u32,
+        end_col: u32,
+    },
+}
+
+/// Global app handle, set once during setup. Used by eval tasks to call JS.
+static APP_HANDLE: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
+static CALL_ID: AtomicU64 = AtomicU64::new(0);
+
+pub fn set_app_handle(app: AppHandle) {
+    let _ = APP_HANDLE.set(app);
+}
+
+/// Call a JS-side external function via Tauri events.
+/// Emits "ext-fn-call", waits for "ext-fn-response-{callId}".
+async fn call_extern_js_function(
+    func_name: &str,
+    args: Vec<ExternArg>,
+) -> Result<String, EvalError> {
+    let app = APP_HANDLE
+        .get()
+        .ok_or_else(|| EvalError::Error("no app handle for external call".into()))?;
+
+    let call_id = CALL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let response_event = format!("ext-fn-response-{}", call_id);
+
+    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<String>();
+    app.once(&response_event, move |event: tauri::Event| {
+        let _ = resp_tx.send(event.payload().to_string());
+    });
+
+    app.emit(
+        "ext-fn-call",
+        serde_json::json!({
+            "callId": call_id,
+            "funcName": func_name,
+            "args": args,
+        }),
+    )
+    .map_err(|e| EvalError::Error(e.to_string()))?;
+
+    let response = tokio::time::timeout(std::time::Duration::from_secs(30), resp_rx)
+        .await
+        .map_err(|_| EvalError::Error(format!("{}(): external call timeout", func_name)))?
+        .map_err(|_| EvalError::Error(format!("{}(): response channel dropped", func_name)))?;
+
+    Ok(response)
+}
 
 /// Bounding rectangle of affected cells. Returned by undo/redo.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -128,10 +199,12 @@ impl DebugInfo {
 
 pub struct Engine {
     // todo: move spreadsheet out of the Engine?
-    pub spreadsheet: Spreadsheet,
+    pub spreadsheet: Arc<Spreadsheet>,
     history: History,
     batch: Vec<CellUpdate>,
     debug: DebugInfo,
+    // dedicated runtime for parallel formula evaluation, separate from tauri's runtime
+    eval_runtime: tokio::runtime::Runtime,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -191,12 +264,25 @@ impl ColumnOrRowChangeSpec {
 
 impl Engine {
     pub fn new() -> Self {
+        let eval_runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(std::thread::available_parallelism().map_or(4, |n| n.get()))
+            .thread_name("tonic-eval")
+            .enable_time()
+            .build()
+            .expect("failed to create eval runtime");
+
         Self {
-            spreadsheet: Spreadsheet::new(),
+            spreadsheet: Arc::new(Spreadsheet::new()),
             history: History::new(),
             batch: Vec::new(),
             debug: DebugInfo::new(),
+            eval_runtime,
         }
+    }
+
+    /// Exclusive mutable access to the spreadsheet. Only valid when no tokio tasks hold a clone.
+    pub fn spreadsheet_mut(&mut self) -> &mut Spreadsheet {
+        Arc::get_mut(&mut self.spreadsheet).expect("spreadsheet is shared during eval")
     }
 
     pub fn start_batch(&mut self) -> EngineGuard {
@@ -205,25 +291,32 @@ impl Engine {
     }
 
     fn set_cell(&mut self, id: &AbsoluteCellId, new_cell: Option<Cell>) -> Option<Cell> {
-        let old_cell = self.spreadsheet.get_cell(id).cloned();
+        let old_cell = self.spreadsheet.get_cell(id);
         if old_cell
             .as_ref()
             .and_then(|cell| cell.defined_by_formula)
             .is_some()
         {
-            self.spreadsheet.dependency_graph.remove_formula_cell(*id);
+            self.spreadsheet_mut()
+                .dependency_graph
+                .remove_formula_cell(*id);
         }
 
         match new_cell.as_ref() {
-            Some(cell) => self.spreadsheet.insert_cell(id, cell.clone()),
-            None => self.spreadsheet.remove_cell(id),
+            Some(cell) => self.spreadsheet_mut().insert_cell(id, cell.clone()),
+            None => self.spreadsheet_mut().remove_cell(id),
         }
 
         if let Some(formula_id) = new_cell.as_ref().and_then(|cell| cell.defined_by_formula) {
-            if let Some(formula) = self.spreadsheet.formulas.get(formula_id) {
-                self.spreadsheet
+            let ast = self
+                .spreadsheet
+                .formulas
+                .get(formula_id)
+                .map(|f| f.ast.clone());
+            if let Some(ast) = ast {
+                self.spreadsheet_mut()
                     .dependency_graph
-                    .insert_formula_cell(*id, &formula.ast);
+                    .insert_formula_cell(*id, &ast);
             }
         }
 
@@ -268,7 +361,7 @@ impl Engine {
             col: id.col,
         };
         let mut state = FormulaState {
-            names: &mut self.spreadsheet.names,
+            names: &mut self.spreadsheet_mut().names,
             cell_id: parser_cell_id,
             expr_arena: Vec::new(),
         };
@@ -287,13 +380,13 @@ impl Engine {
             ast,
             formula_string: input.to_string(),
         };
-        let formula_id = self.spreadsheet.formulas.insert(formula);
+        let formula_id = self.spreadsheet_mut().formulas.insert(formula);
 
         // insert cell with formula reference and dependencies
         let new = Cell {
             defined_by_formula: Some(formula_id),
-            val: CellValue::Error(String::new()),
-            pending_dependencies: 0,
+            val: CellValue::Error("".into()),
+            pending_dependencies: AtomicU16::new(0),
         };
         self.record_cell_change(id, Some(new));
     }
@@ -303,9 +396,9 @@ impl Engine {
     }
 
     pub fn insert_value(&mut self, _: &EngineGuard, id: AbsoluteCellId, val: CellValue) {
-        let old = self.spreadsheet.get_cell(&id).cloned();
-        self.spreadsheet.set_value(&id, val);
-        let new = self.spreadsheet.get_cell(&id).cloned();
+        let old = self.spreadsheet.get_cell(&id);
+        self.spreadsheet_mut().set_value_and_create_block(&id, val);
+        let new = self.spreadsheet.get_cell(&id);
         self.batch.push(CellUpdate(id, old, new));
     }
 
@@ -317,8 +410,8 @@ impl Engine {
     ) {
         let new = Cell {
             defined_by_formula: Some(formula_id),
-            val: CellValue::Error(String::new()),
-            pending_dependencies: 0,
+            val: CellValue::Error("".into()),
+            pending_dependencies: AtomicU16::new(0),
         };
         self.record_cell_change(id, Some(new));
     }
@@ -333,12 +426,7 @@ impl Engine {
         self.debug.eval_number += 1;
         info!("Eval #{}", self.debug.eval_number);
 
-        // step 1: discover all affected dependants and set their pending counters
-        //
-        // run the TACO BFS (paper Algorithm 3) from all changed cells simultaneously.
-        // counter = number of affected predecessors that must be evaluated first.
-        // group adjacent changed cells into ranges so one compressed edge query
-        // covers many cells at once instead of one per cell
+        // step 1: discover all affected dependants and set their pending counters (sync)
         let init_time = Instant::now();
         let changed_ranges = merge_cells_into_ranges(
             &changes
@@ -348,17 +436,10 @@ impl Engine {
         );
         self.spreadsheet
             .dependency_graph
-            .init_pending_counter_for_new_recalculation(
-                &mut self.spreadsheet.sheets,
-                &changed_ranges,
-            );
+            .init_pending_counter_for_new_recalculation(&self.spreadsheet.sheets, &changed_ranges);
         let init_duration = init_time.elapsed();
 
-        // step 2: collect ready changed cells into the starting wave
-        //
-        // changed cells with counter == 0 have no affected predecessors and can
-        // be processed immediately. changed cells with counter > 0 depend on other
-        // changed cells and will join the wave when their predecessors are done.
+        // step 2: collect cells with counter == 0 into the starting wave
         let mut wave: Vec<AbsoluteCellId> = Vec::new();
         for CellUpdate(id, _, _) in &changes {
             let grid_id: GridCellId = id.into();
@@ -368,71 +449,89 @@ impl Engine {
             }
         }
 
-        let mut dep_duration = std::time::Duration::ZERO;
-        let mut eval_duration = std::time::Duration::ZERO;
-        let mut eval_store: Vec<ExprAtom> = Vec::new();
-
-        let mut affected_tables: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        for cell_id in &wave {
-            if let Some((table_id, _)) = self.spreadsheet.find_table_containing_cell(cell_id) {
-                affected_tables.insert(table_id);
-            }
-        }
-
-        // step 3: evaluate formulas in topological order
+        // step 3: evaluate formulas in topological order, dispatching batches to tokio tasks.
         //
-        // pop a cell from the wave, evaluate its formula (if any),
-        // then decrement its dependants' pending counters.
-        // dependants whose counter drops to 1 are ready and join the wave.
-        while let Some(cell_id) = wave.pop() {
-            let formula_id = self
-                .spreadsheet
-                .get_cell(&cell_id)
-                .and_then(|c| c.defined_by_formula);
+        // uses chunks_timeout to accumulate ready cells into batches (up to BATCH_LIMIT or
+        // BATCH_TIMEOUT). one tokio task per batch lets the work-stealing scheduler distribute
+        // work evenly across cores. tasks send newly-ready dependants back through the channel.
+        // a pending counter tracks total unprocessed items; when it hits 0, a oneshot signal
+        // terminates the coordinator loop.
+        let eval_time = Instant::now();
 
-            if let Some(formula_id) = formula_id {
-                if let Some(formula) = self.spreadsheet.formulas.get(formula_id) {
-                    let ast = &formula.ast;
-                    let t = Instant::now();
-                    let new_value = match eval_formula(
-                        ast,
-                        &cell_id,
-                        &self.spreadsheet.sheets,
-                        &mut eval_store,
-                    ) {
-                        Ok(v) => v,
-                        Err(EvalError::Error(msg)) => CellValue::Error(msg),
-                        Err(e) => CellValue::Error(format!("{:?}", e)),
-                    };
-                    eval_duration += t.elapsed();
+        const BATCH_LIMIT: usize = 1024;
+        const BATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1);
 
-                    self.spreadsheet.set_value(&cell_id, new_value);
+        if !wave.is_empty() {
+            let sp = self.spreadsheet.clone();
+            let (signal_tx, signal_rx) = std::sync::mpsc::sync_channel::<()>(1);
+
+            // spawn the coordinator on eval_runtime (avoids nesting block_on inside Tauri's runtime)
+            self.eval_runtime.spawn(async move {
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                // pending tracks unprocessed cells: the coordinator holds tx (keeping the
+                // stream alive), so chunks_timeout never sees a closed channel. the pending
+                // counter + notify is the only way to tell the coordinator when to stop.
+                let pending = Arc::new(std::sync::atomic::AtomicI64::new(
+                    wave.len() as i64,
+                ));
+                let done = Arc::new(tokio::sync::Notify::new());
+
+                for cell in &wave {
+                    let _ = tx.send(*cell);
                 }
-            }
 
-            let t = Instant::now();
-            {
-                let ready_cells = self.spreadsheet.dependency_graph.decrease_pending_counter(
-                    &mut self.spreadsheet.sheets,
-                    CellRange::single(cell_id),
-                );
-                wave.extend(ready_cells);
-            }
+                let stream =
+                    tokio_stream::wrappers::UnboundedReceiverStream::new(rx);
+                let chunks = stream.chunks_timeout(BATCH_LIMIT, BATCH_TIMEOUT);
+                tokio::pin!(chunks);
 
-            if let Some((table_id, _)) = self.spreadsheet.find_table_containing_cell(&cell_id) {
+                let mut tasks = tokio::task::JoinSet::new();
+
+                loop {
+                    tokio::select! {
+                        biased;
+                        chunk = chunks.next() => {
+                            match chunk {
+                                Some(batch) => {
+                                    let task_sp = sp.clone();
+                                    let task_tx = tx.clone();
+                                    let task_pending = pending.clone();
+                                    let task_done = done.clone();
+                                    tasks.spawn(async move {
+                                        process_batch(batch, &task_sp, &task_tx, &task_pending, &task_done).await;
+                                    });
+                                }
+                                None => break,
+                            }
+                        }
+                        _ = done.notified() => break,
+                    }
+                }
+
+                // wait for tasks to fully exit so all Arc<Spreadsheet> clones are dropped
+                tasks.shutdown().await;
+
+                let _ = signal_tx.send(());
+            });
+
+            // block caller until eval completes (no runtime nesting)
+            let _ = signal_rx.recv();
+        }
+        let eval_duration = eval_time.elapsed();
+
+        // step 4: update tables affected by changes
+        let table_time = Instant::now();
+        let mut affected_tables: HashSet<u32> = HashSet::new();
+        for CellUpdate(id, _, _) in &changes {
+            if let Some((table_id, _)) = self.spreadsheet.find_table_containing_cell(id) {
                 affected_tables.insert(table_id);
             }
-
-            dep_duration += t.elapsed();
         }
-
-        let table_time = Instant::now();
         for table_id in affected_tables {
             self.post_table_cells_change_hook(table_id);
         }
 
         info!("Eval (init pending counters) took: {:?}", init_duration);
-        info!("Eval (decrease pending counters) took: {:?}", dep_duration);
         info!("Eval (running expressions) took: {:?}", eval_duration);
         info!("Eval (updating tables) took: {:?}", table_time.elapsed());
     }
@@ -523,7 +622,8 @@ impl Engine {
         let row_end = table.body_end.row;
         let proj_id = table.projection_id;
 
-        let proj = self.spreadsheet.projections.get_mut(proj_id).unwrap();
+        let sp = self.spreadsheet_mut();
+        let proj = sp.projections.get_mut(proj_id).unwrap();
         let num_cols = (col_end - col_start + 1) as usize;
 
         for col_idx in 0..num_cols {
@@ -535,9 +635,7 @@ impl Engine {
                 opt.count = 0;
             }
             for row in row_start..=row_end {
-                if let Some(val) =
-                    self.spreadsheet.sheets[sheet].get_value(&GridCellId { row, col })
-                {
+                if let Some(val) = sp.sheets[sheet].get_value(&GridCellId { row, col }) {
                     old_opts
                         .entry(val.clone())
                         .and_modify(|o| o.count += 1)
@@ -629,7 +727,7 @@ impl Engine {
         let mut replaced_formulas: HashMap<(FormulaId, u32), FormulaId> = HashMap::new();
 
         for dependant_id in affected_cells {
-            let Some(dependant) = self.spreadsheet.get_cell(&dependant_id).cloned() else {
+            let Some(dependant) = self.spreadsheet.get_cell(&dependant_id) else {
                 continue;
             };
             let Some(formula_id) = dependant.defined_by_formula else {
@@ -651,7 +749,7 @@ impl Engine {
                 dependant_with_shifted_references = Cell {
                     defined_by_formula: Some(*replacement_id),
                     val: dependant.val.clone(),
-                    pending_dependencies: 0,
+                    pending_dependencies: AtomicU16::new(0),
                 };
             } else {
                 // otherwise, create new formula with shifted AST for structure update
@@ -757,12 +855,12 @@ impl Engine {
                     }
                 }
 
-                let replacement_id = self.spreadsheet.formulas.insert(formula);
+                let replacement_id = self.spreadsheet_mut().formulas.insert(formula);
                 replaced_formulas.insert(cache_key, replacement_id);
                 dependant_with_shifted_references = Cell {
                     defined_by_formula: Some(replacement_id),
                     val: dependant.val.clone(),
-                    pending_dependencies: 0,
+                    pending_dependencies: AtomicU16::new(0),
                 };
             }
 
@@ -802,13 +900,15 @@ impl Engine {
                                 row: row + 1,
                                 col,
                             };
-                            let Some(cell) = self.spreadsheet.get_cell(&source_id).cloned() else {
+                            let Some(cell) = self.spreadsheet.get_cell(&source_id) else {
                                 continue;
                             };
 
                             let old_dest = self.set_cell(&dest_id, Some(cell.clone()));
                             let old_source = self.set_cell(&source_id, None);
-                            self.spreadsheet.names.move_cell_name(&source_id, &dest_id);
+                            self.spreadsheet_mut()
+                                .names
+                                .move_cell_name(&source_id, &dest_id);
 
                             changes.push(CellUpdate(dest_id, old_dest, Some(cell)));
                             changes.push(CellUpdate(source_id, old_source, None));
@@ -831,13 +931,15 @@ impl Engine {
                                 row,
                                 col: col + 1,
                             };
-                            let Some(cell) = self.spreadsheet.get_cell(&source_id).cloned() else {
+                            let Some(cell) = self.spreadsheet.get_cell(&source_id) else {
                                 continue;
                             };
 
                             let old_dest = self.set_cell(&dest_id, Some(cell.clone()));
                             let old_source = self.set_cell(&source_id, None);
-                            self.spreadsheet.names.move_cell_name(&source_id, &dest_id);
+                            self.spreadsheet_mut()
+                                .names
+                                .move_cell_name(&source_id, &dest_id);
 
                             changes.push(CellUpdate(dest_id, old_dest, Some(cell)));
                             changes.push(CellUpdate(source_id, old_source, None));
@@ -873,13 +975,15 @@ impl Engine {
                                 row: row - 1,
                                 col,
                             };
-                            let Some(cell) = self.spreadsheet.get_cell(&source_id).cloned() else {
+                            let Some(cell) = self.spreadsheet.get_cell(&source_id) else {
                                 continue;
                             };
 
                             let old_dest = self.set_cell(&dest_id, Some(cell.clone()));
                             let old_source = self.set_cell(&source_id, None);
-                            self.spreadsheet.names.move_cell_name(&source_id, &dest_id);
+                            self.spreadsheet_mut()
+                                .names
+                                .move_cell_name(&source_id, &dest_id);
 
                             changes.push(CellUpdate(dest_id, old_dest, Some(cell)));
                             changes.push(CellUpdate(source_id, old_source, None));
@@ -925,13 +1029,15 @@ impl Engine {
                                 row,
                                 col: col - 1,
                             };
-                            let Some(cell) = self.spreadsheet.get_cell(&source_id).cloned() else {
+                            let Some(cell) = self.spreadsheet.get_cell(&source_id) else {
                                 continue;
                             };
 
                             let old_dest = self.set_cell(&dest_id, Some(cell.clone()));
                             let old_source = self.set_cell(&source_id, None);
-                            self.spreadsheet.names.move_cell_name(&source_id, &dest_id);
+                            self.spreadsheet_mut()
+                                .names
+                                .move_cell_name(&source_id, &dest_id);
 
                             changes.push(CellUpdate(dest_id, old_dest, Some(cell)));
                             changes.push(CellUpdate(source_id, old_source, None));
@@ -1080,8 +1186,9 @@ impl Engine {
         let sheet = table.sheet_id as usize;
         let proj_id = table.projection_id;
 
-        let sheets = &self.spreadsheet.sheets;
-        let proj = self.spreadsheet.projections.get_mut(proj_id).unwrap();
+        let sp = self.spreadsheet_mut();
+        let sheets = &sp.sheets;
+        let proj = sp.projections.get_mut(proj_id).unwrap();
         proj.projected_rows.sort_by(|&a, &b| {
             let va = sheets[sheet].get_value(&GridCellId {
                 row: a,
@@ -1098,8 +1205,8 @@ impl Engine {
                 (Some(_), None) => std::cmp::Ordering::Less,
                 (Some(va), Some(vb)) => {
                     let ord = match (va, vb) {
-                        (CellValue::Number(n1), CellValue::Number(n2)) => n1.cmp(n2),
-                        (CellValue::Text(t1), CellValue::Text(t2)) => t1.cmp(t2),
+                        (CellValue::Number(n1), CellValue::Number(n2)) => n1.cmp(&n2),
+                        (CellValue::Text(t1), CellValue::Text(t2)) => t1.cmp(&t2),
                         (CellValue::Number(_), _) => std::cmp::Ordering::Less,
                         (_, CellValue::Number(_)) => std::cmp::Ordering::Greater,
                         _ => std::cmp::Ordering::Equal,
@@ -1130,7 +1237,7 @@ impl Engine {
             .ok_or("Table not found")?;
         let col_start = table.body_start.col;
         let proj_id = table.projection_id;
-        let proj = self.spreadsheet.projections.get_mut(proj_id).unwrap();
+        let proj = self.spreadsheet_mut().projections.get_mut(proj_id).unwrap();
         let col_idx = (filter_col - col_start) as usize;
 
         if filter_option_id == 0 {
@@ -1158,7 +1265,7 @@ impl Engine {
             .ok_or("Table not found")?;
         let col_start = table.body_start.col;
         let proj_id = table.projection_id;
-        let proj = self.spreadsheet.projections.get_mut(proj_id).unwrap();
+        let proj = self.spreadsheet_mut().projections.get_mut(proj_id).unwrap();
         let col_idx = (filter_col - col_start) as usize;
 
         proj.filter_show_blanks[col_idx] = true;
@@ -1182,7 +1289,7 @@ impl Engine {
             .ok_or("Table not found")?;
         let col_start = table.body_start.col;
         let proj_id = table.projection_id;
-        let proj = self.spreadsheet.projections.get_mut(proj_id).unwrap();
+        let proj = self.spreadsheet_mut().projections.get_mut(proj_id).unwrap();
         let col_idx = (filter_col - col_start) as usize;
 
         proj.filter_show_blanks[col_idx] = false;
@@ -1206,8 +1313,9 @@ impl Engine {
         let body_end_row = table.body_end.row;
         let proj_id = table.projection_id;
 
-        let sheets = &self.spreadsheet.sheets;
-        let proj = self.spreadsheet.projections.get_mut(proj_id).unwrap();
+        let sp = self.spreadsheet_mut();
+        let sheets = &sp.sheets;
+        let proj = sp.projections.get_mut(proj_id).unwrap();
 
         // rebuild projected_rows from all body rows with current filters
         let mut rows: Vec<u32> = (body_start_row..=body_end_row).collect();
@@ -1219,7 +1327,7 @@ impl Engine {
             let col = col_start + i as u32;
             rows.retain(
                 |&row| match sheets[sheet].get_value(&GridCellId { row, col }) {
-                    Some(v) => filter_opts.get(v).map_or(false, |o| o.selected),
+                    Some(v) => filter_opts.get(&v).map_or(false, |o| o.selected),
                     None => col_blanks,
                 },
             );
@@ -1238,7 +1346,7 @@ impl Engine {
 
     /// Reset engine with an empty spreadsheet.
     pub fn create_empty_spreadsheet(&mut self) {
-        self.spreadsheet = Spreadsheet::new();
+        self.spreadsheet = Arc::new(Spreadsheet::new());
         self.history = History::new();
         self.batch.clear();
     }
@@ -1247,10 +1355,10 @@ impl Engine {
     /// Returns the UI decorations JSON string (empty if old format).
     pub fn open_spreadsheet(&mut self, path: &str) -> io::Result<String> {
         let (spreadsheet, decorations) = file_api::load(path)?;
-        self.spreadsheet = spreadsheet;
+        self.spreadsheet = Arc::new(spreadsheet);
 
         let dependency_graph_time = Instant::now();
-        self.spreadsheet.rebuild_dependency_graph();
+        self.spreadsheet_mut().rebuild_dependency_graph();
         info!(
             "open_spreadsheet: dependency graph built in {:?}",
             dependency_graph_time.elapsed()
@@ -1293,12 +1401,12 @@ fn resolve_number(
                 let col = col.to_index(source_cell.col);
                 let gid = GridCellId { row, col };
                 match sheets[*sheet_id as usize].get_value(&gid) {
-                    Some(CellValue::Number(n)) => Ok(*n),
+                    Some(CellValue::Number(n)) => Ok(n),
                     Some(CellValue::Text(_)) => Err(EvalError::TypeError {
                         expected: AtomType::Number,
                         got: AtomType::Text,
                     }),
-                    Some(CellValue::Error(msg)) => Err(EvalError::Error(msg.clone())),
+                    Some(CellValue::Error(msg)) => Err(EvalError::Error(msg.to_string())),
                     None => Ok(Decimal::ZERO),
                 }
             }
@@ -1356,14 +1464,77 @@ fn resolve_range(
     }
 }
 
+/// Parallel sum+count over a cell range. For ranges over 1M cells, splits by rows
+/// into tokio tasks via fork-join; otherwise computes sequentially.
+const PARALLEL_RANGE_THRESHOLD: u64 = 1_000_000;
+
+async fn parallel_sum_count(
+    sp: &Arc<Spreadsheet>,
+    sheet_id: u32,
+    sr: u32,
+    sc: u32,
+    er: u32,
+    ec: u32,
+) -> (Decimal, u64) {
+    let total_cells = (er - sr + 1) as u64 * (ec - sc + 1) as u64;
+    let sheet = &sp.sheets[sheet_id as usize];
+
+    if total_cells <= PARALLEL_RANGE_THRESHOLD {
+        let mut sum = Decimal::ZERO;
+        let mut count = 0u64;
+        sheet.for_each_value_in_range(sr, sc, er, ec, |val| {
+            if let CellValue::Number(n) = val {
+                sum += *n;
+                count += 1;
+            }
+        });
+        return (sum, count);
+    }
+
+    let num_chunks = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let total_rows = (er - sr + 1) as usize;
+    let rows_per_chunk = (total_rows + num_chunks - 1) / num_chunks;
+
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut chunk_start = sr;
+    while chunk_start <= er {
+        let chunk_end = (chunk_start + rows_per_chunk as u32 - 1).min(er);
+        let task_sp = sp.clone();
+        tasks.spawn(async move {
+            let sheet = &task_sp.sheets[sheet_id as usize];
+            let mut sum = Decimal::ZERO;
+            let mut count = 0u64;
+            sheet.for_each_value_in_range(chunk_start, sc, chunk_end, ec, |val| {
+                if let CellValue::Number(n) = val {
+                    sum += *n;
+                    count += 1;
+                }
+            });
+            (sum, count)
+        });
+        chunk_start = chunk_end + 1;
+    }
+
+    let mut total_sum = Decimal::ZERO;
+    let mut total_count = 0u64;
+    while let Some(result) = tasks.join_next().await {
+        let (s, c) = result.unwrap();
+        total_sum += s;
+        total_count += c;
+    }
+    (total_sum, total_count)
+}
+
 /// Evaluate a single formula's AST, returning the computed CellValue.
-fn eval_formula(
+async fn eval_formula(
     ast: &[Expr],
     source_cell: &AbsoluteCellId,
-    sheets: &Sheets,
+    sp: &Arc<Spreadsheet>,
     eval_store: &mut Vec<ExprAtom>,
 ) -> Result<CellValue, EvalError> {
     eval_store.clear();
+    let sheets = &sp.sheets;
+    let external_functions = &sp.external_functions;
 
     for expr in ast {
         let res = match expr {
@@ -1396,55 +1567,134 @@ fn eval_formula(
                 let range_arg_idx = eval_store.len() - 1;
                 let (sheet_id, sr, sc, er, ec) =
                     resolve_range(source_cell, &eval_store[range_arg_idx], sheets)?;
-                let sheet = &sheets[sheet_id as usize];
-                let mut sum = Decimal::ZERO;
-                for row in sr..=er {
-                    for col in sc..=ec {
-                        let gid = GridCellId { row, col };
-                        if let Some(CellValue::Number(n)) = sheet.get_value(&gid) {
-                            sum += *n;
-                        }
-                    }
-                }
+                let (sum, _) = parallel_sum_count(sp, sheet_id, sr, sc, er, ec).await;
                 ExprAtom::Number(sum)
             }
             Expr::Avg => {
                 let range_arg_idx = eval_store.len() - 1;
                 let (sheet_id, sr, sc, er, ec) =
                     resolve_range(source_cell, &eval_store[range_arg_idx], sheets)?;
-                let sheet = &sheets[sheet_id as usize];
-                let mut sum = Decimal::ZERO;
-                let mut count: u64 = 0;
-                for row in sr..=er {
-                    for col in sc..=ec {
-                        let gid = GridCellId { row, col };
-                        if let Some(CellValue::Number(n)) = sheet.get_value(&gid) {
-                            sum += *n;
-                            count += 1;
-                        }
-                    }
-                }
+                let (sum, count) = parallel_sum_count(sp, sheet_id, sr, sc, er, ec).await;
                 if count == 0 {
                     ExprAtom::Number(Decimal::ZERO)
                 } else {
                     ExprAtom::Number(sum / Decimal::from(count))
                 }
             }
-            Expr::ExtrnalFunctionCall { .. } => todo!(),
+            Expr::ExtrnalFunctionCall { func_id, args } => {
+                let Some(func) = external_functions.get(*func_id) else {
+                    return Err(EvalError::Error(format!("unknown function id {}", func_id)));
+                };
+                if args.len() != func.args.len() {
+                    return Err(EvalError::Error(format!(
+                        "{}(): expected {} args, got {}",
+                        func.name,
+                        func.args.len(),
+                        args.len()
+                    )));
+                }
+
+                // validate types and build typed args in one pass
+                let js_args: Vec<ExternArg> = args
+                    .iter()
+                    .zip(func.args.iter())
+                    .enumerate()
+                    .map(|(i, (expr_id, expected))| {
+                        match (expected, &eval_store[*expr_id as usize]) {
+                            (AtomType::Number, ExprAtom::Number(n)) => {
+                                Ok(ExternArg::Number(n.to_string()))
+                            }
+                            (AtomType::Text, ExprAtom::Text(s)) => {
+                                Ok(ExternArg::Text(s.to_string()))
+                            }
+                            (AtomType::Boolean, ExprAtom::Boolean(b)) => Ok(ExternArg::Boolean(*b)),
+                            (AtomType::Reference, ExprAtom::Reference(r)) => match r {
+                                Reference::Single { sheet_id, row, col } => {
+                                    Ok(ExternArg::SingleRef {
+                                        sheet_id: *sheet_id,
+                                        row: row.to_index(source_cell.row),
+                                        col: col.to_index(source_cell.col),
+                                    })
+                                }
+                                Reference::Range {
+                                    sheet_id,
+                                    start_row,
+                                    start_col,
+                                    end_row,
+                                    end_col,
+                                } => Ok(ExternArg::RangeRef {
+                                    sheet_id: *sheet_id,
+                                    start_row: start_row.to_index(source_cell.row),
+                                    start_col: start_col.to_index(source_cell.col),
+                                    end_row: end_row.to_index(source_cell.row),
+                                    end_col: end_col.to_index(source_cell.col),
+                                }),
+                            },
+                            _ => Err(EvalError::Error(format!(
+                                "{}(): arg {} type mismatch",
+                                func.name, i
+                            ))),
+                        }
+                    })
+                    .collect::<Result<_, _>>()?;
+
+                let response = call_extern_js_function(&func.name, js_args).await?;
+                ExprAtom::Text(response)
+            }
         };
         eval_store.push(res);
     }
 
     let value = match eval_store.pop() {
         Some(ExprAtom::Number(n)) => CellValue::Number(n),
-        Some(ExprAtom::Text(s)) => CellValue::Text(s),
-        Some(ExprAtom::InvalidReferenceError(s)) => CellValue::Error(s),
-        Some(ExprAtom::Boolean(b)) => CellValue::Text(b.to_string()),
-        Some(other) => CellValue::Text(format!("{:?}", other)),
+        Some(ExprAtom::Text(s)) => CellValue::Text(s.into()),
+        Some(ExprAtom::InvalidReferenceError(s)) => CellValue::Error(s.into()),
+        Some(ExprAtom::Boolean(b)) => CellValue::Text(b.to_string().into()),
+        Some(other) => CellValue::Text(format!("{:?}", other).into()),
         None => unreachable!(),
     };
 
     Ok(value)
+}
+
+// evaluate a batch of cells, write results to grid, decrease dependants' counters.
+// newly-ready dependants (counter == 0) are sent through tx.
+// one eval_store is reused across all cells in the batch to avoid per-cell allocation.
+async fn process_batch(
+    batch: Vec<AbsoluteCellId>,
+    sp: &Arc<Spreadsheet>,
+    tx: &tokio::sync::mpsc::UnboundedSender<AbsoluteCellId>,
+    pending: &std::sync::atomic::AtomicI64,
+    done: &tokio::sync::Notify,
+) {
+    let mut eval_store = Vec::new();
+    for cell_id in batch {
+        let formula_id = sp.get_cell(&cell_id).and_then(|c| c.defined_by_formula);
+        if let Some(formula_id) = formula_id {
+            if let Some(formula) = sp.formulas.get(formula_id) {
+                let val = match eval_formula(&formula.ast, &cell_id, sp, &mut eval_store).await {
+                    Ok(v) => v,
+                    Err(EvalError::Error(msg)) => CellValue::Error(msg.into()),
+                    Err(e) => CellValue::Error(format!("{:?}", e).into()),
+                };
+                sp.set_value(&cell_id, val);
+            }
+        }
+        let ready = sp
+            .dependency_graph
+            .decrease_pending_counter(&sp.sheets, CellRange::single(cell_id));
+        // increment pending BEFORE sending so the counter never hits 0 prematurely
+        let new_ready = ready.len() as i64;
+        if new_ready > 0 {
+            pending.fetch_add(new_ready, std::sync::atomic::Ordering::SeqCst);
+        }
+        for r in ready {
+            let _ = tx.send(r);
+        }
+        if pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+            done.notify_one();
+        }
+    }
 }
 
 fn compute_bounds(changes: &[CellUpdate]) -> ChangeBounds {
@@ -1599,11 +1849,11 @@ mod tests {
         engine.remove_column_or_row(0, false, 1);
 
         assert!(matches!(
-            engine.spreadsheet.get_cell(&cell(0, 0)).map(|c| &c.val),
+            engine.spreadsheet.get_cell(&cell(0, 0)).map(|c| c.val),
             Some(CellValue::Text(v)) if v == "A"
         ));
         assert!(matches!(
-            engine.spreadsheet.get_cell(&cell(0, 1)).map(|c| &c.val),
+            engine.spreadsheet.get_cell(&cell(0, 1)).map(|c| c.val),
             Some(CellValue::Text(v)) if v == "C"
         ));
         assert!(engine.spreadsheet.get_cell(&cell(0, 2)).is_none());
@@ -1621,11 +1871,11 @@ mod tests {
         engine.remove_column_or_row(0, true, 1);
 
         assert!(matches!(
-            engine.spreadsheet.get_cell(&cell(0, 0)).map(|c| &c.val),
+            engine.spreadsheet.get_cell(&cell(0, 0)).map(|c| c.val),
             Some(CellValue::Text(v)) if v == "R0"
         ));
         assert!(matches!(
-            engine.spreadsheet.get_cell(&cell(1, 0)).map(|c| &c.val),
+            engine.spreadsheet.get_cell(&cell(1, 0)).map(|c| c.val),
             Some(CellValue::Text(v)) if v == "R2"
         ));
         assert!(engine.spreadsheet.get_cell(&cell(2, 0)).is_none());
@@ -1642,13 +1892,13 @@ mod tests {
         engine.insert_column_or_row(0, true, 1, true);
         assert!(engine.spreadsheet.get_cell(&cell(1, 0)).is_none());
         assert!(matches!(
-            engine.spreadsheet.get_cell(&cell(2, 0)).map(|c| &c.val),
+            engine.spreadsheet.get_cell(&cell(2, 0)).map(|c| c.val),
             Some(CellValue::Text(v)) if v == "R1"
         ));
 
         engine.undo();
         assert!(matches!(
-            engine.spreadsheet.get_cell(&cell(1, 0)).map(|c| &c.val),
+            engine.spreadsheet.get_cell(&cell(1, 0)).map(|c| c.val),
             Some(CellValue::Text(v)) if v == "R1"
         ));
         assert!(engine.spreadsheet.get_cell(&cell(2, 0)).is_none());
@@ -1656,7 +1906,7 @@ mod tests {
         engine.redo();
         assert!(engine.spreadsheet.get_cell(&cell(1, 0)).is_none());
         assert!(matches!(
-            engine.spreadsheet.get_cell(&cell(2, 0)).map(|c| &c.val),
+            engine.spreadsheet.get_cell(&cell(2, 0)).map(|c| c.val),
             Some(CellValue::Text(v)) if v == "R1"
         ));
     }

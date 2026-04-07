@@ -32,9 +32,13 @@ tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
 flate2 = "1.1.9"
 tar = "0.4"
-rust_decimal = { version = "1.40.0", features = ["serde-with-str"] }
+rust_decimal = { version = "1.40.0", features = ["serde-with-str", "align16"] }
 rstar = "0.12"
 petgraph = "0.8"
+cold-string = { version = "0.2.0", features = ["serde"] }
+parking_lot = "0.12.5"
+tokio = { version = "1.51.0", features = ["rt-multi-thread", "sync", "macros", "time"] }
+tokio-stream = { version = "0.1", features = ["time", "sync"] }
 
 # Optimize dependencies even in dev builds — huge speedup for
 # serde, flate2, chumsky etc. while keeping tonic_lib itself debuggable.

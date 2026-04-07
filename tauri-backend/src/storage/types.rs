@@ -430,6 +430,13 @@ pub struct Projection {
     pub next_filter_option_id: u32,
 }
 
+// registered JS function that can be called from formulas
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ExternalFunction {
+    pub name: String,
+    pub args: Vec<AtomType>,
+}
+
 pub type Sheets = Vec<Grid>;
 
 #[derive(Serialize, Deserialize)]
@@ -440,6 +447,7 @@ pub struct Spreadsheet {
     pub(crate) names: SpreadsheetNames,
     pub(crate) tables: StableVec<Table>,
     pub(crate) projections: StableVec<Projection>,
+    pub(crate) external_functions: StableVec<ExternalFunction>,
     #[serde(skip, default)]
     pub(crate) dependency_graph: DependencyGraph,
 }
@@ -452,6 +460,7 @@ impl Spreadsheet {
             names: SpreadsheetNames::new(),
             tables: StableVec::new(),
             projections: StableVec::new(),
+            external_functions: StableVec::new(),
             dependency_graph: DependencyGraph::new(),
         }
     }
@@ -484,7 +493,7 @@ impl Spreadsheet {
             })
     }
 
-    pub fn get_projected_cell(&self, id: &AbsoluteCellId) -> Option<&Cell> {
+    pub fn get_projected_cell(&self, id: &AbsoluteCellId) -> Option<Cell> {
         if let Some((_, table)) = self.find_table_containing_cell(id) {
             let projection = self.projections.get(table.projection_id)?;
             if projection.active {
@@ -503,11 +512,16 @@ impl Spreadsheet {
 
     // todo: remove this mess.
 
-    pub fn get_cell(&self, id: &AbsoluteCellId) -> Option<&Cell> {
+    pub fn get_cell(&self, id: &AbsoluteCellId) -> Option<Cell> {
         self.sheets[id.sheet_id as usize].get_cell(&id.into())
     }
 
-    pub fn set_value(&mut self, id: &AbsoluteCellId, val: CellValue) {
+    pub fn set_value_and_create_block(&mut self, id: &AbsoluteCellId, val: CellValue) {
+        self.sheets[id.sheet_id as usize].set_value_and_create_block(&id.into(), val);
+    }
+
+    // shared access: per-cell write lock, no block creation. for parallel eval.
+    pub fn set_value(&self, id: &AbsoluteCellId, val: CellValue) {
         self.sheets[id.sheet_id as usize].set_value(&id.into(), val);
     }
 
