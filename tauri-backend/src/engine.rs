@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicU16, AtomicU64};
+use std::sync::atomic::{AtomicU32, AtomicU64};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -8,7 +8,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Listener};
 use tauri_plugin_log::log::{debug, info};
-use tokio_stream::StreamExt;
+use tokio::task::JoinSet;
+use tokio_stream::{wrappers, StreamExt};
 
 use std::io;
 
@@ -386,7 +387,7 @@ impl Engine {
         let new = Cell {
             defined_by_formula: Some(formula_id),
             val: CellValue::Error("".into()),
-            pending_dependencies: AtomicU16::new(0),
+            pending_dependencies: AtomicU32::new(0),
         };
         self.record_cell_change(id, Some(new));
     }
@@ -411,7 +412,7 @@ impl Engine {
         let new = Cell {
             defined_by_formula: Some(formula_id),
             val: CellValue::Error("".into()),
-            pending_dependencies: AtomicU16::new(0),
+            pending_dependencies: AtomicU32::new(0),
         };
         self.record_cell_change(id, Some(new));
     }
@@ -471,22 +472,27 @@ impl Engine {
                 // pending tracks unprocessed cells: the coordinator holds tx (keeping the
                 // stream alive), so chunks_timeout never sees a closed channel. the pending
                 // counter + notify is the only way to tell the coordinator when to stop.
-                let pending = Arc::new(std::sync::atomic::AtomicI64::new(
-                    wave.len() as i64,
-                ));
+                let pending = Arc::new(std::sync::atomic::AtomicI64::new(wave.len() as i64));
                 let done = Arc::new(tokio::sync::Notify::new());
+                let mut tasks = JoinSet::new();
 
-                for cell in &wave {
-                    let _ = tx.send(*cell);
+                // spawn task for each batch from the wave
+                for batch in wave.chunks(BATCH_LIMIT) {
+                    let batch = batch.to_vec();
+                    let task_sp = sp.clone();
+                    let task_tx = tx.clone();
+                    let task_pending = pending.clone();
+                    let task_done = done.clone();
+                    tasks.spawn(async move {
+                        process_batch(batch, &task_sp, &task_tx, &task_pending, &task_done).await;
+                    });
                 }
 
-                let stream =
-                    tokio_stream::wrappers::UnboundedReceiverStream::new(rx);
+                let stream = wrappers::UnboundedReceiverStream::new(rx);
                 let chunks = stream.chunks_timeout(BATCH_LIMIT, BATCH_TIMEOUT);
                 tokio::pin!(chunks);
 
-                let mut tasks = tokio::task::JoinSet::new();
-
+                // create new task once batch is full or timeout is reached
                 loop {
                     tokio::select! {
                         biased;
@@ -510,6 +516,7 @@ impl Engine {
 
                 // wait for tasks to fully exit so all Arc<Spreadsheet> clones are dropped
                 tasks.shutdown().await;
+                drop(sp);
 
                 let _ = signal_tx.send(());
             });
@@ -749,7 +756,7 @@ impl Engine {
                 dependant_with_shifted_references = Cell {
                     defined_by_formula: Some(*replacement_id),
                     val: dependant.val.clone(),
-                    pending_dependencies: AtomicU16::new(0),
+                    pending_dependencies: AtomicU32::new(0),
                 };
             } else {
                 // otherwise, create new formula with shifted AST for structure update
@@ -860,7 +867,7 @@ impl Engine {
                 dependant_with_shifted_references = Cell {
                     defined_by_formula: Some(replacement_id),
                     val: dependant.val.clone(),
-                    pending_dependencies: AtomicU16::new(0),
+                    pending_dependencies: AtomicU32::new(0),
                 };
             }
 
@@ -883,178 +890,103 @@ impl Engine {
     ) {
         let max_row = self.spreadsheet.sheets[spec.sheet_id as usize].find_biggest_row();
         let max_col = self.spreadsheet.sheets[spec.sheet_id as usize].find_biggest_column();
+        let sheet = &self.spreadsheet.sheets[spec.sheet_id as usize];
+        let mut moved = Vec::new();
+        let mut deleted = Vec::new();
+
+        if spec.changing_row {
+            if spec.shift_start <= max_row {
+                sheet.for_each_cell_in_range(spec.shift_start, 0, max_row, max_col, |id, cell| {
+                    moved.push((id, cell.clone()));
+                });
+            } else if spec.change == ColumnOrRowChange::Remove && spec.index <= max_row {
+                sheet.for_each_cell_in_range(spec.index, 0, spec.index, max_col, |id, _| {
+                    deleted.push(id);
+                });
+            }
+        } else if spec.shift_start <= max_col {
+            sheet.for_each_cell_in_range(0, spec.shift_start, max_row, max_col, |id, cell| {
+                moved.push((id, cell.clone()));
+            });
+        } else if spec.change == ColumnOrRowChange::Remove && spec.index <= max_col {
+            sheet.for_each_cell_in_range(0, spec.index, max_row, spec.index, |id, _| {
+                deleted.push(id);
+            });
+        }
 
         match (spec.changing_row, spec.change) {
             (true, ColumnOrRowChange::Insert) => {
-                // move cells from bottom to top, so each destination is free when we write into it
-                if spec.shift_start <= max_row {
-                    for row in (spec.shift_start..=max_row).rev() {
-                        for col in 0..=max_col {
-                            let source_id = AbsoluteCellId {
-                                sheet_id: spec.sheet_id,
-                                row,
-                                col,
-                            };
-                            let dest_id = AbsoluteCellId {
-                                sheet_id: spec.sheet_id,
-                                row: row + 1,
-                                col,
-                            };
-                            let Some(cell) = self.spreadsheet.get_cell(&source_id) else {
-                                continue;
-                            };
-
-                            let old_dest = self.set_cell(&dest_id, Some(cell.clone()));
-                            let old_source = self.set_cell(&source_id, None);
-                            self.spreadsheet_mut()
-                                .names
-                                .move_cell_name(&source_id, &dest_id);
-
-                            changes.push(CellUpdate(dest_id, old_dest, Some(cell)));
-                            changes.push(CellUpdate(source_id, old_source, None));
-                        }
-                    }
-                }
+                moved.sort_unstable_by(|(a, _), (b, _)| {
+                    b.row.cmp(&a.row).then_with(|| a.col.cmp(&b.col))
+                });
             }
             (false, ColumnOrRowChange::Insert) => {
-                // move cells from right to left, so each destination is free when we write into it
-                if spec.shift_start <= max_col {
-                    for col in (spec.shift_start..=max_col).rev() {
-                        for row in 0..=max_row {
-                            let source_id = AbsoluteCellId {
-                                sheet_id: spec.sheet_id,
-                                row,
-                                col,
-                            };
-                            let dest_id = AbsoluteCellId {
-                                sheet_id: spec.sheet_id,
-                                row,
-                                col: col + 1,
-                            };
-                            let Some(cell) = self.spreadsheet.get_cell(&source_id) else {
-                                continue;
-                            };
-
-                            let old_dest = self.set_cell(&dest_id, Some(cell.clone()));
-                            let old_source = self.set_cell(&source_id, None);
-                            self.spreadsheet_mut()
-                                .names
-                                .move_cell_name(&source_id, &dest_id);
-
-                            changes.push(CellUpdate(dest_id, old_dest, Some(cell)));
-                            changes.push(CellUpdate(source_id, old_source, None));
-                        }
-                    }
-                }
+                moved.sort_unstable_by(|(a, _), (b, _)| {
+                    b.col.cmp(&a.col).then_with(|| a.row.cmp(&b.row))
+                });
             }
             (true, ColumnOrRowChange::Remove) => {
-                // move cells from top to bottom when deleting row, so each source is read once
-                if spec.shift_start > max_row {
-                    // deleting the last used row: just clear deleted row
-                    if spec.index <= max_row {
-                        for col in 0..=max_col {
-                            let deleted_id = AbsoluteCellId {
-                                sheet_id: spec.sheet_id,
-                                row: spec.index,
-                                col,
-                            };
-                            let old = self.set_cell(&deleted_id, None);
-                            changes.push(CellUpdate(deleted_id, old, None));
-                        }
-                    }
-                } else {
-                    for row in spec.shift_start..=max_row {
-                        for col in 0..=max_col {
-                            let source_id = AbsoluteCellId {
-                                sheet_id: spec.sheet_id,
-                                row,
-                                col,
-                            };
-                            let dest_id = AbsoluteCellId {
-                                sheet_id: spec.sheet_id,
-                                row: row - 1,
-                                col,
-                            };
-                            let Some(cell) = self.spreadsheet.get_cell(&source_id) else {
-                                continue;
-                            };
-
-                            let old_dest = self.set_cell(&dest_id, Some(cell.clone()));
-                            let old_source = self.set_cell(&source_id, None);
-                            self.spreadsheet_mut()
-                                .names
-                                .move_cell_name(&source_id, &dest_id);
-
-                            changes.push(CellUpdate(dest_id, old_dest, Some(cell)));
-                            changes.push(CellUpdate(source_id, old_source, None));
-                        }
-                    }
-
-                    for col in 0..=max_col {
-                        let trailing_id = AbsoluteCellId {
-                            sheet_id: spec.sheet_id,
-                            row: max_row,
-                            col,
-                        };
-                        let old = self.set_cell(&trailing_id, None);
-                        changes.push(CellUpdate(trailing_id, old, None));
-                    }
-                }
+                moved.sort_unstable_by(|(a, _), (b, _)| {
+                    a.row.cmp(&b.row).then_with(|| a.col.cmp(&b.col))
+                });
             }
             (false, ColumnOrRowChange::Remove) => {
-                // move cells from left to right when deleting column, so each source is read once
-                if spec.shift_start > max_col {
-                    // deleting the last used column: just clear deleted column
-                    if spec.index <= max_col {
-                        for row in 0..=max_row {
-                            let deleted_id = AbsoluteCellId {
-                                sheet_id: spec.sheet_id,
-                                row,
-                                col: spec.index,
-                            };
-                            let old = self.set_cell(&deleted_id, None);
-                            changes.push(CellUpdate(deleted_id, old, None));
-                        }
-                    }
-                } else {
-                    for col in spec.shift_start..=max_col {
-                        for row in 0..=max_row {
-                            let source_id = AbsoluteCellId {
-                                sheet_id: spec.sheet_id,
-                                row,
-                                col,
-                            };
-                            let dest_id = AbsoluteCellId {
-                                sheet_id: spec.sheet_id,
-                                row,
-                                col: col - 1,
-                            };
-                            let Some(cell) = self.spreadsheet.get_cell(&source_id) else {
-                                continue;
-                            };
-
-                            let old_dest = self.set_cell(&dest_id, Some(cell.clone()));
-                            let old_source = self.set_cell(&source_id, None);
-                            self.spreadsheet_mut()
-                                .names
-                                .move_cell_name(&source_id, &dest_id);
-
-                            changes.push(CellUpdate(dest_id, old_dest, Some(cell)));
-                            changes.push(CellUpdate(source_id, old_source, None));
-                        }
-                    }
-
-                    for row in 0..=max_row {
-                        let trailing_id = AbsoluteCellId {
-                            sheet_id: spec.sheet_id,
-                            row,
-                            col: max_col,
-                        };
-                        let old = self.set_cell(&trailing_id, None);
-                        changes.push(CellUpdate(trailing_id, old, None));
-                    }
-                }
+                moved.sort_unstable_by(|(a, _), (b, _)| {
+                    a.col.cmp(&b.col).then_with(|| a.row.cmp(&b.row))
+                });
             }
+        }
+
+        for deleted_id in deleted {
+            let deleted_id = AbsoluteCellId {
+                sheet_id: spec.sheet_id,
+                row: deleted_id.row,
+                col: deleted_id.col,
+            };
+            let old = self.set_cell(&deleted_id, None);
+            changes.push(CellUpdate(deleted_id, old, None));
+        }
+
+        for (source_id, cell) in moved {
+            let source_id = AbsoluteCellId {
+                sheet_id: spec.sheet_id,
+                row: source_id.row,
+                col: source_id.col,
+            };
+            let dest_id = match (spec.changing_row, spec.change) {
+                (true, ColumnOrRowChange::Insert) => AbsoluteCellId {
+                    sheet_id: spec.sheet_id,
+                    row: source_id.row + 1,
+                    col: source_id.col,
+                },
+                (false, ColumnOrRowChange::Insert) => AbsoluteCellId {
+                    sheet_id: spec.sheet_id,
+                    row: source_id.row,
+                    col: source_id.col + 1,
+                },
+                (true, ColumnOrRowChange::Remove) => AbsoluteCellId {
+                    sheet_id: spec.sheet_id,
+                    row: source_id.row - 1,
+                    col: source_id.col,
+                },
+                (false, ColumnOrRowChange::Remove) => AbsoluteCellId {
+                    sheet_id: spec.sheet_id,
+                    row: source_id.row,
+                    col: source_id.col - 1,
+                },
+            };
+
+            let old_dest = self.set_cell(&dest_id, Some(cell.clone()));
+            let old_source = self.set_cell(&source_id, None);
+            self.spreadsheet_mut()
+                .names
+                .move_cell_name(&source_id, &dest_id);
+
+            changes.push(CellUpdate(dest_id, old_dest, Some(cell)));
+            changes.push(CellUpdate(source_id, old_source, None));
+        }
+        if spec.change == ColumnOrRowChange::Remove {
+            self.spreadsheet_mut().sheets[spec.sheet_id as usize].refresh_bounds();
         }
     }
 
@@ -1356,6 +1288,9 @@ impl Engine {
     pub fn open_spreadsheet(&mut self, path: &str) -> io::Result<String> {
         let (spreadsheet, decorations) = file_api::load(path)?;
         self.spreadsheet = Arc::new(spreadsheet);
+        for sheet in &mut self.spreadsheet_mut().sheets {
+            sheet.refresh_bounds();
+        }
 
         let dependency_graph_time = Instant::now();
         self.spreadsheet_mut().rebuild_dependency_graph();

@@ -1,5 +1,5 @@
 use std::fmt;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use cold_string::ColdString;
 use parking_lot::RwLock;
@@ -25,7 +25,7 @@ pub struct Cell {
     pub val: CellValue,
     // atomic so parallel eval can decrement without write-locking the cell
     #[serde(skip)]
-    pub pending_dependencies: AtomicU16,
+    pub pending_dependencies: AtomicU32,
 }
 
 impl Clone for Cell {
@@ -33,7 +33,7 @@ impl Clone for Cell {
         Self {
             defined_by_formula: self.defined_by_formula,
             val: self.val.clone(),
-            pending_dependencies: AtomicU16::new(self.pending_dependencies.load(Ordering::Relaxed)),
+            pending_dependencies: AtomicU32::new(self.pending_dependencies.load(Ordering::Relaxed)),
         }
     }
 }
@@ -49,7 +49,7 @@ impl Cell {
         Self {
             defined_by_formula: None,
             val: CellValue::Text(s.into()),
-            pending_dependencies: AtomicU16::new(0),
+            pending_dependencies: AtomicU32::new(0),
         }
     }
 
@@ -57,7 +57,7 @@ impl Cell {
         Self {
             defined_by_formula: None,
             val: CellValue::Number(n),
-            pending_dependencies: AtomicU16::new(0),
+            pending_dependencies: AtomicU32::new(0),
         }
     }
 
@@ -65,7 +65,7 @@ impl Cell {
         Self {
             defined_by_formula: None,
             val: CellValue::Error(msg.into()),
-            pending_dependencies: AtomicU16::new(0),
+            pending_dependencies: AtomicU32::new(0),
         }
     }
 }
@@ -181,6 +181,10 @@ impl Block {
 pub struct Grid {
     blocks: Vec<Option<Block>>,
     stride: usize,
+    #[serde(default)]
+    max_row: u32,
+    #[serde(default)]
+    max_col: u32,
 }
 
 impl GridCellId {
@@ -211,43 +215,52 @@ impl Default for Grid {
         Self {
             blocks,
             stride: STRIDE,
+            max_row: 0,
+            max_col: 0,
         }
     }
 }
 
 impl Grid {
     pub fn find_biggest_row(&self) -> u32 {
-        let mut biggest_row = 0;
+        self.max_row
+    }
+
+    pub fn find_biggest_column(&self) -> u32 {
+        self.max_col
+    }
+
+    pub(crate) fn refresh_bounds(&mut self) {
+        self.max_row = 0;
+        self.max_col = 0;
         for (block_idx, block) in self.blocks.iter().enumerate() {
             let Some(block) = block.as_ref() else {
                 continue;
             };
             let block_row = block_idx / self.stride;
+            let block_col = block_idx % self.stride;
             for row in (0..BLOCK_DIM).rev() {
                 if block.cells[row].iter().any(|slot| slot.read().is_some()) {
-                    biggest_row = biggest_row.max(block_row as u32 * BLOCK_DIM as u32 + row as u32);
+                    self.max_row = self
+                        .max_row
+                        .max(block_row as u32 * BLOCK_DIM as u32 + row as u32);
                     break;
                 }
             }
-        }
-        biggest_row
-    }
-
-    pub fn find_biggest_column(&self) -> u32 {
-        let mut biggest_col = 0;
-        for (block_idx, block) in self.blocks.iter().enumerate() {
-            let Some(block) = block.as_ref() else {
-                continue;
-            };
-            let block_col = block_idx % self.stride;
             for col in (0..BLOCK_DIM).rev() {
                 if (0..BLOCK_DIM).any(|row| block.cells[row][col].read().is_some()) {
-                    biggest_col = biggest_col.max(block_col as u32 * BLOCK_DIM as u32 + col as u32);
+                    self.max_col = self
+                        .max_col
+                        .max(block_col as u32 * BLOCK_DIM as u32 + col as u32);
                     break;
                 }
             }
         }
-        biggest_col
+    }
+
+    fn update_bounds(&mut self, id: &GridCellId) {
+        self.max_row = self.max_row.max(id.row);
+        self.max_col = self.max_col.max(id.col);
     }
 
     // returns cloned cell through read lock — safe for concurrent access
@@ -274,11 +287,12 @@ impl Grid {
                 *slot = Some(Cell {
                     defined_by_formula: None,
                     val,
-                    pending_dependencies: AtomicU16::new(0),
+                    pending_dependencies: AtomicU32::new(0),
                 });
                 block.nonempty_cells_count += 1;
             }
         }
+        self.update_bounds(id);
     }
 
     // shared access: acquires per-cell write lock.
@@ -305,6 +319,7 @@ impl Grid {
             block.nonempty_cells_count += 1;
         }
         *slot = Some(cell);
+        self.update_bounds(id);
     }
 
     pub fn remove_cell(&mut self, id: &GridCellId) {
@@ -335,7 +350,7 @@ impl Grid {
     }
 
     // atomic: returns the value AFTER decrement
-    pub fn decrease_pending_dependencies(&self, id: &GridCellId) -> u16 {
+    pub fn decrease_pending_dependencies(&self, id: &GridCellId) -> u32 {
         let idx = id.block_idx(self.stride);
         let Some(block) = self.blocks.get(idx).and_then(|b| b.as_ref()) else {
             return 0;
@@ -349,7 +364,7 @@ impl Grid {
         }
     }
 
-    pub fn get_pending_dependencies(&self, id: &GridCellId) -> u16 {
+    pub fn get_pending_dependencies(&self, id: &GridCellId) -> u32 {
         let idx = id.block_idx(self.stride);
         let Some(block) = self.blocks.get(idx).and_then(|b| b.as_ref()) else {
             return 0;
@@ -361,11 +376,7 @@ impl Grid {
             .map_or(0, |cell| cell.pending_dependencies.load(Ordering::Relaxed))
     }
 
-    // iterate values block-by-block instead of cell-by-cell.
-    // each block's cells array is contiguous in memory, so once the block is in L1
-    // the inner row-major scan hits every cache line sequentially.
-    // also avoids re-computing block index for every cell — one lookup per block.
-    pub fn for_each_value_in_range<F>(
+    pub(crate) fn for_each_cell_in_range<F>(
         &self,
         start_row: u32,
         start_col: u32,
@@ -373,8 +384,12 @@ impl Grid {
         end_col: u32,
         mut f: F,
     ) where
-        F: FnMut(&CellValue),
+        F: FnMut(GridCellId, &Cell),
     {
+        if start_row > end_row || start_col > end_col {
+            return;
+        }
+
         let block_row_start = start_row as usize >> BLOCK_SHIFT;
         let block_row_end = end_row as usize >> BLOCK_SHIFT;
         let block_col_start = start_col as usize >> BLOCK_SHIFT;
@@ -387,7 +402,6 @@ impl Grid {
                     continue;
                 };
 
-                // clip to the requested range at block boundaries
                 let row_start = if block_row == block_row_start {
                     start_row as usize & BLOCK_MASK
                 } else {
@@ -409,16 +423,42 @@ impl Grid {
                     BLOCK_DIM - 1
                 };
 
-                for r in row_start..=row_end {
-                    for c in col_start..=col_end {
-                        let guard = block.cells[r][c].read();
-                        if let Some(cell) = guard.as_ref() {
-                            f(&cell.val);
-                        }
+                for row in row_start..=row_end {
+                    for col in col_start..=col_end {
+                        let guard = block.cells[row][col].read();
+                        let Some(cell) = guard.as_ref() else {
+                            continue;
+                        };
+                        f(
+                            GridCellId {
+                                row: (block_row as u32 * BLOCK_DIM as u32) + row as u32,
+                                col: (block_col as u32 * BLOCK_DIM as u32) + col as u32,
+                            },
+                            cell,
+                        );
                     }
                 }
             }
         }
+    }
+
+    // iterate values block-by-block instead of cell-by-cell.
+    // each block's cells array is contiguous in memory, so once the block is in L1
+    // the inner row-major scan hits every cache line sequentially.
+    // also avoids re-computing block index for every cell — one lookup per block.
+    pub fn for_each_value_in_range<F>(
+        &self,
+        start_row: u32,
+        start_col: u32,
+        end_row: u32,
+        end_col: u32,
+        mut f: F,
+    ) where
+        F: FnMut(&CellValue),
+    {
+        self.for_each_cell_in_range(start_row, start_col, end_row, end_col, |_, cell| {
+            f(&cell.val)
+        });
     }
 
     pub fn for_each_cell<F>(&self, mut f: F)
@@ -462,7 +502,7 @@ mod tests {
         Cell {
             defined_by_formula: None,
             val,
-            pending_dependencies: AtomicU16::new(0),
+            pending_dependencies: AtomicU32::new(0),
         }
     }
 
@@ -557,7 +597,7 @@ mod tests {
             Cell {
                 defined_by_formula: Some(7),
                 val: CellValue::Text("old".into()),
-                pending_dependencies: AtomicU16::new(3),
+                pending_dependencies: AtomicU32::new(3),
             },
         );
 

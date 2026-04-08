@@ -1203,12 +1203,12 @@ fn increase_pending_counter(sheets: &[Grid], cell_id: AbsoluteCellId) {
 }
 
 // atomic: returns value after decrement
-fn decrease_pending_counter(sheets: &[Grid], cell_id: AbsoluteCellId) -> u16 {
+fn decrease_pending_counter(sheets: &[Grid], cell_id: AbsoluteCellId) -> u32 {
     let grid_cell_id: GridCellId = (&cell_id).into();
     sheets[cell_id.sheet_id as usize].decrease_pending_dependencies(&grid_cell_id)
 }
 
-fn get_pending_counter(sheets: &[Grid], cell_id: AbsoluteCellId) -> u16 {
+fn get_pending_counter(sheets: &[Grid], cell_id: AbsoluteCellId) -> u32 {
     let grid_cell_id: GridCellId = (&cell_id).into();
     sheets[cell_id.sheet_id as usize].get_pending_dependencies(&grid_cell_id)
 }
@@ -1249,7 +1249,7 @@ fn subtract_visited(range: &CellRange, visited: &RTree<VisitedRange>) -> Vec<Cel
 mod tests {
     use super::*;
 
-    use std::sync::atomic::AtomicU16;
+    use std::sync::atomic::AtomicU32;
 
     use crate::storage::{
         grid::{Cell, CellValue},
@@ -1279,7 +1279,7 @@ mod tests {
                 Cell {
                     defined_by_formula: None,
                     val: CellValue::Error("".into()),
-                    pending_dependencies: AtomicU16::new(0),
+                    pending_dependencies: AtomicU32::new(0),
                 },
             );
         }
@@ -1298,7 +1298,7 @@ mod tests {
                 Cell {
                     defined_by_formula: Some(*formula_id),
                     val: CellValue::Error("".into()),
-                    pending_dependencies: AtomicU16::new(0),
+                    pending_dependencies: AtomicU32::new(0),
                 },
             );
         }
