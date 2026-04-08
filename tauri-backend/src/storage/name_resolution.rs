@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     parser::string_is_regular_cell_name,
-    storage::types::{AbsoluteCellId, SheetId, TableId},
+    storage::types::{AbsoluteCellId, SheetId, TableId, UserFuncId},
 };
 
 #[derive(Serialize, Deserialize)]
@@ -19,9 +19,11 @@ pub struct SpreadsheetNames {
     pub table_names: HashMap<String, TableId>,
     #[serde(default)]
     pub table_names_lookup: HashMap<TableId, String>,
-    // todo:
-    // pub user_function_names: HashMap<String, UserFuncId>,
-    // pub user_function_names_lookup: HashMap<UserFuncId, String>,
+
+    #[serde(default)]
+    pub user_function_names: HashMap<String, UserFuncId>,
+    #[serde(default)]
+    pub user_function_names_lookup: HashMap<UserFuncId, String>,
 }
 
 impl SpreadsheetNames {
@@ -33,6 +35,8 @@ impl SpreadsheetNames {
             cell_names_lookup: HashMap::new(),
             table_names: HashMap::new(),
             table_names_lookup: HashMap::new(),
+            user_function_names: HashMap::new(),
+            user_function_names_lookup: HashMap::new(),
         }
     }
 

@@ -29,6 +29,10 @@ mod vec_btreemap_as_vec {
     }
 }
 
+use std::sync::Arc;
+
+use parking_lot::RwLock;
+
 use crate::storage::{
     dependency_graph::DependencyGraph,
     grid::{Cell, CellValue, Grid, GridCellId},
@@ -435,19 +439,29 @@ pub struct Projection {
 pub struct ExternalFunction {
     pub name: String,
     pub args: Vec<AtomType>,
+    #[serde(default)]
+    pub file_name: String,
+}
+
+// extension .js file attached to the spreadsheet
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ScriptFile {
+    pub name: String,
+    pub content: String,
 }
 
 pub type Sheets = Vec<Grid>;
 
 #[derive(Serialize, Deserialize)]
 pub struct Spreadsheet {
-    // todo: sheets are private for engine, should not be used in lib.rs
-    pub(crate) sheets: Sheets,
+    pub(crate) sheets: Arc<RwLock<Sheets>>,
     pub(crate) formulas: StableVec<Formula>,
     pub(crate) names: SpreadsheetNames,
     pub(crate) tables: StableVec<Table>,
     pub(crate) projections: StableVec<Projection>,
     pub(crate) external_functions: StableVec<ExternalFunction>,
+    #[serde(skip, default)]
+    pub(crate) scripts: Vec<ScriptFile>,
     #[serde(skip, default)]
     pub(crate) dependency_graph: DependencyGraph,
 }
@@ -455,12 +469,13 @@ pub struct Spreadsheet {
 impl Spreadsheet {
     pub fn new() -> Self {
         Self {
-            sheets: vec![Grid::default()],
+            sheets: Arc::new(RwLock::new(vec![Grid::default()])),
             formulas: StableVec::new(),
             names: SpreadsheetNames::new(),
             tables: StableVec::new(),
             projections: StableVec::new(),
             external_functions: StableVec::new(),
+            scripts: Vec::new(),
             dependency_graph: DependencyGraph::new(),
         }
     }
@@ -513,29 +528,29 @@ impl Spreadsheet {
     // todo: remove this mess.
 
     pub fn get_cell(&self, id: &AbsoluteCellId) -> Option<Cell> {
-        self.sheets[id.sheet_id as usize].get_cell(&id.into())
+        self.sheets.read()[id.sheet_id as usize].get_cell(&id.into())
     }
 
-    pub fn set_value_and_create_block(&mut self, id: &AbsoluteCellId, val: CellValue) {
-        self.sheets[id.sheet_id as usize].set_value_and_create_block(&id.into(), val);
+    pub fn set_value_and_create_block(&self, id: &AbsoluteCellId, val: CellValue) {
+        self.sheets.write()[id.sheet_id as usize].set_value_and_create_block(&id.into(), val);
     }
 
     // shared access: per-cell write lock, no block creation. for parallel eval.
     pub fn set_value(&self, id: &AbsoluteCellId, val: CellValue) {
-        self.sheets[id.sheet_id as usize].set_value(&id.into(), val);
+        self.sheets.read()[id.sheet_id as usize].set_value(&id.into(), val);
     }
 
-    pub fn insert_cell(&mut self, id: &AbsoluteCellId, cell: Cell) {
-        self.sheets[id.sheet_id as usize].insert_cell(&id.into(), cell);
+    pub fn insert_cell(&self, id: &AbsoluteCellId, cell: Cell) {
+        self.sheets.write()[id.sheet_id as usize].insert_cell(&id.into(), cell);
     }
 
-    pub fn remove_cell(&mut self, id: &AbsoluteCellId) {
-        self.sheets[id.sheet_id as usize].remove_cell(&id.into());
+    pub fn remove_cell(&self, id: &AbsoluteCellId) {
+        self.sheets.write()[id.sheet_id as usize].remove_cell(&id.into());
     }
 
     pub fn rebuild_dependency_graph(&mut self) {
         let mut formula_cells = Vec::new();
-        for (sheet_id, sheet) in self.sheets.iter().enumerate() {
+        for (sheet_id, sheet) in self.sheets.read().iter().enumerate() {
             sheet.for_each_cell(|grid_id, cell| {
                 if let Some(formula_id) = cell.defined_by_formula {
                     formula_cells.push((

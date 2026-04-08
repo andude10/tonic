@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64};
 use std::sync::Arc;
 use std::time::Instant;
 
+use parking_lot::RwLock;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Listener};
@@ -25,8 +26,9 @@ use crate::storage::types::{
 #[derive(Clone)]
 pub struct CellUpdate(pub AbsoluteCellId, pub Option<Cell>, pub Option<Cell>);
 
-/// Typed argument sent to JS for external function calls.
-/// References are pre-resolved to absolute coordinates.
+// argument sent to JS for external function calls
+// literal values are sent directly, references as coordinates
+// (the JS dispatcher resolves refs via resolve_reference command)
 #[derive(Serialize, Clone, Debug)]
 #[serde(tag = "type", content = "value")]
 enum ExternArg {
@@ -56,12 +58,22 @@ pub fn set_app_handle(app: AppHandle) {
     let _ = APP_HANDLE.set(app);
 }
 
-/// Call a JS-side external function via Tauri events.
-/// Emits "ext-fn-call", waits for "ext-fn-response-{callId}".
+// response from a JS extension function call
+#[derive(Deserialize)]
+struct ExtFnResponse {
+    #[serde(default)]
+    v: Option<String>,
+    #[serde(default)]
+    t: Option<String>,
+    #[serde(default)]
+    e: Option<String>,
+}
+
+// call a JS-side external function via Tauri events
 async fn call_extern_js_function(
     func_name: &str,
     args: Vec<ExternArg>,
-) -> Result<String, EvalError> {
+) -> Result<CellValue, EvalError> {
     let app = APP_HANDLE
         .get()
         .ok_or_else(|| EvalError::Error("no app handle for external call".into()))?;
@@ -69,9 +81,11 @@ async fn call_extern_js_function(
     let call_id = CALL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let response_event = format!("ext-fn-response-{}", call_id);
 
-    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<String>();
+    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<ExtFnResponse>();
     app.once(&response_event, move |event: tauri::Event| {
-        let _ = resp_tx.send(event.payload().to_string());
+        if let Ok(resp) = serde_json::from_str(event.payload()) {
+            let _ = resp_tx.send(resp);
+        }
     });
 
     app.emit(
@@ -84,12 +98,24 @@ async fn call_extern_js_function(
     )
     .map_err(|e| EvalError::Error(e.to_string()))?;
 
-    let response = tokio::time::timeout(std::time::Duration::from_secs(30), resp_rx)
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(30), resp_rx)
         .await
-        .map_err(|_| EvalError::Error(format!("{}(): external call timeout", func_name)))?
-        .map_err(|_| EvalError::Error(format!("{}(): response channel dropped", func_name)))?;
+        .map_err(|_| EvalError::Error(format!("{}(): timeout", func_name)))?
+        .map_err(|_| EvalError::Error(format!("{}(): response dropped", func_name)))?;
 
-    Ok(response)
+    if let Some(err) = resp.e {
+        return Err(EvalError::Error(err));
+    }
+
+    let val = resp.v.unwrap_or_default();
+    match resp.t.as_deref() {
+        Some("number") => match val.parse::<Decimal>() {
+            Ok(n) => Ok(CellValue::Number(n)),
+            Err(_) => Ok(CellValue::Text(val.into())),
+        },
+        Some("boolean") => Ok(CellValue::Text(val.into())),
+        _ => Ok(CellValue::Text(val.into())),
+    }
 }
 
 /// Bounding rectangle of affected cells. Returned by undo/redo.
@@ -304,8 +330,8 @@ impl Engine {
         }
 
         match new_cell.as_ref() {
-            Some(cell) => self.spreadsheet_mut().insert_cell(id, cell.clone()),
-            None => self.spreadsheet_mut().remove_cell(id),
+            Some(cell) => self.spreadsheet.insert_cell(id, cell.clone()),
+            None => self.spreadsheet.remove_cell(id),
         }
 
         if let Some(formula_id) = new_cell.as_ref().and_then(|cell| cell.defined_by_formula) {
@@ -398,7 +424,7 @@ impl Engine {
 
     pub fn insert_value(&mut self, _: &EngineGuard, id: AbsoluteCellId, val: CellValue) {
         let old = self.spreadsheet.get_cell(&id);
-        self.spreadsheet_mut().set_value_and_create_block(&id, val);
+        self.spreadsheet.set_value_and_create_block(&id, val);
         let new = self.spreadsheet.get_cell(&id);
         self.batch.push(CellUpdate(id, old, new));
     }
@@ -435,18 +461,23 @@ impl Engine {
                 .map(|CellUpdate(id, _, _)| *id)
                 .collect::<Vec<_>>(),
         );
-        self.spreadsheet
-            .dependency_graph
-            .init_pending_counter_for_new_recalculation(&self.spreadsheet.sheets, &changed_ranges);
+        {
+            let sheets = self.spreadsheet.sheets.read();
+            self.spreadsheet
+                .dependency_graph
+                .init_pending_counter_for_new_recalculation(&sheets, &changed_ranges);
+        }
         let init_duration = init_time.elapsed();
 
         // step 2: collect cells with counter == 0 into the starting wave
         let mut wave: Vec<AbsoluteCellId> = Vec::new();
-        for CellUpdate(id, _, _) in &changes {
-            let grid_id: GridCellId = id.into();
-            if self.spreadsheet.sheets[id.sheet_id as usize].get_pending_dependencies(&grid_id) == 0
-            {
-                wave.push(*id);
+        {
+            let sheets = self.spreadsheet.sheets.read();
+            for CellUpdate(id, _, _) in &changes {
+                let grid_id: GridCellId = id.into();
+                if sheets[id.sheet_id as usize].get_pending_dependencies(&grid_id) == 0 {
+                    wave.push(*id);
+                }
             }
         }
 
@@ -632,6 +663,7 @@ impl Engine {
         let sp = self.spreadsheet_mut();
         let proj = sp.projections.get_mut(proj_id).unwrap();
         let num_cols = (col_end - col_start + 1) as usize;
+        let sheets = sp.sheets.read();
 
         for col_idx in 0..num_cols {
             let col = col_start + col_idx as u32;
@@ -642,7 +674,7 @@ impl Engine {
                 opt.count = 0;
             }
             for row in row_start..=row_end {
-                if let Some(val) = sp.sheets[sheet].get_value(&GridCellId { row, col }) {
+                if let Some(val) = sheets[sheet].get_value(&GridCellId { row, col }) {
                     old_opts
                         .entry(val.clone())
                         .and_modify(|o| o.count += 1)
@@ -888,9 +920,10 @@ impl Engine {
         spec: ColumnOrRowChangeSpec,
         changes: &mut Vec<CellUpdate>,
     ) {
-        let max_row = self.spreadsheet.sheets[spec.sheet_id as usize].find_biggest_row();
-        let max_col = self.spreadsheet.sheets[spec.sheet_id as usize].find_biggest_column();
-        let sheet = &self.spreadsheet.sheets[spec.sheet_id as usize];
+        let sheets = self.spreadsheet.sheets.read();
+        let max_row = sheets[spec.sheet_id as usize].find_biggest_row();
+        let max_col = sheets[spec.sheet_id as usize].find_biggest_column();
+        let sheet = &sheets[spec.sheet_id as usize];
         let mut moved = Vec::new();
         let mut deleted = Vec::new();
 
@@ -913,6 +946,7 @@ impl Engine {
                 deleted.push(id);
             });
         }
+        drop(sheets);
 
         match (spec.changing_row, spec.change) {
             (true, ColumnOrRowChange::Insert) => {
@@ -986,7 +1020,7 @@ impl Engine {
             changes.push(CellUpdate(source_id, old_source, None));
         }
         if spec.change == ColumnOrRowChange::Remove {
-            self.spreadsheet_mut().sheets[spec.sheet_id as usize].refresh_bounds();
+            self.spreadsheet.sheets.write()[spec.sheet_id as usize].refresh_bounds();
         }
     }
 
@@ -1119,7 +1153,7 @@ impl Engine {
         let proj_id = table.projection_id;
 
         let sp = self.spreadsheet_mut();
-        let sheets = &sp.sheets;
+        let sheets = sp.sheets.read();
         let proj = sp.projections.get_mut(proj_id).unwrap();
         proj.projected_rows.sort_by(|&a, &b| {
             let va = sheets[sheet].get_value(&GridCellId {
@@ -1246,7 +1280,7 @@ impl Engine {
         let proj_id = table.projection_id;
 
         let sp = self.spreadsheet_mut();
-        let sheets = &sp.sheets;
+        let sheets = sp.sheets.read();
         let proj = sp.projections.get_mut(proj_id).unwrap();
 
         // rebuild projected_rows from all body rows with current filters
@@ -1288,7 +1322,7 @@ impl Engine {
     pub fn open_spreadsheet(&mut self, path: &str) -> io::Result<String> {
         let (spreadsheet, decorations) = file_api::load(path)?;
         self.spreadsheet = Arc::new(spreadsheet);
-        for sheet in &mut self.spreadsheet_mut().sheets {
+        for sheet in self.spreadsheet.sheets.write().iter_mut() {
             sheet.refresh_bounds();
         }
 
@@ -1325,7 +1359,7 @@ impl Engine {
 fn resolve_number(
     source_cell: &AbsoluteCellId,
     expr: &ExprAtom,
-    sheets: &Sheets,
+    sheets: &Arc<RwLock<Sheets>>,
 ) -> Result<Decimal, EvalError> {
     match expr {
         ExprAtom::Number(n) => Ok(*n),
@@ -1335,7 +1369,7 @@ fn resolve_number(
                 let row = row.to_index(source_cell.row);
                 let col = col.to_index(source_cell.col);
                 let gid = GridCellId { row, col };
-                match sheets[*sheet_id as usize].get_value(&gid) {
+                match sheets.read()[*sheet_id as usize].get_value(&gid) {
                     Some(CellValue::Number(n)) => Ok(n),
                     Some(CellValue::Text(_)) => Err(EvalError::TypeError {
                         expected: AtomType::Number,
@@ -1367,7 +1401,6 @@ fn resolve_number(
 fn resolve_range(
     source_cell: &AbsoluteCellId,
     expr: &ExprAtom,
-    _sheets: &Sheets,
 ) -> Result<(SheetId, u32, u32, u32, u32), EvalError> {
     match expr {
         ExprAtom::InvalidReferenceError(msg) => Err(EvalError::Error(msg.clone())),
@@ -1412,9 +1445,10 @@ async fn parallel_sum_count(
     ec: u32,
 ) -> (Decimal, u64) {
     let total_cells = (er - sr + 1) as u64 * (ec - sc + 1) as u64;
-    let sheet = &sp.sheets[sheet_id as usize];
 
     if total_cells <= PARALLEL_RANGE_THRESHOLD {
+        let sheets = sp.sheets.read();
+        let sheet = &sheets[sheet_id as usize];
         let mut sum = Decimal::ZERO;
         let mut count = 0u64;
         sheet.for_each_value_in_range(sr, sc, er, ec, |val| {
@@ -1436,7 +1470,8 @@ async fn parallel_sum_count(
         let chunk_end = (chunk_start + rows_per_chunk as u32 - 1).min(er);
         let task_sp = sp.clone();
         tasks.spawn(async move {
-            let sheet = &task_sp.sheets[sheet_id as usize];
+            let sheets = task_sp.sheets.read();
+            let sheet = &sheets[sheet_id as usize];
             let mut sum = Decimal::ZERO;
             let mut count = 0u64;
             sheet.for_each_value_in_range(chunk_start, sc, chunk_end, ec, |val| {
@@ -1458,6 +1493,36 @@ async fn parallel_sum_count(
         total_count += c;
     }
     (total_sum, total_count)
+}
+
+// convert an eval-store atom to an ExternArg for JS dispatch
+// references are sent as coordinates — the JS dispatcher resolves them
+// via the resolve_reference command (which reads sheets directly, no lock conflict)
+fn resolve_extern_arg(atom: &ExprAtom, source_cell: &AbsoluteCellId) -> ExternArg {
+    match atom {
+        ExprAtom::Number(n) => ExternArg::Number(n.to_string()),
+        ExprAtom::Text(s) => ExternArg::Text(s.to_string()),
+        ExprAtom::Boolean(b) => ExternArg::Boolean(*b),
+        ExprAtom::Reference(Reference::Single { sheet_id, row, col }) => ExternArg::SingleRef {
+            sheet_id: *sheet_id,
+            row: row.to_index(source_cell.row),
+            col: col.to_index(source_cell.col),
+        },
+        ExprAtom::Reference(Reference::Range {
+            sheet_id,
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+        }) => ExternArg::RangeRef {
+            sheet_id: *sheet_id,
+            start_row: start_row.to_index(source_cell.row),
+            start_col: start_col.to_index(source_cell.col),
+            end_row: end_row.to_index(source_cell.row),
+            end_col: end_col.to_index(source_cell.col),
+        },
+        _ => ExternArg::Text(String::new()),
+    }
 }
 
 /// Evaluate a single formula's AST, returning the computed CellValue.
@@ -1501,14 +1566,14 @@ async fn eval_formula(
             Expr::Sum => {
                 let range_arg_idx = eval_store.len() - 1;
                 let (sheet_id, sr, sc, er, ec) =
-                    resolve_range(source_cell, &eval_store[range_arg_idx], sheets)?;
+                    resolve_range(source_cell, &eval_store[range_arg_idx])?;
                 let (sum, _) = parallel_sum_count(sp, sheet_id, sr, sc, er, ec).await;
                 ExprAtom::Number(sum)
             }
             Expr::Avg => {
                 let range_arg_idx = eval_store.len() - 1;
                 let (sheet_id, sr, sc, er, ec) =
-                    resolve_range(source_cell, &eval_store[range_arg_idx], sheets)?;
+                    resolve_range(source_cell, &eval_store[range_arg_idx])?;
                 let (sum, count) = parallel_sum_count(sp, sheet_id, sr, sc, er, ec).await;
                 if count == 0 {
                     ExprAtom::Number(Decimal::ZERO)
@@ -1529,52 +1594,20 @@ async fn eval_formula(
                     )));
                 }
 
-                // validate types and build typed args in one pass
+                // resolve all args to values (auto-resolve cell references)
                 let js_args: Vec<ExternArg> = args
                     .iter()
-                    .zip(func.args.iter())
-                    .enumerate()
-                    .map(|(i, (expr_id, expected))| {
-                        match (expected, &eval_store[*expr_id as usize]) {
-                            (AtomType::Number, ExprAtom::Number(n)) => {
-                                Ok(ExternArg::Number(n.to_string()))
-                            }
-                            (AtomType::Text, ExprAtom::Text(s)) => {
-                                Ok(ExternArg::Text(s.to_string()))
-                            }
-                            (AtomType::Boolean, ExprAtom::Boolean(b)) => Ok(ExternArg::Boolean(*b)),
-                            (AtomType::Reference, ExprAtom::Reference(r)) => match r {
-                                Reference::Single { sheet_id, row, col } => {
-                                    Ok(ExternArg::SingleRef {
-                                        sheet_id: *sheet_id,
-                                        row: row.to_index(source_cell.row),
-                                        col: col.to_index(source_cell.col),
-                                    })
-                                }
-                                Reference::Range {
-                                    sheet_id,
-                                    start_row,
-                                    start_col,
-                                    end_row,
-                                    end_col,
-                                } => Ok(ExternArg::RangeRef {
-                                    sheet_id: *sheet_id,
-                                    start_row: start_row.to_index(source_cell.row),
-                                    start_col: start_col.to_index(source_cell.col),
-                                    end_row: end_row.to_index(source_cell.row),
-                                    end_col: end_col.to_index(source_cell.col),
-                                }),
-                            },
-                            _ => Err(EvalError::Error(format!(
-                                "{}(): arg {} type mismatch",
-                                func.name, i
-                            ))),
-                        }
-                    })
-                    .collect::<Result<_, _>>()?;
+                    .map(|expr_id| resolve_extern_arg(&eval_store[*expr_id as usize], source_cell))
+                    .collect();
 
-                let response = call_extern_js_function(&func.name, js_args).await?;
-                ExprAtom::Text(response)
+                let cell_value = call_extern_js_function(&func.name, js_args).await?;
+                match cell_value {
+                    CellValue::Number(n) => ExprAtom::Number(n),
+                    CellValue::Text(s) => ExprAtom::Text(s.to_string()),
+                    CellValue::Error(s) => {
+                        return Err(EvalError::Error(s.to_string()));
+                    }
+                }
             }
         };
         eval_store.push(res);
@@ -1617,7 +1650,7 @@ async fn process_batch(
         }
         let ready = sp
             .dependency_graph
-            .decrease_pending_counter(&sp.sheets, CellRange::single(cell_id));
+            .decrease_pending_counter(&sp.sheets.read(), CellRange::single(cell_id));
         // increment pending BEFORE sending so the counter never hits 0 prematurely
         let new_ready = ready.len() as i64;
         if new_ready > 0 {

@@ -7,6 +7,7 @@
     import Sheet from "$lib/sheet/Sheet.svelte";
     import DevBottomPanel from "$lib/DevBottomPanel.svelte";
     import ShowDependencyGraph from "$lib/side-areas/ShowDependencyGraph.svelte";
+    import Extensions from "$lib/side-areas/Extensions.svelte";
     import { trackFps } from "$lib/stats.svelte";
     import { showError } from "$lib/notice";
     import type { IApi } from "@svar-ui/svelte-grid";
@@ -16,7 +17,10 @@
     import { open, save } from "@tauri-apps/plugin-dialog";
     import { listen } from "@tauri-apps/api/event";
     import { onMount } from "svelte";
-    import { initExtensionDispatcher } from "$lib/extensions/dispatcher";
+    import {
+        initExtensionDispatcher,
+        loadAllExtensions,
+    } from "$lib/extensions/dispatcher";
 
     attachConsole();
     trackFps();
@@ -30,6 +34,7 @@
     let isSaving = $state(false);
     let isLoading = $state(false);
     let isDependencyGraphVisible = $state(false);
+    let isExtensionsVisible = $state(false);
 
     const DIALOG_FILTER = { name: "Tonic Spreadsheet", extensions: ["tcs"] };
 
@@ -92,6 +97,7 @@
                 isLoading = false;
                 await syncFileInfo();
                 sheet.onFileLoad(decorationsJson);
+                await loadAllExtensions();
                 break;
             }
             case "file-save":
@@ -102,6 +108,9 @@
                 break;
             case "view-show-dependency-graph":
                 isDependencyGraphVisible = true;
+                break;
+            case "view-extensions":
+                isExtensionsVisible = true;
                 break;
         }
     }
@@ -152,6 +161,7 @@
             await invoke("new_file");
         }
         await syncFileInfo();
+        await loadAllExtensions();
 
         // on start-up, window flashes white screen before rendering
         // it is known webview issue: https://github.com/tauri-apps/tauri/issues/1564
@@ -233,6 +243,13 @@
                     <ShowDependencyGraph
                         onclose={() => {
                             isDependencyGraphVisible = false;
+                        }}
+                    />
+                {/if}
+                {#if isExtensionsVisible}
+                    <Extensions
+                        onclose={() => {
+                            isExtensionsVisible = false;
                         }}
                     />
                 {/if}

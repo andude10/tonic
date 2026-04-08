@@ -33,6 +33,14 @@ pub fn save(spreadsheet: &Spreadsheet, decorations_json: &str, path: &str) -> io
     header.set_size(dec_bytes.len() as u64);
     tar_builder.append_data(&mut header, "decorations.json", dec_bytes)?;
 
+    // save extension scripts as scripts/*.js
+    for script in &spreadsheet.scripts {
+        let script_bytes = script.content.as_bytes();
+        let script_path = format!("scripts/{}", script.name);
+        header.set_size(script_bytes.len() as u64);
+        tar_builder.append_data(&mut header, &script_path, script_bytes)?;
+    }
+
     let gz_encoder = tar_builder.into_inner()?;
     let compressed = gz_encoder.finish()?;
     info!(
@@ -67,6 +75,7 @@ pub fn load(path: &str) -> io::Result<(Spreadsheet, String)> {
     let mut archive = Archive::new(GzDecoder::new(&compressed[..]));
     let mut data_bytes: Option<Vec<u8>> = None;
     let mut dec_bytes: Option<Vec<u8>> = None;
+    let mut script_entries: Vec<(String, Vec<u8>)> = Vec::new();
 
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -82,6 +91,12 @@ pub fn load(path: &str) -> io::Result<(Spreadsheet, String)> {
                 entry.read_to_end(&mut buf)?;
                 dec_bytes = Some(buf);
             }
+            n if n.starts_with("scripts/") => {
+                let file_name = n.strip_prefix("scripts/").unwrap().to_string();
+                let mut buf = Vec::new();
+                entry.read_to_end(&mut buf)?;
+                script_entries.push((file_name, buf));
+            }
             _ => {}
         }
     }
@@ -95,8 +110,17 @@ pub fn load(path: &str) -> io::Result<(Spreadsheet, String)> {
     let data = data_bytes.ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidData, "data.json not found in archive")
     })?;
-    let spreadsheet: Spreadsheet =
+    let mut spreadsheet: Spreadsheet =
         sonic_rs::from_slice(&data).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+    // load extension scripts from scripts/ tar entries
+    spreadsheet.scripts = script_entries
+        .into_iter()
+        .filter_map(|(name, bytes)| {
+            let content = String::from_utf8(bytes).ok()?;
+            Some(crate::storage::types::ScriptFile { name, content })
+        })
+        .collect();
     let decorations = match dec_bytes {
         Some(bytes) => {
             String::from_utf8(bytes).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?

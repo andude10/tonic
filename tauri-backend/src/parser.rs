@@ -340,11 +340,15 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
                             Expr::Avg
                         }
                         _ => {
-                            // todo: user functions not yet supported
-                            return Err(Rich::custom(
-                                span,
-                                format!("unresolved function '{name}'"),
-                            ));
+                            // look up user-registered JS function
+                            let func_id =
+                                st.names.user_function_names.get(name).ok_or_else(|| {
+                                    Rich::custom(span, format!("unresolved function '{name}'"))
+                                })?;
+                            Expr::ExtrnalFunctionCall {
+                                func_id: *func_id,
+                                args,
+                            }
                         }
                     }
                 } else {
@@ -461,7 +465,9 @@ fn parse_cell_at(s: &[u8], pos: usize) -> Option<(u32, u32, bool, bool, usize)> 
     }
     let mut col: u32 = 0;
     while i < s.len() && s[i].is_ascii_alphabetic() {
-        col = col * 26 + (s[i].to_ascii_uppercase() - b'A') as u32 + 1;
+        col = col
+            .checked_mul(26)?
+            .checked_add((s[i].to_ascii_uppercase() - b'A') as u32 + 1)?;
         i += 1;
     }
     col -= 1;
@@ -476,10 +482,10 @@ fn parse_cell_at(s: &[u8], pos: usize) -> Option<(u32, u32, bool, bool, usize)> 
     }
     let mut row: u32 = 0;
     while i < s.len() && s[i].is_ascii_digit() {
-        row = row * 10 + (s[i] - b'0') as u32;
+        row = row.checked_mul(10)?.checked_add((s[i] - b'0') as u32)?;
         i += 1;
     }
-    row -= 1; // 1-indexed in text -> 0-indexed
+    row = row.checked_sub(1)?; // 1-indexed in text -> 0-indexed
     Some((col, row, abs_col, abs_row, i))
 }
 

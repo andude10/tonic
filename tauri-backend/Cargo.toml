@@ -36,7 +36,7 @@ rust_decimal = { version = "1.40.0", features = ["serde-with-str", "align16"] }
 rstar = "0.12"
 petgraph = "0.8"
 cold-string = { version = "0.2.0", features = ["serde"] }
-parking_lot = "0.12.5"
+parking_lot = { version = "0.12.5", features = ["serde"] }
 tokio = { version = "1.51.0", features = ["rt-multi-thread", "sync", "macros", "time"] }
 tokio-stream = { version = "0.1", features = ["time", "sync"] }
 

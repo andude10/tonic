@@ -50,6 +50,7 @@ export const menu_options: IMenuOption[] = [
                 id: "view-show-dependency-graph",
                 text: "Show dependency graph",
             },
+            { id: "view-extensions", text: "Extensions" },
             { id: "view-fullscreen", text: "Fullscreen" },
             { id: "view-option", text: "..." },
         ],

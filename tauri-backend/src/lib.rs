@@ -1,14 +1,15 @@
 // How backend works
 //
-// Backend exposes tarui commands to the frontend. Every command is not async.
+// Backend exposes async tauri commands to the frontend. Multiple commands can
+// run concurrently. Read commands use try_read() and return empty if a mutation
+// is in progress. Mutating commands are serialized via the "writing" AtomicBool flag.
+//
 // Frontend polls for cells that are in the current viewport (cells currently
 // visible on screen) each 20ms or so (via get_cells_in_viewport command).
-//
-// When user modifies the spreadsheet, the main thread is blocked until the
-// backend reacts to modification (inserts values, recomputes dependencies, etc)
 
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
 
@@ -23,7 +24,8 @@ use crate::engine::{ChangeBounds, Engine};
 use crate::parser::shift_formula_refs;
 use crate::storage::grid::{Cell, CellValue, GridCellId};
 use crate::storage::types::{
-    AbsoluteCellId, Projection, ProjectionFilterOption, Spreadsheet, Table,
+    AbsoluteCellId, AtomType, ExternalFunction, Projection, ProjectionFilterOption, Reference,
+    ScriptFile, Sheets, Spreadsheet, Table,
 };
 
 mod engine;
@@ -85,6 +87,20 @@ impl TonicState {
             file_name: None,
             file_path: None,
         }
+    }
+}
+
+// shared handle to sheets, accessible without locking TonicState.
+// used by resolve_reference so it can read cells during eval.
+// updated when the spreadsheet is replaced (open/new file).
+struct SheetsHandle(Mutex<Arc<RwLock<Sheets>>>);
+
+impl SheetsHandle {
+    fn get(&self) -> Arc<RwLock<Sheets>> {
+        self.0.lock().clone()
+    }
+    fn update(&self, sheets: &Arc<RwLock<Sheets>>) {
+        *self.0.lock() = sheets.clone();
     }
 }
 
@@ -205,7 +221,9 @@ fn get_editor_value_for_cell(
     state: tauri::State<'_, RwLock<TonicState>>,
     cell_id: CellId,
 ) -> tauri::ipc::Response {
-    let state = state.read();
+    let Some(state) = state.try_read() else {
+        return tauri::ipc::Response::new(Vec::new());
+    };
     let value = get_editor_value(&state, cell_id);
     tauri::ipc::Response::new(value.into_bytes())
 }
@@ -215,14 +233,16 @@ fn get_name_for_cell(
     state: tauri::State<'_, RwLock<TonicState>>,
     cell_id: CellId,
 ) -> tauri::ipc::Response {
-    let state = state.read();
+    let Some(state) = state.try_read() else {
+        return tauri::ipc::Response::new(Vec::new());
+    };
     let abs_id = cell_id.to_absolute();
     let name = state.engine.spreadsheet.names.cell_id_to_name(&abs_id);
     tauri::ipc::Response::new(name.into_bytes())
 }
 
-#[tauri::command(async)]
-fn rename_cell(
+#[tauri::command]
+async fn rename_cell(
     state: tauri::State<'_, RwLock<TonicState>>,
     cell_id: CellId,
     name: String,
@@ -242,7 +262,9 @@ fn get_editor_value_for_cells(
     state: tauri::State<'_, RwLock<TonicState>>,
     cells: Vec<CellId>,
 ) -> tauri::ipc::Response {
-    let state = state.read();
+    let Some(state) = state.try_read() else {
+        return tauri::ipc::Response::new(Vec::new());
+    };
     // Encode as: [count: u32 LE] then for each cell: [len: u32 LE][bytes]
     let mut buf = Vec::new();
     buf.extend_from_slice(&(cells.len() as u32).to_le_bytes());
@@ -257,7 +279,9 @@ fn get_editor_value_for_cells(
 
 #[tauri::command(async)]
 fn init_viewport(state: tauri::State<'_, RwLock<TonicState>>) {
-    let state = state.read();
+    let Some(state) = state.try_read() else {
+        return;
+    };
     let mut vp = state.viewport.lock();
     vp.last_viewport_buf.clear();
     vp.last_viewport_range = (u32::MAX, u32::MAX, u32::MAX, u32::MAX);
@@ -284,7 +308,9 @@ fn get_cells_in_viewport(
         return tauri::ipc::Response::new(Vec::new());
     };
 
-    let state = state.read();
+    let Some(state) = state.try_read() else {
+        return tauri::ipc::Response::new(Vec::new());
+    };
     let spreadsheet = &state.engine.spreadsheet;
     let mut vp = state.viewport.lock();
 
@@ -315,8 +341,8 @@ fn get_cells_in_viewport(
     tauri::ipc::Response::new(vp.last_viewport_buf.clone())
 }
 
-#[tauri::command(async)]
-fn enter_input(
+#[tauri::command]
+async fn enter_input(
     app: AppHandle,
     cell_id: CellId,
     user_input: &str,
@@ -332,8 +358,8 @@ fn enter_input(
     Ok(())
 }
 
-#[tauri::command(async)]
-fn delete_cells(
+#[tauri::command]
+async fn delete_cells(
     app: AppHandle,
     state: tauri::State<'_, RwLock<TonicState>>,
     cells: Vec<CellId>,
@@ -350,8 +376,8 @@ fn delete_cells(
     Ok(())
 }
 
-#[tauri::command(async)]
-fn fill_cells(
+#[tauri::command]
+async fn fill_cells(
     app: AppHandle,
     state: tauri::State<'_, RwLock<TonicState>>,
     sources: Vec<CellId>,
@@ -514,8 +540,8 @@ fn fill_cells(
     Ok(())
 }
 
-#[tauri::command(async)]
-fn paste_values(
+#[tauri::command]
+async fn paste_values(
     app: AppHandle,
     state: tauri::State<'_, RwLock<TonicState>>,
     cells: Vec<(CellId, String)>,
@@ -538,8 +564,8 @@ fn paste_values(
     Ok(())
 }
 
-#[tauri::command(async)]
-fn undo_input(
+#[tauri::command]
+async fn undo_input(
     app: AppHandle,
     state: tauri::State<'_, RwLock<TonicState>>,
 ) -> Result<Option<ChangeBounds>, String> {
@@ -551,8 +577,8 @@ fn undo_input(
     Ok(bounds)
 }
 
-#[tauri::command(async)]
-fn redo_input(
+#[tauri::command]
+async fn redo_input(
     app: AppHandle,
     state: tauri::State<'_, RwLock<TonicState>>,
 ) -> Result<Option<ChangeBounds>, String> {
@@ -606,8 +632,8 @@ fn disable_all_table_projections(app: &AppHandle, sp: &mut Spreadsheet) -> Resul
     Ok(())
 }
 
-#[tauri::command(async)]
-fn insert_column(
+#[tauri::command]
+async fn insert_column(
     app: AppHandle,
     state: tauri::State<'_, RwLock<TonicState>>,
     col: u32,
@@ -624,8 +650,8 @@ fn insert_column(
     Ok(())
 }
 
-#[tauri::command(async)]
-fn insert_row(
+#[tauri::command]
+async fn insert_row(
     app: AppHandle,
     state: tauri::State<'_, RwLock<TonicState>>,
     row: u32,
@@ -642,8 +668,8 @@ fn insert_row(
     Ok(())
 }
 
-#[tauri::command(async)]
-fn remove_column(
+#[tauri::command]
+async fn remove_column(
     app: AppHandle,
     state: tauri::State<'_, RwLock<TonicState>>,
     col: u32,
@@ -659,8 +685,8 @@ fn remove_column(
     Ok(())
 }
 
-#[tauri::command(async)]
-fn remove_row(
+#[tauri::command]
+async fn remove_row(
     app: AppHandle,
     state: tauri::State<'_, RwLock<TonicState>>,
     row: u32,
@@ -679,7 +705,9 @@ fn remove_row(
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn Error + 'static>> {
     engine::set_app_handle(app.handle().clone());
     let tonic_state = TonicState::new();
+    let sheets_handle = SheetsHandle(Mutex::new(tonic_state.engine.spreadsheet.sheets.clone()));
     app.manage(RwLock::new(tonic_state));
+    app.manage(sheets_handle);
     Ok(())
 }
 
@@ -689,8 +717,8 @@ fn update_file_info(state: &mut TonicState, path: &str) {
     state.file_path = Some(path.to_string());
 }
 
-#[tauri::command(async)]
-fn save_file(
+#[tauri::command]
+async fn save_file(
     app: AppHandle,
     state: tauri::State<'_, RwLock<TonicState>>,
     path: &str,
@@ -711,8 +739,8 @@ fn save_file(
     Ok(())
 }
 
-#[tauri::command(async)]
-fn rename_current_file(
+#[tauri::command]
+async fn rename_current_file(
     app: AppHandle,
     state: tauri::State<'_, RwLock<TonicState>>,
     new_name: &str,
@@ -737,10 +765,11 @@ fn rename_current_file(
     Ok(())
 }
 
-#[tauri::command(async)]
-fn open_file(
+#[tauri::command]
+async fn open_file(
     app: AppHandle,
     state: tauri::State<'_, RwLock<TonicState>>,
+    sheets_handle: tauri::State<'_, SheetsHandle>,
     path: &str,
 ) -> Result<String, String> {
     let mut state = begin_mutation(state.inner())?;
@@ -748,6 +777,7 @@ fn open_file(
         error!("Failed to open file '{}': {}", path, e);
         e.to_string()
     })?;
+    sheets_handle.update(&state.engine.spreadsheet.sheets);
     {
         let mut vp = state.viewport.lock();
         vp.last_viewport_buf.clear();
@@ -758,48 +788,208 @@ fn open_file(
     Ok(decorations)
 }
 
-#[tauri::command(async)]
-fn new_file(app: AppHandle, state: tauri::State<'_, RwLock<TonicState>>) -> Result<(), String> {
+#[tauri::command]
+async fn new_file(
+    app: AppHandle,
+    state: tauri::State<'_, RwLock<TonicState>>,
+    sheets_handle: tauri::State<'_, SheetsHandle>,
+) -> Result<(), String> {
     let mut state = begin_mutation(state.inner())?;
     state.file_name = Some("Untitled.tcv".to_string());
     state.file_path = None;
     state.engine.create_empty_spreadsheet();
+    sheets_handle.update(&state.engine.spreadsheet.sheets);
     emit_save_status(&app, &state);
     Ok(())
 }
 
 #[tauri::command(async)]
 fn get_file_info(state: tauri::State<'_, RwLock<TonicState>>) -> (Option<String>, Option<String>) {
-    let state = state.read();
+    let Some(state) = state.try_read() else {
+        return (None, None);
+    };
     (state.file_name.clone(), state.file_path.clone())
 }
 
 #[tauri::command(async)]
 fn get_dependency_graph_dot(state: tauri::State<'_, RwLock<TonicState>>) -> String {
-    let state = state.read();
+    let Some(state) = state.try_read() else {
+        return String::new();
+    };
     state.engine.spreadsheet.dependency_graph.to_dot()
 }
 
-/// Resolve a cell reference to its current value. Called by JS during external function dispatch.
-#[tauri::command(async)]
-fn resolve_reference(
+// -- extension / script management commands --
+
+#[tauri::command]
+async fn register_function(
     state: tauri::State<'_, RwLock<TonicState>>,
-    sheet_id: u32,
-    row: u32,
-    col: u32,
+    name: String,
+    args: Vec<String>,
+    file_name: String,
+) -> Result<(), String> {
+    let mut state = begin_mutation(state.inner())?;
+    let arg_types: Vec<AtomType> = args
+        .iter()
+        .map(|s| match s.as_str() {
+            "number" | "any" => Ok(AtomType::Number),
+            "text" => Ok(AtomType::Text),
+            "boolean" => Ok(AtomType::Boolean),
+            "reference" => Ok(AtomType::Reference),
+            other => Err(format!("unknown param type '{}'", other)),
+        })
+        .collect::<Result<_, _>>()?;
+
+    let sp = state.engine.spreadsheet_mut();
+    if sp.names.user_function_names.contains_key(&name) {
+        return Err(format!("function '{}' already registered", name));
+    }
+
+    let func_id = sp.external_functions.insert(ExternalFunction {
+        name: name.clone(),
+        args: arg_types,
+        file_name,
+    });
+    sp.names.user_function_names.insert(name.clone(), func_id);
+    sp.names.user_function_names_lookup.insert(func_id, name);
+    Ok(())
+}
+
+#[tauri::command]
+async fn unregister_functions_by_file(
+    state: tauri::State<'_, RwLock<TonicState>>,
+    file_name: String,
+) -> Result<(), String> {
+    let mut state = begin_mutation(state.inner())?;
+    let sp = state.engine.spreadsheet_mut();
+
+    let to_remove: Vec<(u32, String)> = sp
+        .external_functions
+        .iter()
+        .enumerate()
+        .filter_map(|(id, f)| {
+            f.as_ref()
+                .filter(|f| f.file_name == file_name)
+                .map(|f| (id as u32, f.name.clone()))
+        })
+        .collect();
+
+    for (func_id, name) in to_remove {
+        sp.external_functions[func_id as usize] = None;
+        sp.names.user_function_names.remove(&name);
+        sp.names.user_function_names_lookup.remove(&func_id);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn add_script(
+    state: tauri::State<'_, RwLock<TonicState>>,
+    file_path: String,
 ) -> Result<String, String> {
-    let state = state.read();
-    let id = AbsoluteCellId { sheet_id, row, col };
-    Ok(state
-        .engine
-        .spreadsheet
-        .get_cell(&id)
-        .map(|c| c.val.to_string())
-        .unwrap_or_default())
+    let content = std::fs::read_to_string(&file_path).map_err(|e| e.to_string())?;
+    let name = std::path::Path::new(&file_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "script.js".into());
+
+    let mut state = begin_mutation(state.inner())?;
+    let sp = state.engine.spreadsheet_mut();
+    if sp.scripts.iter().any(|s| s.name == name) {
+        return Err(format!("script '{}' already exists", name));
+    }
+    sp.scripts.push(ScriptFile {
+        name,
+        content: content.clone(),
+    });
+    Ok(content)
+}
+
+#[tauri::command]
+async fn remove_script(
+    state: tauri::State<'_, RwLock<TonicState>>,
+    name: String,
+) -> Result<(), String> {
+    let mut state = begin_mutation(state.inner())?;
+    let sp = state.engine.spreadsheet_mut();
+    sp.scripts.retain(|s| s.name != name);
+    Ok(())
 }
 
 #[tauri::command(async)]
-fn create_table(
+fn list_scripts(state: tauri::State<'_, RwLock<TonicState>>) -> Vec<String> {
+    let Some(state) = state.try_read() else {
+        return Vec::new();
+    };
+    state
+        .engine
+        .spreadsheet
+        .scripts
+        .iter()
+        .map(|s| s.name.clone())
+        .collect()
+}
+
+#[tauri::command(async)]
+fn get_script_content(state: tauri::State<'_, RwLock<TonicState>>, name: String) -> Option<String> {
+    let state = state.try_read()?;
+    state
+        .engine
+        .spreadsheet
+        .scripts
+        .iter()
+        .find(|s| s.name == name)
+        .map(|s| s.content.clone())
+}
+
+// resolve a reference to its value(s), returns raw bytes for efficiency
+// single ref -> cell value string, range ref -> JSON 2D array
+// reads sheets directly via SheetsHandle so it works during eval
+#[tauri::command(async)]
+fn resolve_reference(
+    sheets_handle: tauri::State<'_, SheetsHandle>,
+    reference: Reference,
+) -> tauri::ipc::Response {
+    let origin = AbsoluteCellId {
+        sheet_id: 0,
+        row: 0,
+        col: 0,
+    };
+    let range = reference.to_cell_range(&origin);
+    let sheets_arc = sheets_handle.get();
+    let sheets = sheets_arc.read();
+    let sheet = &sheets[range.sheet_id as usize];
+
+    if range.is_single() {
+        let id = GridCellId {
+            row: range.start_row,
+            col: range.start_col,
+        };
+        let val = sheet
+            .get_value(&id)
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+        return tauri::ipc::Response::new(val.into_bytes());
+    }
+
+    let rows: Vec<Vec<String>> = (range.start_row..=range.end_row)
+        .map(|r| {
+            (range.start_col..=range.end_col)
+                .map(|c| {
+                    sheet
+                        .get_value(&GridCellId { row: r, col: c })
+                        .map(|v| v.to_string())
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+        .collect();
+    let json = serde_json::to_vec(&rows).unwrap_or_default();
+    tauri::ipc::Response::new(json)
+}
+
+#[tauri::command]
+async fn create_table(
     state: tauri::State<'_, RwLock<TonicState>>,
     table_name: String,
     first_header: GridCellId,
@@ -849,7 +1039,7 @@ fn create_table(
             let col = body_start.col + col_offset as u32;
             let mut opts: BTreeMap<CellValue, ProjectionFilterOption> = BTreeMap::new();
             for &row in &rows {
-                if let Some(val) = sp.sheets[0].get_value(&GridCellId { row, col }) {
+                if let Some(val) = sp.sheets.read()[0].get_value(&GridCellId { row, col }) {
                     opts.entry(val.clone())
                         .and_modify(|o| o.count += 1)
                         .or_insert_with(|| {
@@ -894,8 +1084,8 @@ fn create_table(
     Ok(id)
 }
 
-#[tauri::command(async)]
-fn change_table_name(
+#[tauri::command]
+async fn change_table_name(
     state: tauri::State<'_, RwLock<TonicState>>,
     old_name: String,
     new_name: String,
@@ -928,8 +1118,8 @@ fn change_table_name(
     Ok(())
 }
 
-#[tauri::command(async)]
-fn toggle_table_sort(
+#[tauri::command]
+async fn toggle_table_sort(
     app: AppHandle,
     state: tauri::State<'_, RwLock<TonicState>>,
     header: GridCellId,
@@ -962,8 +1152,8 @@ fn toggle_table_sort(
     Ok(())
 }
 
-#[tauri::command(async)]
-fn toggle_table_filter(
+#[tauri::command]
+async fn toggle_table_filter(
     app: AppHandle,
     state: tauri::State<'_, RwLock<TonicState>>,
     header: GridCellId,
@@ -996,8 +1186,8 @@ fn toggle_table_filter(
     Ok(())
 }
 
-#[tauri::command(async)]
-fn select_all_table_filters(
+#[tauri::command]
+async fn select_all_table_filters(
     app: AppHandle,
     state: tauri::State<'_, RwLock<TonicState>>,
     header: GridCellId,
@@ -1029,8 +1219,8 @@ fn select_all_table_filters(
     Ok(())
 }
 
-#[tauri::command(async)]
-fn clear_all_table_filters(
+#[tauri::command]
+async fn clear_all_table_filters(
     app: AppHandle,
     state: tauri::State<'_, RwLock<TonicState>>,
     header: GridCellId,
@@ -1062,8 +1252,8 @@ fn clear_all_table_filters(
     Ok(())
 }
 
-#[tauri::command(async)]
-fn apply_table_projection(
+#[tauri::command]
+async fn apply_table_projection(
     app: AppHandle,
     state: tauri::State<'_, RwLock<TonicState>>,
     table_name: String,
@@ -1096,7 +1286,7 @@ fn apply_table_projection(
         .map(|col| {
             projected_rows
                 .iter()
-                .map(|&row| sp.sheets[sheet_id as usize].get_value(&GridCellId { row, col }))
+                .map(|&row| sp.sheets.read()[sheet_id as usize].get_value(&GridCellId { row, col }))
                 .collect()
         })
         .collect();
@@ -1144,8 +1334,8 @@ fn apply_table_projection(
     Ok(())
 }
 
-#[tauri::command(async)]
-fn disable_table_projection(
+#[tauri::command]
+async fn disable_table_projection(
     app: AppHandle,
     state: tauri::State<'_, RwLock<TonicState>>,
     table_name: String,
@@ -1172,13 +1362,15 @@ struct FilterOptionResponse {
     selected: bool,
 }
 
-#[tauri::command(async)]
-fn get_filter_options_for_table_column(
+#[tauri::command]
+async fn get_filter_options_for_table_column(
     state: tauri::State<'_, RwLock<TonicState>>,
     header: GridCellId,
 ) -> Result<Vec<FilterOptionResponse>, String> {
     let timer = std::time::Instant::now();
-    let state = state.read();
+    let Some(state) = state.try_read() else {
+        return Ok(Vec::new());
+    };
     let sp = &state.engine.spreadsheet;
 
     let (_, table) = sp
@@ -1263,6 +1455,12 @@ pub fn run() {
             apply_table_projection,
             disable_table_projection,
             resolve_reference,
+            register_function,
+            unregister_functions_by_file,
+            add_script,
+            remove_script,
+            list_scripts,
+            get_script_content,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
