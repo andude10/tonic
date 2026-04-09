@@ -557,7 +557,17 @@ impl Engine {
         }
         let eval_duration = eval_time.elapsed();
 
-        // step 4: update tables affected by changes
+        // step 4: detect cells stuck in cycles (pending_dependencies still > 0 after eval)
+        let cycle_time = Instant::now();
+        {
+            let sheets = self.spreadsheet.sheets.read();
+            self.spreadsheet
+                .dependency_graph
+                .detect_cycles(&sheets, &changed_ranges);
+        }
+        let cycle_duration = cycle_time.elapsed();
+
+        // step 5: update tables affected by changes
         let table_time = Instant::now();
         let mut affected_tables: HashSet<u32> = HashSet::new();
         for CellUpdate(id, _, _) in &changes {
@@ -571,6 +581,7 @@ impl Engine {
 
         info!("Eval (init pending counters) took: {:?}", init_duration);
         info!("Eval (running expressions) took: {:?}", eval_duration);
+        info!("Eval (detecting cycles) took: {:?}", cycle_duration);
         info!("Eval (updating tables) took: {:?}", table_time.elapsed());
     }
 
@@ -1776,7 +1787,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // todo: cycle detection not yet implemented in the new TACO BFS
     fn direct_cycle_sets_cycle_error() {
         let mut engine = Engine::new();
         let guard = engine.start_batch();
@@ -1790,7 +1800,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // todo: cycle detection not yet implemented in the new TACO BFS
     fn formulas_blocked_by_cycle_also_get_cycle_error() {
         let mut engine = Engine::new();
         let guard = engine.start_batch();

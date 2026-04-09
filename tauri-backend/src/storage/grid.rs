@@ -376,6 +376,18 @@ impl Grid {
             .map_or(0, |cell| cell.pending_dependencies.load(Ordering::Relaxed))
     }
 
+    pub fn reset_pending_dependencies(&self, id: &GridCellId) {
+        let idx = id.block_idx(self.stride);
+        let Some(block) = self.blocks.get(idx).and_then(|b| b.as_ref()) else {
+            return;
+        };
+        let (r, c) = id.local();
+        let guard = block.cells[r][c].read();
+        if let Some(cell) = guard.as_ref() {
+            cell.pending_dependencies.store(0, Ordering::Relaxed);
+        }
+    }
+
     pub(crate) fn for_each_cell_in_range<F>(
         &self,
         start_row: u32,

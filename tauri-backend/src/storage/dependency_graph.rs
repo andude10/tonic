@@ -23,7 +23,7 @@ use petgraph::{
 use rstar::{RTree, RTreeObject, AABB};
 
 use crate::storage::{
-    grid::{Grid, GridCellId},
+    grid::{CellValue, Grid, GridCellId},
     types::{AbsoluteCellId, CellRange, Expr, ExprAtom},
 };
 
@@ -292,6 +292,63 @@ impl DependencyGraph {
             }
 
             // discover new dependant ranges at range level and enqueue unvisited portions
+            self.collect_direct_dependant_ranges(prec_to_visit, &mut ranges_buf);
+            for i in 0..ranges_buf.len() {
+                for new_range in subtract_visited(&ranges_buf[i], &visited) {
+                    visited.insert(VisitedRange::new(new_range));
+                    queue.push_back(new_range);
+                }
+            }
+        }
+    }
+
+    // detect cells stuck in cycles after evaluation.
+    //
+    // BFS from changed_ranges (same traversal as init_pending_counter), but instead of
+    // incrementing counters, checks which cells still have pending_dependencies > 0.
+    // those cells were never evaluated because their predecessors in the cycle were
+    // never evaluated either. sets them to a circular reference error and resets
+    // their counter so the next recalculation starts clean.
+    pub fn detect_cycles(&self, sheets: &[Grid], changed_ranges: &[CellRange]) {
+        let mut queue = VecDeque::new();
+        let mut visited: RTree<VisitedRange> = RTree::new();
+        let mut ranges_buf = Vec::new();
+
+        for &changed_range in changed_ranges {
+            queue.push_back(changed_range);
+            visited.insert(VisitedRange::new(changed_range));
+        }
+
+        while let Some(prec_to_visit) = queue.pop_front() {
+            let envelope = vertex_envelope(prec_to_visit);
+
+            for iv in self.vertex_index.locate_in_envelope_intersecting(&envelope) {
+                let Some(&vertex_range) = self.graph.node_weight(iv.vertex_index) else {
+                    continue;
+                };
+                let Some(overlap) = vertex_range.intersection(&prec_to_visit) else {
+                    continue;
+                };
+
+                for edge in self
+                    .graph
+                    .edges_directed(iv.vertex_index, Direction::Outgoing)
+                {
+                    let edge_id = edge.id();
+                    overlap.for_each_cell(|cell| {
+                        if let Some(dep_range) =
+                            find_dependant_range(&self.graph, edge_id, CellRange::single(cell))
+                        {
+                            dep_range.for_each_cell(|dep_cell| {
+                                if get_pending_counter(sheets, dep_cell) > 0 {
+                                    set_circular_ref_error(sheets, dep_cell);
+                                }
+                            });
+                        }
+                    });
+                }
+            }
+
             self.collect_direct_dependant_ranges(prec_to_visit, &mut ranges_buf);
             for i in 0..ranges_buf.len() {
                 for new_range in subtract_visited(&ranges_buf[i], &visited) {
@@ -1211,6 +1268,13 @@ fn decrease_pending_counter(sheets: &[Grid], cell_id: AbsoluteCellId) -> u32 {
 fn get_pending_counter(sheets: &[Grid], cell_id: AbsoluteCellId) -> u32 {
     let grid_cell_id: GridCellId = (&cell_id).into();
     sheets[cell_id.sheet_id as usize].get_pending_dependencies(&grid_cell_id)
+}
+
+fn set_circular_ref_error(sheets: &[Grid], cell_id: AbsoluteCellId) {
+    let grid_cell_id: GridCellId = (&cell_id).into();
+    let grid = &sheets[cell_id.sheet_id as usize];
+    grid.set_value(&grid_cell_id, CellValue::Error("Cycle".into()));
+    grid.reset_pending_dependencies(&grid_cell_id);
 }
 
 // --- free functions: BFS dedup ---
