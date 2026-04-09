@@ -454,10 +454,7 @@ impl Grid {
         }
     }
 
-    // iterate values block-by-block instead of cell-by-cell.
-    // each block's cells array is contiguous in memory, so once the block is in L1
-    // the inner row-major scan hits every cache line sequentially.
-    // also avoids re-computing block index for every cell — one lookup per block.
+    // todo: remove this or for_each_cell
     pub fn for_each_value_in_range<F>(
         &self,
         start_row: u32,

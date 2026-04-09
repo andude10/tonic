@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicU32, AtomicU64};
-use std::sync::Arc;
+use std::sync::atomic::Ordering::Release;
+use std::sync::atomic::{self, AtomicU32, AtomicU64};
+use std::sync::{Arc, Mutex};
+use std::task::{Poll, Waker};
 use std::time::Instant;
 
 use parking_lot::RwLock;
@@ -9,8 +12,6 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Listener};
 use tauri_plugin_log::log::{debug, info};
-use tokio::task::JoinSet;
-use tokio_stream::{wrappers, StreamExt};
 
 use std::io;
 
@@ -54,6 +55,9 @@ enum ExternArg {
 static APP_HANDLE: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
 static CALL_ID: AtomicU64 = AtomicU64::new(0);
 
+/// Dedicated thread pool for parallel formula evaluation (heartbeat scheduling).
+static EVAL_POOL: forte::ThreadPool = forte::ThreadPool::new();
+
 pub fn set_app_handle(app: AppHandle) {
     let _ = APP_HANDLE.set(app);
 }
@@ -69,7 +73,20 @@ struct ExtFnResponse {
     e: Option<String>,
 }
 
-// call a JS-side external function via Tauri events
+// shared state for an in-flight external function call.
+// the Tauri callback stores the response and wakes the future.
+struct ExtCallState {
+    resp: Mutex<Option<ExtFnResponse>>,
+    waker: Mutex<Option<Waker>>,
+    ready: atomic::AtomicBool,
+}
+
+// todo: rewrite this whole function once eval_with_callback is released in tauri:
+// https://github.com/tauri-apps/tauri/issues/5441
+//
+// call a JS-side external function via Tauri events.
+// returns a future that yields while waiting for the JS response, allowing the
+// forte worker to process other cells in the meantime (via scope's future executor).
 async fn call_extern_js_function(
     func_name: &str,
     args: Vec<ExternArg>,
@@ -78,13 +95,28 @@ async fn call_extern_js_function(
         .get()
         .ok_or_else(|| EvalError::Error("no app handle for external call".into()))?;
 
-    let call_id = CALL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let call_id = CALL_ID.fetch_add(1, atomic::Ordering::Relaxed);
     let response_event = format!("ext-fn-response-{}", call_id);
 
-    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<ExtFnResponse>();
+    let state = Arc::new(ExtCallState {
+        resp: Mutex::new(None),
+        waker: Mutex::new(None),
+        ready: atomic::AtomicBool::new(false),
+    });
+
+    let cb_state = state.clone();
     app.once(&response_event, move |event: tauri::Event| {
-        if let Ok(resp) = serde_json::from_str(event.payload()) {
-            let _ = resp_tx.send(resp);
+        if let Ok(resp) = serde_json::from_str::<ExtFnResponse>(event.payload()) {
+            *cb_state.resp.lock().unwrap() = Some(resp);
+            cb_state.ready.store(true, Release);
+            if let Some(waker) = cb_state.waker.lock().unwrap().take() {
+                // todo: remove this
+                //
+                // wake on a separate thread: forte's with_worker_cold runs occupy()
+                // which drains the local queue on the calling thread. if called from
+                // the Tauri event thread, this blocks event dispatch and deadlocks.
+                std::thread::spawn(move || waker.wake());
+            }
         }
     });
 
@@ -98,10 +130,26 @@ async fn call_extern_js_function(
     )
     .map_err(|e| EvalError::Error(e.to_string()))?;
 
-    let resp = tokio::time::timeout(std::time::Duration::from_secs(30), resp_rx)
-        .await
-        .map_err(|_| EvalError::Error(format!("{}(): timeout", func_name)))?
-        .map_err(|_| EvalError::Error(format!("{}(): response dropped", func_name)))?;
+    let deadline = Instant::now() + std::time::Duration::from_secs(30);
+    let func_name_owned = func_name.to_string();
+
+    // yield to forte's scope executor until the callback fires.
+    // store waker BEFORE checking ready to avoid a race where the callback fires
+    // between the check and the store (which would leave the future un-woken).
+    let resp = std::future::poll_fn(|cx| {
+        *state.waker.lock().unwrap() = Some(cx.waker().clone());
+        if state.ready.load(atomic::Ordering::Acquire) {
+            return Poll::Ready(Ok(state.resp.lock().unwrap().take().unwrap()));
+        }
+        if Instant::now() > deadline {
+            return Poll::Ready(Err(EvalError::Error(format!(
+                "{}(): timeout",
+                func_name_owned
+            ))));
+        }
+        Poll::Pending
+    })
+    .await?;
 
     if let Some(err) = resp.e {
         return Err(EvalError::Error(err));
@@ -230,8 +278,6 @@ pub struct Engine {
     history: History,
     batch: Vec<CellUpdate>,
     debug: DebugInfo,
-    // dedicated runtime for parallel formula evaluation, separate from tauri's runtime
-    eval_runtime: tokio::runtime::Runtime,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -291,23 +337,17 @@ impl ColumnOrRowChangeSpec {
 
 impl Engine {
     pub fn new() -> Self {
-        let eval_runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(std::thread::available_parallelism().map_or(4, |n| n.get()))
-            .thread_name("tonic-eval")
-            .enable_time()
-            .build()
-            .expect("failed to create eval runtime");
+        EVAL_POOL.resize_to_available();
 
         Self {
             spreadsheet: Arc::new(Spreadsheet::new()),
             history: History::new(),
             batch: Vec::new(),
             debug: DebugInfo::new(),
-            eval_runtime,
         }
     }
 
-    /// Exclusive mutable access to the spreadsheet. Only valid when no tokio tasks hold a clone.
+    /// Exclusive mutable access to the spreadsheet. Only valid when no eval tasks hold a reference.
     pub fn spreadsheet_mut(&mut self) -> &mut Spreadsheet {
         Arc::get_mut(&mut self.spreadsheet).expect("spreadsheet is shared during eval")
     }
@@ -481,79 +521,22 @@ impl Engine {
             }
         }
 
-        // step 3: evaluate formulas in topological order, dispatching batches to tokio tasks.
+        // step 3: evaluate formulas in topological order using forte's parallelism.
         //
-        // uses chunks_timeout to accumulate ready cells into batches (up to BATCH_LIMIT or
-        // BATCH_TIMEOUT). one tokio task per batch lets the work-stealing scheduler distribute
-        // work evenly across cores. tasks send newly-ready dependants back through the channel.
-        // a pending counter tracks total unprocessed items; when it hits 0, a oneshot signal
-        // terminates the coordinator loop.
+        // each cell is spawned as an async future on the scope via spawn_on.
+        // cells without external calls complete synchronously (no await points).
+        // cells with external calls yield at the .await, freeing the worker to
+        // process other cells. when the JS response arrives, the future is re-queued.
         let eval_time = Instant::now();
-
-        const BATCH_LIMIT: usize = 1024;
-        const BATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1);
-
         if !wave.is_empty() {
-            let sp = self.spreadsheet.clone();
-            let (signal_tx, signal_rx) = std::sync::mpsc::sync_channel::<()>(1);
-
-            // spawn the coordinator on eval_runtime (avoids nesting block_on inside Tauri's runtime)
-            self.eval_runtime.spawn(async move {
-                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                // pending tracks unprocessed cells: the coordinator holds tx (keeping the
-                // stream alive), so chunks_timeout never sees a closed channel. the pending
-                // counter + notify is the only way to tell the coordinator when to stop.
-                let pending = Arc::new(std::sync::atomic::AtomicI64::new(wave.len() as i64));
-                let done = Arc::new(tokio::sync::Notify::new());
-                let mut tasks = JoinSet::new();
-
-                // spawn task for each batch from the wave
-                for batch in wave.chunks(BATCH_LIMIT) {
-                    let batch = batch.to_vec();
-                    let task_sp = sp.clone();
-                    let task_tx = tx.clone();
-                    let task_pending = pending.clone();
-                    let task_done = done.clone();
-                    tasks.spawn(async move {
-                        process_batch(batch, &task_sp, &task_tx, &task_pending, &task_done).await;
-                    });
-                }
-
-                let stream = wrappers::UnboundedReceiverStream::new(rx);
-                let chunks = stream.chunks_timeout(BATCH_LIMIT, BATCH_TIMEOUT);
-                tokio::pin!(chunks);
-
-                // create new task once batch is full or timeout is reached
-                loop {
-                    tokio::select! {
-                        biased;
-                        chunk = chunks.next() => {
-                            match chunk {
-                                Some(batch) => {
-                                    let task_sp = sp.clone();
-                                    let task_tx = tx.clone();
-                                    let task_pending = pending.clone();
-                                    let task_done = done.clone();
-                                    tasks.spawn(async move {
-                                        process_batch(batch, &task_sp, &task_tx, &task_pending, &task_done).await;
-                                    });
-                                }
-                                None => break,
-                            }
-                        }
-                        _ = done.notified() => break,
+            let sp = &self.spreadsheet;
+            EVAL_POOL.with_worker(|worker| {
+                worker.scope(|scope| {
+                    for cell in &wave {
+                        scope.spawn_on(worker, eval_cell(*cell, sp, scope));
                     }
-                }
-
-                // wait for tasks to fully exit so all Arc<Spreadsheet> clones are dropped
-                tasks.shutdown().await;
-                drop(sp);
-
-                let _ = signal_tx.send(());
+                });
             });
-
-            // block caller until eval completes (no runtime nesting)
-            let _ = signal_rx.recv();
         }
         let eval_duration = eval_time.elapsed();
 
@@ -568,6 +551,7 @@ impl Engine {
         let cycle_duration = cycle_time.elapsed();
 
         // step 5: update tables affected by changes
+        // todo: optimize
         let table_time = Instant::now();
         let mut affected_tables: HashSet<u32> = HashSet::new();
         for CellUpdate(id, _, _) in &changes {
@@ -1443,11 +1427,12 @@ fn resolve_range(
     }
 }
 
-/// Parallel sum+count over a cell range. For ranges over 1M cells, splits by rows
-/// into tokio tasks via fork-join; otherwise computes sequentially.
+/// Parallel sum+count over a cell range. Uses forte::join to binary-split rows
+/// across the thread pool. The heartbeat scheduler decides when to actually
+/// parallelize — small ranges run sequentially with no overhead.
 const PARALLEL_RANGE_THRESHOLD: u64 = 1_000_000;
 
-async fn parallel_sum_count(
+fn parallel_sum_count(
     sp: &Arc<Spreadsheet>,
     sheet_id: u32,
     sr: u32,
@@ -1456,7 +1441,6 @@ async fn parallel_sum_count(
     ec: u32,
 ) -> (Decimal, u64) {
     let total_cells = (er - sr + 1) as u64 * (ec - sc + 1) as u64;
-
     if total_cells <= PARALLEL_RANGE_THRESHOLD {
         let sheets = sp.sheets.read();
         let sheet = &sheets[sheet_id as usize];
@@ -1471,39 +1455,39 @@ async fn parallel_sum_count(
         return (sum, count);
     }
 
-    let num_chunks = std::thread::available_parallelism().map_or(4, |n| n.get());
-    let total_rows = (er - sr + 1) as usize;
-    let rows_per_chunk = (total_rows + num_chunks - 1) / num_chunks;
-
-    let mut tasks = tokio::task::JoinSet::new();
-    let mut chunk_start = sr;
-    while chunk_start <= er {
-        let chunk_end = (chunk_start + rows_per_chunk as u32 - 1).min(er);
-        let task_sp = sp.clone();
-        tasks.spawn(async move {
-            let sheets = task_sp.sheets.read();
+    fn split(
+        sp: &Arc<Spreadsheet>,
+        sheet_id: u32,
+        sr: u32,
+        sc: u32,
+        er: u32,
+        ec: u32,
+        worker: &forte::Worker,
+    ) -> (Decimal, u64) {
+        let rows = (er - sr + 1) as u64;
+        let cols = (ec - sc + 1) as u64;
+        if rows * cols <= 64_000 {
+            let sheets = sp.sheets.read();
             let sheet = &sheets[sheet_id as usize];
             let mut sum = Decimal::ZERO;
             let mut count = 0u64;
-            sheet.for_each_value_in_range(chunk_start, sc, chunk_end, ec, |val| {
+            sheet.for_each_value_in_range(sr, sc, er, ec, |val| {
                 if let CellValue::Number(n) = val {
                     sum += *n;
                     count += 1;
                 }
             });
-            (sum, count)
-        });
-        chunk_start = chunk_end + 1;
+            return (sum, count);
+        }
+        let mid = (sr + er) / 2;
+        let ((ls, lc), (rs, rc)) = worker.join(
+            |w| split(sp, sheet_id, sr, sc, mid, ec, w),
+            |w| split(sp, sheet_id, mid + 1, sc, er, ec, w),
+        );
+        (ls + rs, lc + rc)
     }
 
-    let mut total_sum = Decimal::ZERO;
-    let mut total_count = 0u64;
-    while let Some(result) = tasks.join_next().await {
-        let (s, c) = result.unwrap();
-        total_sum += s;
-        total_count += c;
-    }
-    (total_sum, total_count)
+    forte::Worker::with_current(|w| split(sp, sheet_id, sr, sc, er, ec, w.unwrap()))
 }
 
 // convert an eval-store atom to an ExternArg for JS dispatch
@@ -1578,14 +1562,14 @@ async fn eval_formula(
                 let range_arg_idx = eval_store.len() - 1;
                 let (sheet_id, sr, sc, er, ec) =
                     resolve_range(source_cell, &eval_store[range_arg_idx])?;
-                let (sum, _) = parallel_sum_count(sp, sheet_id, sr, sc, er, ec).await;
+                let (sum, _) = parallel_sum_count(sp, sheet_id, sr, sc, er, ec);
                 ExprAtom::Number(sum)
             }
             Expr::Avg => {
                 let range_arg_idx = eval_store.len() - 1;
                 let (sheet_id, sr, sc, er, ec) =
                     resolve_range(source_cell, &eval_store[range_arg_idx])?;
-                let (sum, count) = parallel_sum_count(sp, sheet_id, sr, sc, er, ec).await;
+                let (sum, count) = parallel_sum_count(sp, sheet_id, sr, sc, er, ec);
                 if count == 0 {
                     ExprAtom::Number(Decimal::ZERO)
                 } else {
@@ -1605,7 +1589,6 @@ async fn eval_formula(
                     )));
                 }
 
-                // resolve all args to values (auto-resolve cell references)
                 let js_args: Vec<ExternArg> = args
                     .iter()
                     .map(|expr_id| resolve_extern_arg(&eval_store[*expr_id as usize], source_cell))
@@ -1636,18 +1619,20 @@ async fn eval_formula(
     Ok(value)
 }
 
-// evaluate a batch of cells, write results to grid, decrease dependants' counters.
-// newly-ready dependants (counter == 0) are sent through tx.
-// one eval_store is reused across all cells in the batch to avoid per-cell allocation.
-async fn process_batch(
-    batch: Vec<AbsoluteCellId>,
-    sp: &Arc<Spreadsheet>,
-    tx: &tokio::sync::mpsc::UnboundedSender<AbsoluteCellId>,
-    pending: &std::sync::atomic::AtomicI64,
-    done: &tokio::sync::Notify,
-) {
-    let mut eval_store = Vec::new();
-    for cell_id in batch {
+// todo: note to remove the big types below when doing refactor
+//
+// evaluate a single cell, write result to grid, and spawn ready dependants onto the scope.
+// sync formulas complete instantly (no yield points), external calls yield at .await.
+//
+// returns impl Future instead of async fn because the recursive scope.spawn(eval_cell(...))
+// needs the compiler to see a concrete Send bound, which async fn's opaque type doesn't provide.
+fn eval_cell<'a, 'b>(
+    cell_id: AbsoluteCellId,
+    sp: &'a Arc<Spreadsheet>,
+    scope: &'a forte::Scope<'a, 'b>,
+) -> impl Future<Output = ()> + Send + use<'a, 'b> {
+    async move {
+        let mut eval_store = Vec::new();
         let formula_id = sp.get_cell(&cell_id).and_then(|c| c.defined_by_formula);
         if let Some(formula_id) = formula_id {
             if let Some(formula) = sp.formulas.get(formula_id) {
@@ -1662,16 +1647,8 @@ async fn process_batch(
         let ready = sp
             .dependency_graph
             .decrease_pending_counter(&sp.sheets.read(), CellRange::single(cell_id));
-        // increment pending BEFORE sending so the counter never hits 0 prematurely
-        let new_ready = ready.len() as i64;
-        if new_ready > 0 {
-            pending.fetch_add(new_ready, std::sync::atomic::Ordering::SeqCst);
-        }
         for r in ready {
-            let _ = tx.send(r);
-        }
-        if pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
-            done.notify_one();
+            scope.spawn(eval_cell(r, sp, scope));
         }
     }
 }

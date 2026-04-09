@@ -508,6 +508,7 @@ impl Spreadsheet {
             })
     }
 
+    // todo: put all logic for getting viewport in one place
     pub fn get_projected_cell(&self, id: &AbsoluteCellId) -> Option<Cell> {
         if let Some((_, table)) = self.find_table_containing_cell(id) {
             let projection = self.projections.get(table.projection_id)?;
@@ -548,6 +549,7 @@ impl Spreadsheet {
         self.sheets.write()[id.sheet_id as usize].remove_cell(&id.into());
     }
 
+    // todo: fix
     pub fn rebuild_dependency_graph(&mut self) {
         let mut formula_cells = Vec::new();
         for (sheet_id, sheet) in self.sheets.read().iter().enumerate() {

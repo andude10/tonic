@@ -141,36 +141,43 @@ export function unloadExtension(fileName: string): void {
 }
 
 export function initExtensionDispatcher(): void {
-    listen<ExtFnCall>("ext-fn-call", async (event) => {
+    listen<ExtFnCall>("ext-fn-call", (event) => {
         const { callId, funcName, args } = event.payload;
-
-        try {
-            const resolved = await resolveArgs(args);
-            const worker = funcToWorker.get(funcName);
-
-            if (!worker) {
-                await emit(`ext-fn-response-${callId}`, {
-                    e: `function '${funcName}' not found`,
-                });
-                return;
-            }
-
-            // send to worker, wait for response
-            const resp = await new Promise<ExtFnResponse>((resolve) => {
-                pendingCalls.set(callId, { resolve });
-                worker.postMessage({
-                    type: "call",
-                    callId,
-                    funcName,
-                    args: resolved,
-                });
-            });
-
-            await emit(`ext-fn-response-${callId}`, resp);
-        } catch (err) {
-            await emit(`ext-fn-response-${callId}`, { e: String(err) });
-        }
+        // don't await — let all calls fly concurrently
+        dispatchCall(callId, funcName, args);
     });
+}
+
+async function dispatchCall(
+    callId: number,
+    funcName: string,
+    args: ExternArg[],
+): Promise<void> {
+    try {
+        const worker = funcToWorker.get(funcName);
+        if (!worker) {
+            emit(`ext-fn-response-${callId}`, {
+                e: `function '${funcName}' not found`,
+            });
+            return;
+        }
+
+        const resolved = await resolveArgs(args);
+
+        const resp = await new Promise<ExtFnResponse>((resolve) => {
+            pendingCalls.set(callId, { resolve });
+            worker.postMessage({
+                type: "call",
+                callId,
+                funcName,
+                args: resolved,
+            });
+        });
+
+        emit(`ext-fn-response-${callId}`, resp);
+    } catch (err) {
+        emit(`ext-fn-response-${callId}`, { e: String(err) });
+    }
 }
 
 export async function loadAllExtensions(): Promise<void> {
