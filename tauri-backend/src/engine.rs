@@ -1,10 +1,7 @@
 use std::collections::{HashMap, HashSet};
-use std::future::Future;
 use std::marker::PhantomData;
-use std::sync::atomic::Ordering::Release;
 use std::sync::atomic::{self, AtomicU32, AtomicU64};
-use std::sync::{Arc, Mutex};
-use std::task::{Poll, Waker};
+use std::sync::Arc;
 use std::time::Instant;
 
 use parking_lot::RwLock;
@@ -51,15 +48,91 @@ enum ExternArg {
     },
 }
 
-/// Global app handle, set once during setup. Used by eval tasks to call JS.
-static APP_HANDLE: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
 static CALL_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Dedicated thread pool for parallel formula evaluation (heartbeat scheduling).
 static EVAL_POOL: forte::ThreadPool = forte::ThreadPool::new();
 
+// --- external function IPC bridge ---
+//
+// flow: forte worker → EXT_CALL_TX → ipc thread → app.emit(batch) → JS
+//       JS → app.emit(response per call) → persistent listener → resp_tx → forte worker
+
+struct ExtCallRequest {
+    call_id: u64,
+    func_name: String,
+    args: Vec<ExternArg>,
+    resp_tx: std::sync::mpsc::Sender<ExtFnResponse>,
+}
+
+// response with callId so the persistent listener can route it
+#[derive(Deserialize)]
+struct ExtFnResponseWithId {
+    #[serde(rename = "callId")]
+    call_id: u64,
+    #[serde(flatten)]
+    resp: ExtFnResponse,
+}
+
+static EXT_CALL_TX: std::sync::OnceLock<std::sync::mpsc::Sender<ExtCallRequest>> =
+    std::sync::OnceLock::new();
+
+/// Start the IPC bridge thread. Must be called once during app setup with the AppHandle.
 pub fn set_app_handle(app: AppHandle) {
-    let _ = APP_HANDLE.set(app);
+    let (tx, rx) = std::sync::mpsc::channel::<ExtCallRequest>();
+    EXT_CALL_TX.set(tx).ok();
+
+    // pending calls: callId → response sender. shared between the listener and the IPC thread.
+    let pending: Arc<std::sync::Mutex<HashMap<u64, std::sync::mpsc::Sender<ExtFnResponse>>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+    // single persistent listener for all responses (no per-call app.once)
+    let listener_pending = pending.clone();
+    app.listen("ext-fn-response", move |event: tauri::Event| {
+        if let Ok(resp) = serde_json::from_str::<ExtFnResponseWithId>(event.payload()) {
+            if let Some(tx) = listener_pending.lock().unwrap().remove(&resp.call_id) {
+                let _ = tx.send(resp.resp);
+            }
+        }
+    });
+
+    std::thread::Builder::new()
+        .name("ext-ipc".into())
+        .spawn(move || {
+            const BATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1);
+
+            loop {
+                // block until at least one request arrives
+                let first = match rx.recv() {
+                    Ok(req) => req,
+                    Err(_) => break, // channel closed
+                };
+
+                // drain all immediately available requests into a batch
+                let mut batch = vec![first];
+                while let Ok(req) = rx.recv_timeout(BATCH_TIMEOUT) {
+                    batch.push(req);
+                }
+
+                // register all response channels and build the batch payload
+                let mut calls = Vec::with_capacity(batch.len());
+                {
+                    let mut map = pending.lock().unwrap();
+                    for req in batch {
+                        map.insert(req.call_id, req.resp_tx);
+                        calls.push(serde_json::json!({
+                            "callId": req.call_id,
+                            "funcName": req.func_name,
+                            "args": req.args,
+                        }));
+                    }
+                }
+
+                // single emit with all calls
+                let _ = app.emit("ext-fn-call-batch", calls);
+            }
+        })
+        .expect("failed to spawn ext-ipc thread");
 }
 
 // response from a JS extension function call
@@ -73,83 +146,35 @@ struct ExtFnResponse {
     e: Option<String>,
 }
 
-// shared state for an in-flight external function call.
-// the Tauri callback stores the response and wakes the future.
-struct ExtCallState {
-    resp: Mutex<Option<ExtFnResponse>>,
-    waker: Mutex<Option<Waker>>,
-    ready: atomic::AtomicBool,
-}
-
-// todo: rewrite this whole function once eval_with_callback is released in tauri:
-// https://github.com/tauri-apps/tauri/issues/5441
-//
-// call a JS-side external function via Tauri events.
-// returns a future that yields while waiting for the JS response, allowing the
-// forte worker to process other cells in the meantime (via scope's future executor).
-async fn call_extern_js_function(
-    func_name: &str,
-    args: Vec<ExternArg>,
-) -> Result<CellValue, EvalError> {
-    let app = APP_HANDLE
+// call a JS-side external function.
+// sends the request through EXT_CALL_TX to the IPC thread and blocks on the response.
+// forte workers never touch Tauri APIs — all IPC goes through the dedicated thread.
+fn call_extern_js_function(func_name: &str, args: Vec<ExternArg>) -> Result<CellValue, EvalError> {
+    let tx = EXT_CALL_TX
         .get()
-        .ok_or_else(|| EvalError::Error("no app handle for external call".into()))?;
+        .ok_or_else(|| EvalError::Error("ext-ipc not initialized".into()))?;
 
     let call_id = CALL_ID.fetch_add(1, atomic::Ordering::Relaxed);
-    let response_event = format!("ext-fn-response-{}", call_id);
+    let (resp_tx, resp_rx) = std::sync::mpsc::channel();
 
-    let state = Arc::new(ExtCallState {
-        resp: Mutex::new(None),
-        waker: Mutex::new(None),
-        ready: atomic::AtomicBool::new(false),
-    });
-
-    let cb_state = state.clone();
-    app.once(&response_event, move |event: tauri::Event| {
-        if let Ok(resp) = serde_json::from_str::<ExtFnResponse>(event.payload()) {
-            *cb_state.resp.lock().unwrap() = Some(resp);
-            cb_state.ready.store(true, Release);
-            if let Some(waker) = cb_state.waker.lock().unwrap().take() {
-                // todo: remove this
-                //
-                // wake on a separate thread: forte's with_worker_cold runs occupy()
-                // which drains the local queue on the calling thread. if called from
-                // the Tauri event thread, this blocks event dispatch and deadlocks.
-                std::thread::spawn(move || waker.wake());
-            }
-        }
-    });
-
-    app.emit(
-        "ext-fn-call",
-        serde_json::json!({
-            "callId": call_id,
-            "funcName": func_name,
-            "args": args,
-        }),
-    )
-    .map_err(|e| EvalError::Error(e.to_string()))?;
-
-    let deadline = Instant::now() + std::time::Duration::from_secs(30);
-    let func_name_owned = func_name.to_string();
-
-    // yield to forte's scope executor until the callback fires.
-    // store waker BEFORE checking ready to avoid a race where the callback fires
-    // between the check and the store (which would leave the future un-woken).
-    let resp = std::future::poll_fn(|cx| {
-        *state.waker.lock().unwrap() = Some(cx.waker().clone());
-        if state.ready.load(atomic::Ordering::Acquire) {
-            return Poll::Ready(Ok(state.resp.lock().unwrap().take().unwrap()));
-        }
-        if Instant::now() > deadline {
-            return Poll::Ready(Err(EvalError::Error(format!(
-                "{}(): timeout",
-                func_name_owned
-            ))));
-        }
-        Poll::Pending
+    tx.send(ExtCallRequest {
+        call_id,
+        func_name: func_name.to_string(),
+        args,
+        resp_tx,
     })
-    .await?;
+    .map_err(|_| EvalError::Error("ext-ipc channel closed".into()))?;
+
+    let resp = resp_rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .map_err(|e| match e {
+            std::sync::mpsc::RecvTimeoutError::Timeout => {
+                EvalError::Error(format!("{}(): timeout", func_name))
+            }
+            std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                EvalError::Error(format!("{}(): ipc channel dropped", func_name))
+            }
+        })?;
 
     if let Some(err) = resp.e {
         return Err(EvalError::Error(err));
@@ -521,19 +546,21 @@ impl Engine {
             }
         }
 
-        // step 3: evaluate formulas in topological order using forte's parallelism.
+        // step 3: evaluate formulas in topological order using forte's scoped parallelism.
         //
-        // each cell is spawned as an async future on the scope via spawn_on.
-        // cells without external calls complete synchronously (no await points).
-        // cells with external calls yield at the .await, freeing the worker to
-        // process other cells. when the JS response arrives, the future is re-queued.
+        // each cell is spawned as a closure on the scope. external calls block the
+        // individual worker (via mpsc recv on the IPC bridge), while other workers
+        // continue evaluating independent cells.
         let eval_time = Instant::now();
         if !wave.is_empty() {
             let sp = &self.spreadsheet;
             EVAL_POOL.with_worker(|worker| {
                 worker.scope(|scope| {
                     for cell in &wave {
-                        scope.spawn_on(worker, eval_cell(*cell, sp, scope));
+                        let cell = *cell;
+                        scope.spawn_on(worker, move |_: &forte::Worker| {
+                            eval_cell(cell, sp, scope);
+                        });
                     }
                 });
             });
@@ -1521,7 +1548,7 @@ fn resolve_extern_arg(atom: &ExprAtom, source_cell: &AbsoluteCellId) -> ExternAr
 }
 
 /// Evaluate a single formula's AST, returning the computed CellValue.
-async fn eval_formula(
+fn eval_formula(
     ast: &[Expr],
     source_cell: &AbsoluteCellId,
     sp: &Arc<Spreadsheet>,
@@ -1594,7 +1621,7 @@ async fn eval_formula(
                     .map(|expr_id| resolve_extern_arg(&eval_store[*expr_id as usize], source_cell))
                     .collect();
 
-                let cell_value = call_extern_js_function(&func.name, js_args).await?;
+                let cell_value = call_extern_js_function(&func.name, js_args)?;
                 match cell_value {
                     CellValue::Number(n) => ExprAtom::Number(n),
                     CellValue::Text(s) => ExprAtom::Text(s.to_string()),
@@ -1619,37 +1646,30 @@ async fn eval_formula(
     Ok(value)
 }
 
-// todo: note to remove the big types below when doing refactor
-//
 // evaluate a single cell, write result to grid, and spawn ready dependants onto the scope.
-// sync formulas complete instantly (no yield points), external calls yield at .await.
-//
-// returns impl Future instead of async fn because the recursive scope.spawn(eval_cell(...))
-// needs the compiler to see a concrete Send bound, which async fn's opaque type doesn't provide.
-fn eval_cell<'a, 'b>(
+// external calls block this worker via the IPC bridge (mpsc channel), other workers continue.
+fn eval_cell<'a>(
     cell_id: AbsoluteCellId,
     sp: &'a Arc<Spreadsheet>,
-    scope: &'a forte::Scope<'a, 'b>,
-) -> impl Future<Output = ()> + Send + use<'a, 'b> {
-    async move {
-        let mut eval_store = Vec::new();
-        let formula_id = sp.get_cell(&cell_id).and_then(|c| c.defined_by_formula);
-        if let Some(formula_id) = formula_id {
-            if let Some(formula) = sp.formulas.get(formula_id) {
-                let val = match eval_formula(&formula.ast, &cell_id, sp, &mut eval_store).await {
-                    Ok(v) => v,
-                    Err(EvalError::Error(msg)) => CellValue::Error(msg.into()),
-                    Err(e) => CellValue::Error(format!("{:?}", e).into()),
-                };
-                sp.set_value(&cell_id, val);
-            }
+    scope: &'a forte::Scope<'a, '_>,
+) {
+    let mut eval_store = Vec::new();
+    let formula_id = sp.get_cell(&cell_id).and_then(|c| c.defined_by_formula);
+    if let Some(formula_id) = formula_id {
+        if let Some(formula) = sp.formulas.get(formula_id) {
+            let val = match eval_formula(&formula.ast, &cell_id, sp, &mut eval_store) {
+                Ok(v) => v,
+                Err(EvalError::Error(msg)) => CellValue::Error(msg.into()),
+                Err(e) => CellValue::Error(format!("{:?}", e).into()),
+            };
+            sp.set_value(&cell_id, val);
         }
-        let ready = sp
-            .dependency_graph
-            .decrease_pending_counter(&sp.sheets.read(), CellRange::single(cell_id));
-        for r in ready {
-            scope.spawn(eval_cell(r, sp, scope));
-        }
+    }
+    let ready = sp
+        .dependency_graph
+        .decrease_pending_counter(&sp.sheets.read(), CellRange::single(cell_id));
+    for r in ready {
+        scope.spawn(move |_: &forte::Worker| eval_cell(r, sp, scope));
     }
 }
 

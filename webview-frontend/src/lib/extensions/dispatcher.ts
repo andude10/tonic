@@ -141,10 +141,11 @@ export function unloadExtension(fileName: string): void {
 }
 
 export function initExtensionDispatcher(): void {
-    listen<ExtFnCall>("ext-fn-call", (event) => {
-        const { callId, funcName, args } = event.payload;
-        // don't await — let all calls fly concurrently
-        dispatchCall(callId, funcName, args);
+    // listen for batched calls from the Rust IPC thread
+    listen<ExtFnCall[]>("ext-fn-call-batch", (event) => {
+        for (const call of event.payload) {
+            dispatchCall(call.callId, call.funcName, call.args);
+        }
     });
 }
 
@@ -156,7 +157,8 @@ async function dispatchCall(
     try {
         const worker = funcToWorker.get(funcName);
         if (!worker) {
-            emit(`ext-fn-response-${callId}`, {
+            emit("ext-fn-response", {
+                callId,
                 e: `function '${funcName}' not found`,
             });
             return;
@@ -174,9 +176,10 @@ async function dispatchCall(
             });
         });
 
-        emit(`ext-fn-response-${callId}`, resp);
+        // respond on unified event name with callId in payload
+        emit("ext-fn-response", { callId, ...resp });
     } catch (err) {
-        emit(`ext-fn-response-${callId}`, { e: String(err) });
+        emit("ext-fn-response", { callId, e: String(err) });
     }
 }
 
