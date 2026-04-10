@@ -497,6 +497,11 @@
         overflow: hidden;
     }
 
+    :global(html.busy),
+    :global(html.busy *) {
+        cursor: wait !important;
+    }
+
     /* scroll bars */
     :global(*) {
         scrollbar-width: thin;

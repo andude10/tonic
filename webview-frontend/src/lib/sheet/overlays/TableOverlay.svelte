@@ -288,7 +288,7 @@
 
     .hidden-rows-overlay {
         position: absolute;
-        background: rgba(30, 32, 36, 0.95);
+        background: rgba(30, 32, 36);
         pointer-events: none;
         display: flex;
         align-items: flex-start;
@@ -297,7 +297,7 @@
     }
 
     .hidden-rows-text {
-        color: rgba(255, 255, 255, 0.5);
+        color: rgba(255, 255, 255, 0.7);
         font-family: "JetBrains Mono", monospace;
         font-size: 10px;
         font-weight: 500;

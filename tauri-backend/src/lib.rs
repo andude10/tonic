@@ -288,8 +288,14 @@ fn init_viewport(state: tauri::State<'_, RwLock<TonicState>>) {
 }
 
 #[tauri::command(async)]
+fn is_writing(state: tauri::State<'_, RwLock<TonicState>>) -> bool {
+    state.try_read().is_none()
+}
+
+#[tauri::command(async)]
 fn get_cells_in_viewport(
     state: tauri::State<'_, RwLock<TonicState>>,
+    sheets_handle: tauri::State<'_, SheetsHandle>,
     request: tauri::ipc::Request<'_>,
 ) -> tauri::ipc::Response {
     let headers = request.headers();
@@ -308,37 +314,76 @@ fn get_cells_in_viewport(
         return tauri::ipc::Response::new(Vec::new());
     };
 
-    let Some(state) = state.try_read() else {
-        return tauri::ipc::Response::new(Vec::new());
-    };
-    let spreadsheet = &state.engine.spreadsheet;
-    let mut vp = state.viewport.lock();
+    if let Some(state) = state.try_read() {
+        let spreadsheet = &state.engine.spreadsheet;
+        let mut vp = state.viewport.lock();
 
-    vp.current_buf.clear();
-    for row in row_start..=row_end {
-        for col in col_start..=col_end {
-            let id = AbsoluteCellId {
-                sheet_id: 0,
-                row,
-                col,
-            };
-            let cell = spreadsheet.get_projected_cell(&id);
-            encode_cell(&mut vp.current_buf, row, col, cell.as_ref());
+        vp.current_buf.clear();
+        for row in row_start..=row_end {
+            for col in col_start..=col_end {
+                let id = AbsoluteCellId {
+                    sheet_id: 0,
+                    row,
+                    col,
+                };
+                let cell = spreadsheet.get_projected_cell(&id);
+                encode_cell(&mut vp.current_buf, row, col, cell.as_ref());
+            }
         }
-    }
 
-    let range = (row_start, row_end, col_start, col_end);
-    let viewport_changed = range != vp.last_viewport_range;
-    vp.last_viewport_range = range;
+        let range = (row_start, row_end, col_start, col_end);
+        let viewport_changed = range != vp.last_viewport_range;
+        vp.last_viewport_range = range;
 
-    // return nothing if viewport range didn't change and
-    // buffer that was sent previously is the same as the new buffer (no cell was updated in the current viewport)
-    if !viewport_changed && vp.current_buf == vp.last_viewport_buf {
-        return tauri::ipc::Response::new(Vec::new());
+        if !viewport_changed && vp.current_buf == vp.last_viewport_buf {
+            return tauri::ipc::Response::new(Vec::new());
+        }
+        let vp = &mut *vp;
+        std::mem::swap(&mut vp.current_buf, &mut vp.last_viewport_buf);
+        tauri::ipc::Response::new(vp.last_viewport_buf.clone())
+    } else {
+        // writing in progress: read cells directly from grid, show pending status
+        let sheets_arc = sheets_handle.get();
+        let Some(sheets) = sheets_arc.try_read() else {
+            return tauri::ipc::Response::new(Vec::new());
+        };
+        let grid = &sheets[0];
+
+        let mut buf = Vec::new();
+        let mut has_pending = false;
+        for row in row_start..=row_end {
+            for col in col_start..=col_end {
+                let grid_id = GridCellId { row, col };
+                match grid.try_get_cell(&grid_id) {
+                    None => return tauri::ipc::Response::new(Vec::new()),
+                    Some(None) => encode_cell(&mut buf, row, col, None),
+                    Some(Some(cell)) => {
+                        let pending = cell.pending_dependencies.load(Ordering::Relaxed);
+                        if pending > 0 {
+                            has_pending = true;
+                            buf.extend_from_slice(&row.to_le_bytes());
+                            buf.extend_from_slice(&col.to_le_bytes());
+                            buf.push(2); // pending flag
+                            let display = pending.to_string();
+                            let bytes = display.as_bytes();
+                            buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                            buf.extend_from_slice(bytes);
+                        } else if matches!(&cell.val, CellValue::Error(s) if s.is_empty()) {
+                            // placeholder error from mutation phase, encode as empty
+                            encode_cell(&mut buf, row, col, None);
+                        } else {
+                            encode_cell(&mut buf, row, col, Some(&cell));
+                        }
+                    }
+                }
+            }
+        }
+        // no cells pending: return empty so frontend keeps its previous state
+        if !has_pending {
+            return tauri::ipc::Response::new(Vec::new());
+        }
+        tauri::ipc::Response::new(buf)
     }
-    let vp = &mut *vp;
-    std::mem::swap(&mut vp.current_buf, &mut vp.last_viewport_buf);
-    tauri::ipc::Response::new(vp.last_viewport_buf.clone())
 }
 
 #[tauri::command]
@@ -1423,6 +1468,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(setup)
         .invoke_handler(tauri::generate_handler![
+            is_writing,
             init_viewport,
             enter_input,
             fill_cells,

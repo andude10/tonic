@@ -183,7 +183,9 @@
         while (offset < len) {
             const row = view.getUint32(offset, true);
             const col = view.getUint32(offset + 4, true);
-            const isFormula = bytes[offset + 8] !== 0;
+            const flags = bytes[offset + 8];
+            const isFormula = flags === 1;
+            const isPending = flags === 2;
             offset += 9;
 
             const displayLen = view.getUint32(offset, true);
@@ -202,6 +204,7 @@
                 );
             }
             if (isFormula) cell.isFormula = true;
+            if (isPending) cell.isPending = true;
         }
     }
 
@@ -239,6 +242,10 @@
                   cellId: shared.focusedCell,
               })
             : null;
+
+        invoke<boolean>("is_writing").then((w) => {
+            document.documentElement.classList.toggle("busy", w);
+        });
 
         Promise.all([cellsPromise, editorPromise, namePromise]).then(
             ([cellsBuf, editorBuf, nameBuf]) => {

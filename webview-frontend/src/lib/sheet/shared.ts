@@ -4,7 +4,11 @@ import { createContext } from "svelte";
 export type UICell = { row: number; column: string };
 /** Internal cell ID: 0-indexed row and col. */
 export type CellId = { row: number; col: number };
-export type CellData = { computedValue: string; isFormula: boolean };
+export type CellData = {
+    computedValue: string;
+    isFormula: boolean;
+    isPending?: boolean;
+};
 export type ChangeBounds = {
     min_row: number;
     max_row: number;

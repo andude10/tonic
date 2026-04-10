@@ -415,6 +415,17 @@ impl Engine {
         old_cell
     }
 
+    /// Like set_cell but only updates the grid, not the dependency graph.
+    /// Used during structural changes where the dep graph is rebuilt afterward.
+    fn set_cell_grid_only(&mut self, id: &AbsoluteCellId, new_cell: Option<Cell>) -> Option<Cell> {
+        let old_cell = self.spreadsheet.get_cell(id);
+        match new_cell.as_ref() {
+            Some(cell) => self.spreadsheet.insert_cell(id, cell.clone()),
+            None => self.spreadsheet.remove_cell(id),
+        }
+        old_cell
+    }
+
     // todo: simplify?
 
     fn record_cell_change(&mut self, id: AbsoluteCellId, new_cell: Option<Cell>) {
@@ -520,12 +531,13 @@ impl Engine {
 
         // step 1: discover all affected dependants and set their pending counters (sync)
         let init_time = Instant::now();
-        let changed_ranges = merge_cells_into_ranges(
-            &changes
-                .iter()
-                .map(|CellUpdate(id, _, _)| *id)
-                .collect::<Vec<_>>(),
-        );
+        let unique_cells: Vec<AbsoluteCellId> = changes
+            .iter()
+            .map(|CellUpdate(id, _, _)| *id)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let changed_ranges = merge_cells_into_ranges(&unique_cells);
         {
             let sheets = self.spreadsheet.sheets.read();
             self.spreadsheet
@@ -538,10 +550,10 @@ impl Engine {
         let mut wave: Vec<AbsoluteCellId> = Vec::new();
         {
             let sheets = self.spreadsheet.sheets.read();
-            for CellUpdate(id, _, _) in &changes {
-                let grid_id: GridCellId = id.into();
+            for &id in &unique_cells {
+                let grid_id: GridCellId = (&id).into();
                 if sheets[id.sheet_id as usize].get_pending_dependencies(&grid_id) == 0 {
-                    wave.push(*id);
+                    wave.push(id);
                 }
             }
         }
@@ -925,7 +937,7 @@ impl Engine {
                 };
             }
 
-            let old = self.set_cell(
+            let old = self.set_cell_grid_only(
                 &dependant_id,
                 Some(dependant_with_shifted_references.clone()),
             );
@@ -999,7 +1011,7 @@ impl Engine {
                 row: deleted_id.row,
                 col: deleted_id.col,
             };
-            let old = self.set_cell(&deleted_id, None);
+            let old = self.set_cell_grid_only(&deleted_id, None);
             changes.push(CellUpdate(deleted_id, old, None));
         }
 
@@ -1032,8 +1044,8 @@ impl Engine {
                 },
             };
 
-            let old_dest = self.set_cell(&dest_id, Some(cell.clone()));
-            let old_source = self.set_cell(&source_id, None);
+            let old_source = self.set_cell_grid_only(&source_id, None);
+            let old_dest = self.set_cell_grid_only(&dest_id, Some(cell.clone()));
             self.spreadsheet_mut()
                 .names
                 .move_cell_name(&source_id, &dest_id);
@@ -1060,6 +1072,34 @@ impl Engine {
         self.move_cells_for_column_or_row_change(spec, &mut changes);
         let move_duration = move_time.elapsed();
 
+        // dep graph is stale (grid-only updates above skipped it).
+        // targeted rebuild: remove old edges for affected cells, re-insert from current grid.
+        let rebuild_time = Instant::now();
+        let affected: HashSet<AbsoluteCellId> =
+            changes.iter().map(|CellUpdate(id, _, _)| *id).collect();
+        for &id in &affected {
+            self.spreadsheet_mut()
+                .dependency_graph
+                .remove_formula_cell(id);
+        }
+        for &id in &affected {
+            if let Some(cell) = self.spreadsheet.get_cell(&id) {
+                if let Some(formula_id) = cell.defined_by_formula {
+                    let ast = self
+                        .spreadsheet
+                        .formulas
+                        .get(formula_id)
+                        .map(|f| f.ast.clone());
+                    if let Some(ast) = ast {
+                        self.spreadsheet_mut()
+                            .dependency_graph
+                            .insert_formula_cell(id, &ast);
+                    }
+                }
+            }
+        }
+        let rebuild_duration = rebuild_time.elapsed();
+
         debug!(
             "{} (dependencies & dependants) took: {:?}",
             spec.operation_name(),
@@ -1074,6 +1114,11 @@ impl Engine {
             "{} (moving cells) took: {:?}",
             spec.operation_name(),
             move_duration
+        );
+        debug!(
+            "{} (rebuilding dep graph) took: {:?}",
+            spec.operation_name(),
+            rebuild_duration
         );
 
         changes
@@ -2057,5 +2102,65 @@ mod tests {
             elapsed,
             elapsed / EDITS
         );
+    }
+
+    #[test]
+    fn remove_column_no_false_cycles_in_formula_grid() {
+        // Reproduce: 21 rows × 12 cols. Col A = numbers, cols B-L = "=prev_col + 5".
+        // Removing col H should NOT produce Cycle errors.
+        let mut engine = Engine::new();
+        let guard = engine.start_batch();
+
+        let rows = 21u32;
+        let cols = 12u32; // A(0) .. L(11)
+
+        // col A: numbers 1..=21
+        for row in 0..rows {
+            engine.insert_number(&guard, cell(row, 0), Decimal::from(row as i64 + 1));
+        }
+
+        // cols B-L: each cell = same row, previous column + 5
+        for row in 0..rows {
+            for col in 1..cols {
+                let col_letter = std::char::from_u32('A' as u32 + col - 1).unwrap();
+                let formula = format!("={}{}+5", col_letter, row + 1);
+                engine.parse_and_insert_string(&guard, cell(row, col), &formula);
+            }
+        }
+        engine.end_batch(guard);
+
+        // verify pre-removal: all cells should have numbers
+        for row in 0..rows {
+            for col in 0..cols {
+                let c = engine
+                    .spreadsheet
+                    .get_cell(&cell(row, col))
+                    .expect("cell exists");
+                assert!(
+                    matches!(&c.val, CellValue::Number(_)),
+                    "pre-removal: cell ({},{}) should be number, got {:?}",
+                    row,
+                    col,
+                    c.val
+                );
+            }
+        }
+
+        // remove column H (col 7)
+        engine.remove_column_or_row(0, false, 7);
+
+        // after removal: 11 columns remain. No cell should be Cycle error.
+        for row in 0..rows {
+            for col in 0..(cols - 1) {
+                if let Some(c) = engine.spreadsheet.get_cell(&cell(row, col)) {
+                    assert!(
+                        !matches!(&c.val, CellValue::Error(s) if &*s == "Cycle"),
+                        "post-removal: cell ({},{}) has false Cycle error",
+                        row,
+                        col
+                    );
+                }
+            }
+        }
     }
 }

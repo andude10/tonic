@@ -49,6 +49,7 @@
         isCellData(cell) ? cell.computedValue : (cell ?? ""),
     );
     const hasFormula = $derived(isCellData(cell) && cell.isFormula);
+    const isPending = $derived(isCellData(cell) && !!cell.isPending);
 
     const isTableHeader = $derived(
         shared.cellStyles.get(`${row.id},${column.id}`) === "table-header-cell",
@@ -161,6 +162,8 @@
             editorInputHtml={shared.editorInputHtml}
         />
     </div>
+{:else if isPending}
+    <div class="display-cell pending-cell">{displayContent}</div>
 {:else}
     <div class="display-cell">
         {displayContent}
@@ -235,6 +238,26 @@
         align-items: center;
         width: 100%;
         height: 100%;
+    }
+
+    .pending-cell {
+        opacity: 0.4;
+        font-style: italic;
+    }
+
+    .pending-cell::after {
+        content: "...";
+        display: inline-block;
+        overflow: hidden;
+        vertical-align: bottom;
+        width: 0;
+        animation: pending-dots 1.6s steps(4, end) infinite;
+    }
+
+    @keyframes pending-dots {
+        to {
+            width: 1em;
+        }
     }
 
     .formula-indicator {

@@ -271,6 +271,17 @@ impl Grid {
         block.cells[r][c].read().clone()
     }
 
+    /// Try to read a cell without blocking. Returns None if the per-cell lock is held.
+    pub fn try_get_cell(&self, id: &GridCellId) -> Option<Option<Cell>> {
+        let idx = id.block_idx(self.stride);
+        let Some(block) = self.blocks.get(idx).and_then(|b| b.as_ref()) else {
+            return Some(None);
+        };
+        let (r, c) = id.local();
+        let guard = block.cells[r][c].try_read()?;
+        Some(guard.clone())
+    }
+
     pub fn get_value(&self, id: &GridCellId) -> Option<CellValue> {
         self.get_cell(id).map(|cell| cell.val)
     }
