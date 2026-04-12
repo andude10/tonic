@@ -6,6 +6,7 @@
         registerMenuItem,
         type IMenuOptionClick,
     } from "@svar-ui/svelte-menu";
+    import { Popup } from "@svar-ui/svelte-core";
     import InputCell from "./InputCell.svelte";
     import FilterMenuItem from "./FilterMenuItem.svelte";
     import {
@@ -50,6 +51,10 @@
     );
     const hasFormula = $derived(isCellData(cell) && cell.isFormula);
     const isPending = $derived(isCellData(cell) && !!cell.isPending);
+    const isError = $derived(isCellData(cell) && !!cell.isError);
+    const errorMessage = $derived(
+        isCellData(cell) && cell.errorMessage ? cell.errorMessage : "",
+    );
 
     const isTableHeader = $derived(
         shared.cellStyles.get(`${row.id},${column.id}`) === "table-header-cell",
@@ -135,6 +140,8 @@
     }
 
     let editingCellEl: HTMLDivElement | undefined = $state();
+    let errorPopupOpen = $state(false);
+    let errorIndicatorEl: HTMLButtonElement | undefined = $state();
 
     $effect(() => {
         shared.editorInput;
@@ -167,16 +174,59 @@
 {:else}
     <div class="display-cell">
         {displayContent}
-        {#if hasFormula}
-            <svg
-                class="formula-indicator"
-                viewBox="0 0 24 24"
-                xmlns="http://www.w3.org/2000/svg"
-                ><path
-                    fill="currentColor"
-                    d="M18 7h-12c-1.104 0-2 .896-2 2s.896 2 2 2h12c1.104 0 2-.896 2-2s-.896-2-2-2zM18 14h-12c-1.104 0-2 .896-2 2s.896 2 2 2h12c1.104 0 2-.896 2-2s-.896-2-2-2z"
-                /></svg
+        {#if isError}
+            <button
+                class="cell-indicator error-indicator"
+                aria-label="Error details"
+                bind:this={errorIndicatorEl}
+                onclick={() => {
+                    errorPopupOpen = !errorPopupOpen;
+                }}
             >
+                <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"
+                    ><path
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        d="M7 7l10 10M17 7L7 17"
+                    /></svg
+                >
+            </button>
+            {#if errorPopupOpen}
+                <Popup
+                    oncancel={() => {
+                        errorPopupOpen = false;
+                    }}
+                    at="bottom"
+                    parent={errorIndicatorEl}
+                >
+                    <div class="error-popup">
+                        <pre>{errorMessage}</pre>
+                        <button
+                            class="error-copy-btn"
+                            onclick={() =>
+                                navigator.clipboard.writeText(errorMessage)}
+                            >Copy</button
+                        >
+                    </div>
+                </Popup>
+            {/if}
+        {:else if hasFormula}
+            <button
+                class="cell-indicator formula-indicator"
+                aria-label="Formula"
+            >
+                <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"
+                    ><path
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        d="M5 9h14M5 15h14"
+                    /></svg
+                >
+            </button>
         {/if}
 
         <!-- todo: refactor, make state flow (tables) clear -->
@@ -260,18 +310,74 @@
         }
     }
 
-    .formula-indicator {
+    .cell-indicator {
+        all: unset;
+        box-sizing: border-box;
         margin-left: auto;
         width: 1.3em;
         height: 1.3em;
         padding: 0.15em;
         flex-shrink: 0;
-        color: rgba(255, 255, 255, 0.15);
-        border: 1px solid #35373d;
         border-radius: 1px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        pointer-events: auto;
     }
 
-    .display-cell > :global(span:has(.table-header-btn)) {
+    .cell-indicator > :global(svg) {
+        width: 100%;
+        height: 100%;
+    }
+
+    .formula-indicator {
+        color: rgba(255, 255, 255, 0.15);
+        border: 1px solid #35373d;
+    }
+
+    .error-indicator {
+        cursor: pointer;
+        color: #f87171;
+        background: rgba(248, 113, 113, 0.12);
+        border: 1px solid rgba(248, 113, 113, 0.3);
+    }
+
+    .error-indicator:hover {
+        background: rgba(248, 113, 113, 0.22);
+    }
+
+    :global(.error-popup) {
+        padding: 6px 10px;
+        font-size: 11px;
+        font-family: "JetBrains Mono", monospace;
+        width: max-content;
+    }
+
+    :global(.error-popup pre) {
+        margin: 0;
+        white-space: pre;
+        font: inherit;
+    }
+
+    :global(.error-popup .error-copy-btn) {
+        all: unset;
+        display: block;
+        margin-top: 4px;
+        padding: 2px 8px;
+        font-size: 10px;
+        cursor: pointer;
+        border-radius: 2px;
+        background: rgba(255, 255, 255, 0.07);
+        color: rgba(255, 255, 255, 0.6);
+        transition: background 100ms ease;
+    }
+
+    :global(.error-popup .error-copy-btn:hover) {
+        background: rgba(255, 255, 255, 0.13);
+    }
+
+    .display-cell > :global(span:has(.table-header-btn)),
+    .display-cell > :global(span:has(.error-indicator)) {
         margin-left: auto;
         flex-shrink: 0;
     }

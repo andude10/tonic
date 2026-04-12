@@ -8,6 +8,8 @@ export type CellData = {
     computedValue: string;
     isFormula: boolean;
     isPending?: boolean;
+    isError?: boolean;
+    errorMessage?: string;
 };
 export type ChangeBounds = {
     min_row: number;

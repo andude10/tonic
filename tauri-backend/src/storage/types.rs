@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -345,7 +346,7 @@ impl Reference {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum ExprAtom {
-    Boolean(bool),
+    Bool(bool),
     Number(Decimal),
     Text(String),
     InvalidReferenceError(String),
@@ -355,12 +356,25 @@ pub enum ExprAtom {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum AtomType {
-    Boolean,
+    Bool,
     Number,
     Text,
     InvalidReferenceError,
     Function,
     Reference,
+}
+
+impl fmt::Display for AtomType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            AtomType::Bool => write!(f, "bool"),
+            AtomType::Number => write!(f, "number"),
+            AtomType::Text => write!(f, "text"),
+            AtomType::InvalidReferenceError => write!(f, "error"),
+            AtomType::Function => write!(f, "function"),
+            AtomType::Reference => write!(f, "reference"),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -371,12 +385,18 @@ pub enum Expr {
     Subtract(ExprId, ExprId),
     Multiply(ExprId, ExprId),
     Divide(ExprId, ExprId),
+    Equal(ExprId, ExprId),
+    GreaterThan(ExprId, ExprId),
+    LessThan(ExprId, ExprId),
 
     // default formulas
-    Sum,
-    Avg,
+    Sum(ExprId),
+    Avg(ExprId),
+    Min(ExprId),
+    Max(ExprId),
+    Count(ExprId, ExprId),
+    If(ExprId, ExprId, ExprId),
 
-    // todo:
     ExtrnalFunctionCall {
         func_id: UserFuncId,
         args: Vec<ExprId>,

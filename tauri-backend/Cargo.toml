@@ -40,6 +40,7 @@ parking_lot = { version = "0.12.5", features = ["serde"] }
 tokio = { version = "1.51.0", features = ["rt-multi-thread", "sync", "macros", "time"] }
 tokio-stream = { version = "0.1", features = ["time", "sync"] }
 forte = { git = "https://github.com/NthTensor/Forte.git", rev = "49d67201081b2d343e74d00bae5637bc2da307a9" }
+ariadne = { version = "0.6.0", default-features = false }
 
 # Optimize dependencies even in dev builds — huge speedup for
 # serde, flate2, chumsky etc. while keeping tonic_lib itself debuggable.

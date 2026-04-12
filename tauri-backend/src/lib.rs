@@ -165,21 +165,38 @@ fn emit_table_projection_events(
 }
 
 /// Encode a single cell into the binary buffer.
-/// Format: [row: u32 LE][col: u32 LE][is_formula: u8][display_len: u32 LE][display_bytes]
+/// Format: [row: u32 LE][col: u32 LE][flags: u8][display_len: u32 LE][display_bytes]
+///   if error flag set: [error_msg_len: u32 LE][error_msg_bytes]
+/// Flags: bit 0 = formula, bit 2 = error
 fn encode_cell(buf: &mut Vec<u8>, row: u32, col: u32, cell: Option<&Cell>) {
     buf.extend_from_slice(&row.to_le_bytes());
     buf.extend_from_slice(&col.to_le_bytes());
     match cell {
         Some(cell) => {
-            buf.push(cell.defined_by_formula.is_some() as u8);
+            let mut flags = 0u8;
+            if cell.defined_by_formula.is_some() {
+                flags |= 1;
+            }
+            let error_msg = if let CellValue::Error(msg, _) = &cell.val {
+                flags |= 4;
+                Some(msg.as_str())
+            } else {
+                None
+            };
+            buf.push(flags);
             let display = cell.val.to_string();
             let display_bytes = display.as_bytes();
             buf.extend_from_slice(&(display_bytes.len() as u32).to_le_bytes());
             buf.extend_from_slice(display_bytes);
+            if let Some(msg) = error_msg {
+                let msg_bytes = msg.as_bytes();
+                buf.extend_from_slice(&(msg_bytes.len() as u32).to_le_bytes());
+                buf.extend_from_slice(msg_bytes);
+            }
         }
         None => {
-            buf.push(0); // not a formula
-            buf.extend_from_slice(&0u32.to_le_bytes()); // empty display
+            buf.push(0);
+            buf.extend_from_slice(&0u32.to_le_bytes());
         }
     }
 }
@@ -368,7 +385,7 @@ fn get_cells_in_viewport(
                             let bytes = display.as_bytes();
                             buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
                             buf.extend_from_slice(bytes);
-                        } else if matches!(&cell.val, CellValue::Error(s) if s.is_empty()) {
+                        } else if matches!(&cell.val, CellValue::Error(s, _) if s.is_empty()) {
                             // placeholder error from mutation phase, encode as empty
                             encode_cell(&mut buf, row, col, None);
                         } else {
@@ -879,7 +896,7 @@ async fn register_function(
         .map(|s| match s.as_str() {
             "number" | "any" => Ok(AtomType::Number),
             "text" => Ok(AtomType::Text),
-            "boolean" => Ok(AtomType::Boolean),
+            "boolean" => Ok(AtomType::Bool),
             "reference" => Ok(AtomType::Reference),
             other => Err(format!("unknown param type '{}'", other)),
         })

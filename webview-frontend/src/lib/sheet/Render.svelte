@@ -184,8 +184,9 @@
             const row = view.getUint32(offset, true);
             const col = view.getUint32(offset + 4, true);
             const flags = bytes[offset + 8];
-            const isFormula = flags === 1;
-            const isPending = flags === 2;
+            const isFormula = (flags & 1) !== 0;
+            const isPending = (flags & 2) !== 0;
+            const isError = (flags & 4) !== 0;
             offset += 9;
 
             const displayLen = view.getUint32(offset, true);
@@ -205,6 +206,17 @@
             }
             if (isFormula) cell.isFormula = true;
             if (isPending) cell.isPending = true;
+            if (isError) {
+                cell.isError = true;
+                const msgLen = view.getUint32(offset, true);
+                offset += 4;
+                if (msgLen) {
+                    cell.errorMessage = textDecoder.decode(
+                        bytes.subarray(offset, offset + msgLen),
+                    );
+                    offset += msgLen;
+                }
+            }
         }
     }
 

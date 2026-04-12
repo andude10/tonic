@@ -44,6 +44,9 @@ pub enum Token<'src> {
     Comma,
     LParen,
     RParen,
+    Eq,
+    Gt,
+    Lt,
     Backslash,
     Arrow,
 }
@@ -79,6 +82,9 @@ impl fmt::Display for Token<'_> {
             Token::Comma => write!(f, ","),
             Token::LParen => write!(f, "("),
             Token::RParen => write!(f, ")"),
+            Token::Eq => write!(f, "="),
+            Token::Gt => write!(f, ">"),
+            Token::Lt => write!(f, "<"),
             Token::Backslash => write!(f, "\\"),
             Token::Arrow => write!(f, "->"),
             Token::Text(s) => write!(f, "{s}"),
@@ -90,20 +96,57 @@ type Spanned<T> = chumsky::span::Spanned<T, SimpleSpan>;
 
 // --- Error utilities ---
 
-pub fn lexer_errors_to_string<'a>(errs: impl IntoIterator<Item = &'a Rich<'a, char>>) -> String {
-    errs.into_iter()
-        .map(|e| e.to_string())
+fn build_report(title: &str, src: &str, span: std::ops::Range<usize>, message: String) -> String {
+    use ariadne::{Config, IndexType, Label, Report, ReportKind, Source};
+
+    let src_id = "";
+    let mut buf = Vec::new();
+    Report::build(ReportKind::Error, (src_id, span.clone()))
+        .with_config(
+            Config::new()
+                .with_color(false)
+                .with_index_type(IndexType::Byte)
+                .with_compact(true),
+        )
+        .with_label(Label::new((src_id, span)).with_message(message))
+        .finish()
+        .write((src_id, Source::from(format!("={src}"))), &mut buf)
+        .unwrap();
+    let output = String::from_utf8(buf).unwrap();
+    let body: String = output
+        .lines()
+        .filter(|line| !line.starts_with("Error") && !line.contains("─["))
         .collect::<Vec<_>>()
-        .join("; ")
+        .join("\n");
+    format!("{title}\n{body}")
 }
 
-pub fn parse_formula_errors_to_string<'a, 'src: 'a>(
-    errs: impl IntoIterator<Item = &'a Rich<'a, Token<'src>>>,
-) -> String {
-    errs.into_iter()
-        .map(|e| e.to_string())
-        .collect::<Vec<_>>()
-        .join("; ")
+fn format_parsing_error(src: &str, span: std::ops::Range<usize>, msg: &str) -> String {
+    build_report("Parsing error:", src, span, msg.to_string())
+}
+
+pub fn format_lex_error(src: &str, err: &Rich<'_, char>) -> String {
+    let s = err.span().into_range();
+    format_parsing_error(src, s.start + 1..s.end + 1, &err.to_string())
+}
+
+pub fn format_parse_error<'src>(src: &str, err: &Rich<'_, Token<'src>>) -> String {
+    let s = err.span().into_range();
+    format_parsing_error(src, s.start + 1..s.end + 1, &err.to_string())
+}
+
+pub fn format_eval_error(formula_string: &str, message: &str) -> String {
+    let src = if formula_string.starts_with('=') {
+        &formula_string[1..]
+    } else {
+        formula_string
+    };
+    build_report(
+        "Type error:",
+        src,
+        1..formula_string.len(),
+        message.to_string(),
+    )
 }
 
 /// Input string
@@ -123,6 +166,9 @@ pub fn create_lexer<'src>(
             s => Token::Name(s),
         }),
         just('+').to(Token::Plus),
+        just('=').to(Token::Eq),
+        just('>').to(Token::Gt),
+        just('<').to(Token::Lt),
         just('\\').to(Token::Backslash),
         just("->").to(Token::Arrow),
         just('-').to(Token::Dash),
@@ -331,13 +377,40 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
                             if args.len() != 1 {
                                 return Err(Rich::custom(span, "sum expects exactly 1 argument"));
                             }
-                            Expr::Sum
+                            Expr::Sum(args[0])
                         }
                         "avg" => {
                             if args.len() != 1 {
                                 return Err(Rich::custom(span, "avg expects exactly 1 argument"));
                             }
-                            Expr::Avg
+                            Expr::Avg(args[0])
+                        }
+                        "min" => {
+                            if args.len() != 1 {
+                                return Err(Rich::custom(span, "min expects exactly 1 argument"));
+                            }
+                            Expr::Min(args[0])
+                        }
+                        "max" => {
+                            if args.len() != 1 {
+                                return Err(Rich::custom(span, "max expects exactly 1 argument"));
+                            }
+                            Expr::Max(args[0])
+                        }
+                        "count" => {
+                            if args.len() != 2 {
+                                return Err(Rich::custom(
+                                    span,
+                                    "count expects exactly 2 arguments",
+                                ));
+                            }
+                            Expr::Count(args[0], args[1])
+                        }
+                        "if" => {
+                            if args.len() != 3 {
+                                return Err(Rich::custom(span, "if expects exactly 3 arguments"));
+                            }
+                            Expr::If(args[0], args[1], args[2])
                         }
                         _ => {
                             // look up user-registered JS function
@@ -352,7 +425,14 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
                         }
                     }
                 } else {
-                    // cell ref: bare name
+                    // bare name: check if it's a known function missing parens
+                    const BUILTINS: &[&str] = &["sum", "avg", "min", "max", "count", "if"];
+                    if BUILTINS.contains(&name) || st.names.user_function_names.contains_key(name) {
+                        return Err(Rich::custom(
+                            span,
+                            format!("'{name}' is a function, expected '('"),
+                        ));
+                    }
                     let named_cell =
                         st.names.cell_names.get(name).ok_or_else(|| {
                             Rich::custom(span, format!("unresolved cell '{name}'"))
@@ -397,8 +477,8 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
 
         // atom_value == self-contained value (3, false, A1, A1:A5, 3.14, "text", etc)
         let atom_value = choice((
-            select_ref! { Token::True => ExprAtom::Boolean(true) },
-            select_ref! { Token::False => ExprAtom::Boolean(false) },
+            select_ref! { Token::True => ExprAtom::Bool(true) },
+            select_ref! { Token::False => ExprAtom::Bool(false) },
             select_ref! { Token::Number(x) => ExprAtom::Number(*x) },
             select_ref! { Token::Text(s) => ExprAtom::Text(s.to_string()) },
             cell_or_range,
@@ -427,6 +507,15 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
             }),
             infix(left(1), just(Token::Dash), |l, _, r, e| {
                 push_expr(e.state(), Expr::Subtract(l, r))
+            }),
+            infix(left(0), just(Token::Eq), |l, _, r, e| {
+                push_expr(e.state(), Expr::Equal(l, r))
+            }),
+            infix(left(0), just(Token::Gt), |l, _, r, e| {
+                push_expr(e.state(), Expr::GreaterThan(l, r))
+            }),
+            infix(left(0), just(Token::Lt), |l, _, r, e| {
+                push_expr(e.state(), Expr::LessThan(l, r))
             }),
         ))
     })
@@ -679,7 +768,10 @@ mod tests {
         assert!(
             errs.is_empty(),
             "parse errors: {}",
-            parse_formula_errors_to_string(&errs)
+            errs.iter()
+                .map(|e| format_parse_error(src, e))
+                .collect::<Vec<_>>()
+                .join("\n")
         );
         parsed.expect("no output")
     }
@@ -719,8 +811,8 @@ mod tests {
     #[test]
     fn test_boolean_literal() {
         assert_parses(&[
-            ("true", vec![Expr::Atom(ExprAtom::Boolean(true))]),
-            ("false", vec![Expr::Atom(ExprAtom::Boolean(false))]),
+            ("true", vec![Expr::Atom(ExprAtom::Bool(true))]),
+            ("false", vec![Expr::Atom(ExprAtom::Bool(false))]),
         ]);
     }
 
@@ -861,7 +953,7 @@ mod tests {
                     end_row: Coordinate::Relative(1),
                     end_col: Coordinate::Relative(1),
                 })),
-                Expr::Sum
+                Expr::Sum(0)
             ]
         );
         assert_eq!(root, 1);
@@ -881,7 +973,7 @@ mod tests {
                     end_row: Coordinate::Relative(1),
                     end_col: Coordinate::Relative(1),
                 })),
-                Expr::Avg
+                Expr::Avg(0)
             ]
         );
         assert_eq!(root, 1);

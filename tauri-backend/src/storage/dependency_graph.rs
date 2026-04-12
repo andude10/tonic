@@ -1273,7 +1273,7 @@ fn get_pending_counter(sheets: &[Grid], cell_id: AbsoluteCellId) -> u32 {
 fn set_circular_ref_error(sheets: &[Grid], cell_id: AbsoluteCellId) {
     let grid_cell_id: GridCellId = (&cell_id).into();
     let grid = &sheets[cell_id.sheet_id as usize];
-    grid.set_value(&grid_cell_id, CellValue::Error("Cycle".into()));
+    grid.set_value(&grid_cell_id, CellValue::err("Cycle"));
     grid.reset_pending_dependencies(&grid_cell_id);
 }
 
@@ -1342,7 +1342,7 @@ mod tests {
                 &grid_cell_id,
                 Cell {
                     defined_by_formula: None,
-                    val: CellValue::Error("".into()),
+                    val: CellValue::err(""),
                     pending_dependencies: AtomicU32::new(0),
                 },
             );
@@ -1361,7 +1361,7 @@ mod tests {
                 &grid_cell_id,
                 Cell {
                     defined_by_formula: Some(*formula_id),
-                    val: CellValue::Error("".into()),
+                    val: CellValue::err(""),
                     pending_dependencies: AtomicU32::new(0),
                 },
             );

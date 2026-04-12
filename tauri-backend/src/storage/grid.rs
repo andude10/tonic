@@ -64,7 +64,15 @@ impl Cell {
     pub fn error(msg: String) -> Self {
         Self {
             defined_by_formula: None,
-            val: CellValue::Error(msg.into()),
+            val: CellValue::err(msg),
+            pending_dependencies: AtomicU32::new(0),
+        }
+    }
+
+    pub fn error_with_input(msg: String, input: String) -> Self {
+        Self {
+            defined_by_formula: None,
+            val: CellValue::Error(msg.into(), input.into()),
             pending_dependencies: AtomicU32::new(0),
         }
     }
@@ -74,7 +82,14 @@ impl Cell {
 pub enum CellValue {
     Text(ColdString),
     Number(Decimal),
-    Error(ColdString),
+    Bool(bool),
+    Error(ColdString, ColdString),
+}
+
+impl CellValue {
+    pub fn err(msg: impl Into<ColdString>) -> Self {
+        CellValue::Error(msg.into(), ColdString::default())
+    }
 }
 
 impl fmt::Display for CellValue {
@@ -82,7 +97,9 @@ impl fmt::Display for CellValue {
         match self {
             CellValue::Text(s) => write!(f, "{}", s),
             CellValue::Number(n) => write!(f, "{}", n),
-            CellValue::Error(s) => write!(f, "#ERROR: {}", s),
+            CellValue::Bool(b) => write!(f, "{}", if *b { "true" } else { "false" }),
+            CellValue::Error(_, input) if !input.is_empty() => write!(f, "{}", input),
+            CellValue::Error(_, _) => write!(f, "#ERROR"),
         }
     }
 }
@@ -551,7 +568,7 @@ mod tests {
     #[test]
     fn remove_cell_test() {
         let mut grid = Grid::default();
-        grid.insert_cell(&id(3, 3), cell(CellValue::Error("".into())));
+        grid.insert_cell(&id(3, 3), cell(CellValue::err("")));
         assert!(grid.get_cell(&id(3, 3)).is_some());
         grid.remove_cell(&id(3, 3));
         assert!(grid.get_cell(&id(3, 3)).is_none());
@@ -560,7 +577,7 @@ mod tests {
     #[test]
     fn remove_frees_empty_block() {
         let mut grid = Grid::default();
-        grid.insert_cell(&id(0, 0), cell(CellValue::Error("".into())));
+        grid.insert_cell(&id(0, 0), cell(CellValue::err("")));
         let idx = id(0, 0).block_idx(grid.stride);
         assert!(grid.blocks[idx].is_some());
         grid.remove_cell(&id(0, 0));
@@ -570,8 +587,8 @@ mod tests {
     #[test]
     fn block_not_freed_while_cells_remain() {
         let mut grid = Grid::default();
-        grid.insert_cell(&id(0, 0), cell(CellValue::Error("".into())));
-        grid.insert_cell(&id(1, 1), cell(CellValue::Error("".into())));
+        grid.insert_cell(&id(0, 0), cell(CellValue::err("")));
+        grid.insert_cell(&id(1, 1), cell(CellValue::err("")));
         grid.remove_cell(&id(0, 0));
         let idx = id(0, 0).block_idx(grid.stride);
         assert!(grid.blocks[idx].is_some());

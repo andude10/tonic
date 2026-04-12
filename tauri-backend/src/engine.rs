@@ -13,7 +13,10 @@ use tauri_plugin_log::log::{debug, info};
 use std::io;
 
 use crate::file_api;
-use crate::parser::{lex_formula, parse_formula, FormulaState};
+use crate::parser::{
+    format_eval_error, format_lex_error, format_parse_error, lex_formula, parse_formula,
+    FormulaState,
+};
 use crate::storage::grid::{Cell, CellValue, GridCellId};
 use crate::storage::types::{
     AbsoluteCellId, AtomType, CellRange, Coordinate, Expr, ExprAtom, Formula, FormulaId,
@@ -449,8 +452,9 @@ impl Engine {
         let formula_text = &input[1..];
         let lex_result = lex_formula(formula_text);
         // report any errors during lexing
-        if lex_result.has_errors() {
-            self.record_cell_change(id, Some(Cell::error("Lex error".into())));
+        if let Some(err) = lex_result.errors().next() {
+            let msg = format_lex_error(formula_text, err);
+            self.record_cell_change(id, Some(Cell::error_with_input(msg, input.to_string())));
             return;
         }
 
@@ -471,7 +475,8 @@ impl Engine {
         let (parsed, parse_errs) = parse_formula(&tokens, formula_text.len(), &mut state);
         // report any errors during parsing (syntax, name not found)
         if !parse_errs.is_empty() {
-            self.record_cell_change(id, Some(Cell::error("Parse error".into())));
+            let msg = format_parse_error(formula_text, &parse_errs[0]);
+            self.record_cell_change(id, Some(Cell::error_with_input(msg, input.to_string())));
             return;
         }
         let Some((ast, _root_id)) = parsed else {
@@ -488,7 +493,7 @@ impl Engine {
         // insert cell with formula reference and dependencies
         let new = Cell {
             defined_by_formula: Some(formula_id),
-            val: CellValue::Error("".into()),
+            val: CellValue::err(""),
             pending_dependencies: AtomicU32::new(0),
         };
         self.record_cell_change(id, Some(new));
@@ -513,7 +518,7 @@ impl Engine {
     ) {
         let new = Cell {
             defined_by_formula: Some(formula_id),
-            val: CellValue::Error("".into()),
+            val: CellValue::err(""),
             pending_dependencies: AtomicU32::new(0),
         };
         self.record_cell_change(id, Some(new));
@@ -1442,7 +1447,11 @@ fn resolve_number(
                         expected: AtomType::Number,
                         got: AtomType::Text,
                     }),
-                    Some(CellValue::Error(msg)) => Err(EvalError::Error(msg.to_string())),
+                    Some(CellValue::Bool(_)) => Err(EvalError::TypeError {
+                        expected: AtomType::Number,
+                        got: AtomType::Bool,
+                    }),
+                    Some(CellValue::Error(msg, _)) => Err(EvalError::Error(msg.to_string())),
                     None => Ok(Decimal::ZERO),
                 }
             }
@@ -1454,13 +1463,80 @@ fn resolve_number(
         _ => Err(EvalError::TypeError {
             expected: AtomType::Number,
             got: match expr {
-                ExprAtom::Boolean(_) => AtomType::Boolean,
+                ExprAtom::Bool(_) => AtomType::Bool,
                 ExprAtom::Text(_) => AtomType::Text,
                 ExprAtom::InvalidReferenceError(_) => AtomType::InvalidReferenceError,
                 ExprAtom::Function(_) => AtomType::Function,
                 _ => unreachable!(),
             },
         }),
+    }
+}
+
+fn resolve_bool(
+    source_cell: &AbsoluteCellId,
+    expr: &ExprAtom,
+    sheets: &Arc<RwLock<Sheets>>,
+) -> Result<bool, EvalError> {
+    match expr {
+        ExprAtom::Bool(b) => Ok(*b),
+        ExprAtom::InvalidReferenceError(msg) => Err(EvalError::Error(msg.clone())),
+        ExprAtom::Reference(r) => match r {
+            Reference::Single { sheet_id, row, col } => {
+                let row = row.to_index(source_cell.row);
+                let col = col.to_index(source_cell.col);
+                let gid = GridCellId { row, col };
+                match sheets.read()[*sheet_id as usize].get_value(&gid) {
+                    Some(CellValue::Bool(b)) => Ok(b),
+                    Some(CellValue::Number(_)) => Err(EvalError::TypeError {
+                        expected: AtomType::Bool,
+                        got: AtomType::Number,
+                    }),
+                    Some(CellValue::Text(_)) => Err(EvalError::TypeError {
+                        expected: AtomType::Bool,
+                        got: AtomType::Text,
+                    }),
+                    Some(CellValue::Error(msg, _)) => Err(EvalError::Error(msg.to_string())),
+                    None => Ok(false),
+                }
+            }
+            Reference::Range { .. } => Err(EvalError::TypeError {
+                expected: AtomType::Bool,
+                got: AtomType::Reference,
+            }),
+        },
+        _ => Err(EvalError::TypeError {
+            expected: AtomType::Bool,
+            got: match expr {
+                ExprAtom::Number(_) => AtomType::Number,
+                ExprAtom::Text(_) => AtomType::Text,
+                ExprAtom::Function(_) => AtomType::Function,
+                _ => unreachable!(),
+            },
+        }),
+    }
+}
+
+/// Resolve a final ExprAtom to CellValue, resolving references.
+fn resolve_to_cell_value(
+    source_cell: &AbsoluteCellId,
+    expr: ExprAtom,
+    sheets: &Arc<RwLock<Sheets>>,
+) -> CellValue {
+    match expr {
+        ExprAtom::Number(n) => CellValue::Number(n),
+        ExprAtom::Text(s) => CellValue::Text(s.into()),
+        ExprAtom::Bool(b) => CellValue::Bool(b),
+        ExprAtom::InvalidReferenceError(s) => CellValue::err(s),
+        ExprAtom::Reference(Reference::Single { sheet_id, row, col }) => {
+            let row = row.to_index(source_cell.row);
+            let col = col.to_index(source_cell.col);
+            let gid = GridCellId { row, col };
+            sheets.read()[sheet_id as usize]
+                .get_value(&gid)
+                .unwrap_or(CellValue::Number(Decimal::ZERO))
+        }
+        _ => CellValue::Text(format!("{:?}", expr).into()),
     }
 }
 
@@ -1487,7 +1563,7 @@ fn resolve_range(
         _ => Err(EvalError::TypeError {
             expected: AtomType::Reference,
             got: match expr {
-                ExprAtom::Boolean(_) => AtomType::Boolean,
+                ExprAtom::Bool(_) => AtomType::Bool,
                 ExprAtom::Number(_) => AtomType::Number,
                 ExprAtom::Text(_) => AtomType::Text,
                 ExprAtom::InvalidReferenceError(_) => AtomType::InvalidReferenceError,
@@ -1569,7 +1645,7 @@ fn resolve_extern_arg(atom: &ExprAtom, source_cell: &AbsoluteCellId) -> ExternAr
     match atom {
         ExprAtom::Number(n) => ExternArg::Number(n.to_string()),
         ExprAtom::Text(s) => ExternArg::Text(s.to_string()),
-        ExprAtom::Boolean(b) => ExternArg::Boolean(*b),
+        ExprAtom::Bool(b) => ExternArg::Boolean(*b),
         ExprAtom::Reference(Reference::Single { sheet_id, row, col }) => ExternArg::SingleRef {
             sheet_id: *sheet_id,
             row: row.to_index(source_cell.row),
@@ -1630,22 +1706,85 @@ fn eval_formula(
                 let b = resolve_number(source_cell, &eval_store[*b_id as usize], sheets)?;
                 ExprAtom::Number(a / b)
             }
-            Expr::Sum => {
-                let range_arg_idx = eval_store.len() - 1;
+            Expr::Equal(a_id, b_id) => {
+                let a = resolve_number(source_cell, &eval_store[*a_id as usize], sheets)?;
+                let b = resolve_number(source_cell, &eval_store[*b_id as usize], sheets)?;
+                ExprAtom::Bool(a == b)
+            }
+            Expr::GreaterThan(a_id, b_id) => {
+                let a = resolve_number(source_cell, &eval_store[*a_id as usize], sheets)?;
+                let b = resolve_number(source_cell, &eval_store[*b_id as usize], sheets)?;
+                ExprAtom::Bool(a > b)
+            }
+            Expr::LessThan(a_id, b_id) => {
+                let a = resolve_number(source_cell, &eval_store[*a_id as usize], sheets)?;
+                let b = resolve_number(source_cell, &eval_store[*b_id as usize], sheets)?;
+                ExprAtom::Bool(a < b)
+            }
+            Expr::Sum(range_id) => {
                 let (sheet_id, sr, sc, er, ec) =
-                    resolve_range(source_cell, &eval_store[range_arg_idx])?;
+                    resolve_range(source_cell, &eval_store[*range_id as usize])?;
                 let (sum, _) = parallel_sum_count(sp, sheet_id, sr, sc, er, ec);
                 ExprAtom::Number(sum)
             }
-            Expr::Avg => {
-                let range_arg_idx = eval_store.len() - 1;
+            Expr::Avg(range_id) => {
                 let (sheet_id, sr, sc, er, ec) =
-                    resolve_range(source_cell, &eval_store[range_arg_idx])?;
+                    resolve_range(source_cell, &eval_store[*range_id as usize])?;
                 let (sum, count) = parallel_sum_count(sp, sheet_id, sr, sc, er, ec);
                 if count == 0 {
                     ExprAtom::Number(Decimal::ZERO)
                 } else {
                     ExprAtom::Number(sum / Decimal::from(count))
+                }
+            }
+            Expr::Min(range_id) => {
+                let (sheet_id, sr, sc, er, ec) =
+                    resolve_range(source_cell, &eval_store[*range_id as usize])?;
+                let sheets = sp.sheets.read();
+                let sheet = &sheets[sheet_id as usize];
+                let mut min: Option<Decimal> = None;
+                sheet.for_each_value_in_range(sr, sc, er, ec, |val| {
+                    if let CellValue::Number(n) = val {
+                        min = Some(min.map_or(*n, |m: Decimal| m.min(*n)));
+                    }
+                });
+                ExprAtom::Number(min.unwrap_or(Decimal::ZERO))
+            }
+            Expr::Max(range_id) => {
+                let (sheet_id, sr, sc, er, ec) =
+                    resolve_range(source_cell, &eval_store[*range_id as usize])?;
+                let sheets = sp.sheets.read();
+                let sheet = &sheets[sheet_id as usize];
+                let mut max: Option<Decimal> = None;
+                sheet.for_each_value_in_range(sr, sc, er, ec, |val| {
+                    if let CellValue::Number(n) = val {
+                        max = Some(max.map_or(*n, |m: Decimal| m.max(*n)));
+                    }
+                });
+                ExprAtom::Number(max.unwrap_or(Decimal::ZERO))
+            }
+            Expr::Count(range_id, value_id) => {
+                let (sheet_id, sr, sc, er, ec) =
+                    resolve_range(source_cell, &eval_store[*range_id as usize])?;
+                let target = resolve_number(source_cell, &eval_store[*value_id as usize], sheets)?;
+                let sheets_guard = sp.sheets.read();
+                let sheet = &sheets_guard[sheet_id as usize];
+                let mut count = 0u64;
+                sheet.for_each_value_in_range(sr, sc, er, ec, |val| {
+                    if let CellValue::Number(n) = val {
+                        if *n == target {
+                            count += 1;
+                        }
+                    }
+                });
+                ExprAtom::Number(Decimal::from(count))
+            }
+            Expr::If(cond_id, then_id, else_id) => {
+                let cond = resolve_bool(source_cell, &eval_store[*cond_id as usize], sheets)?;
+                if cond {
+                    eval_store[*then_id as usize].clone()
+                } else {
+                    eval_store[*else_id as usize].clone()
                 }
             }
             Expr::ExtrnalFunctionCall { func_id, args } => {
@@ -1670,7 +1809,8 @@ fn eval_formula(
                 match cell_value {
                     CellValue::Number(n) => ExprAtom::Number(n),
                     CellValue::Text(s) => ExprAtom::Text(s.to_string()),
-                    CellValue::Error(s) => {
+                    CellValue::Bool(b) => ExprAtom::Bool(b),
+                    CellValue::Error(s, _) => {
                         return Err(EvalError::Error(s.to_string()));
                     }
                 }
@@ -1679,14 +1819,7 @@ fn eval_formula(
         eval_store.push(res);
     }
 
-    let value = match eval_store.pop() {
-        Some(ExprAtom::Number(n)) => CellValue::Number(n),
-        Some(ExprAtom::Text(s)) => CellValue::Text(s.into()),
-        Some(ExprAtom::InvalidReferenceError(s)) => CellValue::Error(s.into()),
-        Some(ExprAtom::Boolean(b)) => CellValue::Text(b.to_string().into()),
-        Some(other) => CellValue::Text(format!("{:?}", other).into()),
-        None => unreachable!(),
-    };
+    let value = resolve_to_cell_value(source_cell, eval_store.pop().unwrap(), &sp.sheets);
 
     Ok(value)
 }
@@ -1704,8 +1837,12 @@ fn eval_cell<'a>(
         if let Some(formula) = sp.formulas.get(formula_id) {
             let val = match eval_formula(&formula.ast, &cell_id, sp, &mut eval_store) {
                 Ok(v) => v,
-                Err(EvalError::Error(msg)) => CellValue::Error(msg.into()),
-                Err(e) => CellValue::Error(format!("{:?}", e).into()),
+                Err(EvalError::Error(msg)) => CellValue::err(msg),
+                Err(EvalError::TypeError { expected, got }) => {
+                    let msg = format!("type error: expected {expected}, got {got}");
+                    let formatted = format_eval_error(&formula.formula_string, &msg);
+                    CellValue::err(formatted)
+                }
             };
             sp.set_value(&cell_id, val);
         }
@@ -1817,7 +1954,7 @@ mod tests {
             .spreadsheet
             .get_cell(&id)
             .map(|cell| cell.val.clone());
-        assert_eq!(value, Some(CellValue::Error("Cycle".into())));
+        assert_eq!(value, Some(CellValue::err("Cycle")));
     }
 
     fn assert_cell_number(engine: &Engine, id: AbsoluteCellId, expected: i64) {
@@ -1957,7 +2094,7 @@ mod tests {
             .spreadsheet
             .get_cell(&cell(5, 5))
             .expect("F6 cell to exist");
-        assert_eq!(formula_cell.val, CellValue::Error("#REF!".into()));
+        assert_eq!(formula_cell.val, CellValue::err("#REF!"));
 
         let new_formula_id = formula_cell.defined_by_formula.expect("formula id");
         let new_formula = engine
@@ -2154,7 +2291,7 @@ mod tests {
             for col in 0..(cols - 1) {
                 if let Some(c) = engine.spreadsheet.get_cell(&cell(row, col)) {
                     assert!(
-                        !matches!(&c.val, CellValue::Error(s) if &*s == "Cycle"),
+                        !matches!(&c.val, CellValue::Error(s, _) if &*s == "Cycle"),
                         "post-removal: cell ({},{}) has false Cycle error",
                         row,
                         col
