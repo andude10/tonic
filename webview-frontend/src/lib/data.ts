@@ -52,7 +52,14 @@ export const menu_options: IMenuOption[] = [
             },
             { id: "view-extensions", text: "Extensions" },
             { id: "view-fullscreen", text: "Fullscreen" },
-            { id: "view-option", text: "..." },
+            {
+                id: "view-theme",
+                text: "Theme",
+                data: [
+                    { id: "view-theme-dark", text: "Dark" },
+                    { id: "view-theme-light", text: "Light" },
+                ],
+            },
         ],
     },
     {

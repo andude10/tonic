@@ -78,7 +78,7 @@
         display: flex;
         align-items: center;
         width: 100%;
-        border-bottom: 1px solid #3c3e44;
+        border-bottom: var(--wx-border);
     }
 
     .window-controls {
@@ -91,19 +91,21 @@
     .window-controls button {
         background: none;
         border: none;
-        color: rgba(255, 255, 255, 0.5);
+        color: var(--tonic-window-btn-color);
         width: 46px;
         height: 32px;
         cursor: pointer;
         display: flex;
         align-items: center;
         justify-content: center;
-        transition: background 100ms ease, color 100ms ease;
+        transition:
+            background 100ms ease,
+            color 100ms ease;
     }
 
     .window-controls button:hover {
-        background: rgba(255, 255, 255, 0.1);
-        color: rgba(255, 255, 255, 0.9);
+        background: var(--wx-background-hover);
+        color: var(--wx-color-font);
     }
 
     .window-controls .close:hover {

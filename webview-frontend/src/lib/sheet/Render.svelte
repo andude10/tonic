@@ -729,7 +729,7 @@
         font-size: 0.8rem;
         font-family: "JetBrains Mono", monospace;
         background: var(--wx-background);
-        border: 1px solid #44464c;
+        border: var(--wx-border-medium);
         border-radius: 2px;
         box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
     }
@@ -741,7 +741,7 @@
         color: inherit;
         padding: 0.35em 0.6em;
         border-radius: 2px;
-        background: rgba(255, 255, 255, 0.07);
+        background: var(--tonic-cell-tint);
         border: none;
     }
 
@@ -753,7 +753,7 @@
     }
 
     .add-bar button:hover {
-        background: rgba(255, 255, 255, 0.13);
+        background: var(--tonic-cell-tint-strong);
     }
 
     .add-bar input {

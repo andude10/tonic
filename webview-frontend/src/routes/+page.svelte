@@ -28,6 +28,7 @@
     initExtensionDispatcher();
 
     let sheet: Sheet;
+    let theme: "dark" | "light" = $state("dark");
     let currentFilePath: string | null = $state(null);
     let fileTitle: string | null = $state(null);
     let dialogOpen = $state(false);
@@ -74,6 +75,51 @@
         }
     }
 
+    // add check icon to active theme item
+    const active_menu = $derived(
+        menu_options.map((item) =>
+            item.id !== "view"
+                ? item
+                : {
+                      ...item,
+                      data: item.data?.map((sub) =>
+                          sub.id !== "view-theme"
+                              ? sub
+                              : {
+                                    ...sub,
+                                    data: sub.data?.map((t) => ({
+                                        ...t,
+                                        icon:
+                                            t.id === `view-theme-${theme}`
+                                                ? "wxi wxi-check"
+                                                : "",
+                                    })),
+                                },
+                      ),
+                  },
+        ),
+    );
+
+    // portaled menus render outside .layout-container, so keep their css vars in sync with theme
+    $effect(() => {
+        const r = document.documentElement;
+        if (theme === "dark") {
+            r.style.setProperty("--tonic-popup-bg", "#1e2024");
+            r.style.setProperty("--tonic-popup-border-color", "#44464c");
+            r.style.setProperty("--tonic-popup-font", "rgba(255,255,255,0.9)");
+            r.style.setProperty("--tonic-icon-color", "#c0c0c0");
+            r.style.setProperty("--tonic-scrollbar", "#3c3e44");
+            r.style.setProperty("--tonic-scrollbar-hover", "#52545a");
+        } else {
+            r.style.setProperty("--tonic-popup-bg", "#ffffff");
+            r.style.setProperty("--tonic-popup-border-color", "#c8c9cc");
+            r.style.setProperty("--tonic-popup-font", "#242529");
+            r.style.setProperty("--tonic-icon-color", "#58585a");
+            r.style.setProperty("--tonic-scrollbar", "#b8b9bc");
+            r.style.setProperty("--tonic-scrollbar-hover", "#9a9b9e");
+        }
+    });
+
     async function onMenuClick(ev: any) {
         const id = ev.action?.id;
         if (!id) return;
@@ -116,6 +162,12 @@
                 break;
             case "help-shortcuts":
                 isShortcutsVisible = true;
+                break;
+            case "view-theme-dark":
+                theme = "dark";
+                break;
+            case "view-theme-light":
+                theme = "light";
                 break;
         }
     }
@@ -178,7 +230,11 @@
 <div class="root noselect" onkeydowncapture={handleKeyDown}>
     <WillowDark>
         <Globals>
-            <div class="layout-container">
+            <div
+                class="layout-container"
+                data-theme={theme}
+                data-wx-portal-root="true"
+            >
                 <WindowBar>
                     <span class="file-title">
                         <span
@@ -239,7 +295,7 @@
                             </svg>
                         {/if}
                     </span>
-                    <MenuBar options={menu_options} onclick={onMenuClick}
+                    <MenuBar options={active_menu} onclick={onMenuClick}
                     ></MenuBar>
                 </WindowBar>
 
@@ -293,7 +349,7 @@
     :global(.wx-sidearea button) {
         border: var(--wx-border);
         background: var(--wx-button-background);
-        color: rgba(255, 255, 255, 0.8);
+        color: var(--wx-color-font);
         border-radius: var(--wx-border-radius);
         padding: 7px 13px;
         font-size: 12px;
@@ -305,19 +361,29 @@
     }
 
     :global(.wx-sidearea button:hover) {
-        background: #3c3e44;
+        background: var(--tonic-btn-hover-bg);
     }
 
     :global(.wx-popup) {
-        --wx-popup-border: 1px solid #44464c !important;
+        --wx-popup-border: 1px solid var(--tonic-popup-border-color) !important;
         --wx-popup-border-radius: 2px !important;
-        --wx-popup-shadow: 0 8px 24px rgba(0, 0, 0, 0.5) !important;
-        --wx-popup-background: #1e2024 !important;
+        --wx-popup-shadow: 0 4px 12px rgba(0, 0, 0, 0.18) !important;
+        --wx-popup-background: var(--tonic-popup-bg) !important;
     }
 
-    /* Override SVAR WillowDark theme background */
-    :global(.wx-willow-dark-theme) {
-        --wx-background: #2a2c32 !important;
+    /* Portals rendered inside .layout-container via data-wx-portal-root.
+       Override SVAR's dark vars so light theme portals use correct colors. */
+    :global(.layout-container[data-theme="light"] .wx-willow-dark-theme) {
+        --wx-color-font: #242529 !important;
+        --wx-color-font-alt: #58585a !important;
+        --wx-icon-color: #58585a !important;
+        --wx-color-primary: #4184bf !important;
+        --wx-background: #ffffff !important;
+        --wx-background-alt: #f4f5f7 !important;
+        --wx-background-hover: #e8e9ec !important;
+        --wx-border: 1px solid #c9c9ca !important;
+        --wx-border-medium: 1px solid #b8b9bc !important;
+        color-scheme: light;
     }
 
     /* MenuBar — override SVAR default background */
@@ -325,12 +391,12 @@
         background: transparent !important;
     }
 
-    /* Context menu & dropdown menu backgrounds (portaled outside .layout-container) */
+    /* Context menu & dropdown menu */
     :global([data-wx-menu].wx-menu) {
-        background: #1e2024 !important;
-        border: 1px solid #44464c !important;
+        background: var(--tonic-popup-bg) !important;
+        border: 1px solid var(--tonic-popup-border-color) !important;
         border-radius: 2px !important;
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5) !important;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18) !important;
     }
 
     /* Dropdown list background */
@@ -339,7 +405,7 @@
         --wx-input-font-size: 12px;
         --wx-checkbox-size: 14px;
         --wx-checkbox-height: 14px;
-        background: #1e2024;
+        background: var(--tonic-popup-bg);
     }
 
     /* Menu options */
@@ -370,7 +436,7 @@
     }
     :global([data-wx-menu] .wx-separator) {
         margin: 4px 8px !important;
-        border-color: #35373d !important;
+        border-color: var(--tonic-row-border-color) !important;
     }
 
     /* Menu bar icons */
@@ -379,7 +445,7 @@
         align-items: center !important;
         justify-content: center !important;
         font-size: 12px !important;
-        color: #c0c0c0 !important;
+        color: var(--tonic-icon-color) !important;
     }
 
     /* Filter MultiCombo in dropdown */
@@ -389,9 +455,9 @@
         --wx-input-font-size: 12px;
         --wx-input-padding: 0 6px;
         --wx-input-icon-size: 14px;
-        --wx-input-border: 1px solid #3c3e44;
+        --wx-input-border: var(--wx-border);
         --wx-input-border-focus: 1px solid var(--wx-color-primary);
-        --wx-input-background: #1e2024;
+        --wx-input-background: var(--tonic-popup-bg);
     }
     :global(.filter-option .wx-multicombo .wx-wrapper) {
         min-height: 0 !important;
@@ -399,8 +465,8 @@
     }
     :global(.wx-dropdown) {
         border-radius: 2px !important;
-        background: #1e2024 !important;
-        border: 1px solid #44464c !important;
+        background: var(--tonic-popup-bg) !important;
+        border: 1px solid var(--tonic-popup-border-color) !important;
     }
     :global(.wx-dropdown .wx-list .wx-checkbox) {
         margin-right: 6px !important;
@@ -517,7 +583,7 @@
     /* scroll bars */
     :global(*) {
         scrollbar-width: thin;
-        scrollbar-color: #3c3e44 transparent;
+        scrollbar-color: var(--tonic-scrollbar) transparent;
     }
     :global(::-webkit-scrollbar) {
         width: 0.5rem;
@@ -527,11 +593,11 @@
         background: transparent;
     }
     :global(::-webkit-scrollbar-thumb) {
-        background: #3c3e44;
+        background: var(--tonic-scrollbar);
         border-radius: 1px;
     }
     :global(::-webkit-scrollbar-thumb:hover) {
-        background: #52545a;
+        background: var(--tonic-scrollbar-hover);
     }
     :global(::-webkit-scrollbar-corner) {
         background: transparent;
@@ -564,6 +630,8 @@
         overflow: hidden;
         position: relative;
         z-index: 0;
+        background: var(--wx-background);
+        color: var(--wx-color-font);
 
         /* Font size */
         --wx-font-size: 12px;
@@ -583,9 +651,6 @@
         --wx-color-warning: #fbbf24;
         --wx-color-danger: #f87171;
         --wx-color-info: #67b4e0;
-
-        /* Icon color */
-        --wx-color-font-alt: black;
 
         /* Backgrounds — neutral grey with subtle cool tint */
         --wx-background: #2a2c32;
@@ -634,5 +699,91 @@
         --wx-notice-border: 1px solid #3c3e44;
         --wx-notice-border-radius: 2px;
         --wx-notice-type-icon-color: #a0a0a0;
+
+        /* tonic tokens — dark */
+        --tonic-scrollbar: #3c3e44;
+        --tonic-scrollbar-hover: #52545a;
+        --tonic-popup-bg: #1e2024;
+        --tonic-popup-border-color: #44464c;
+        --tonic-popup-font: rgba(255, 255, 255, 0.9);
+        --tonic-icon-color: #c0c0c0;
+        --tonic-btn-hover-bg: #3c3e44;
+        --tonic-row-num-color: rgba(255, 255, 255, 0.55);
+        --tonic-col-header-color: rgba(255, 255, 255, 0.6);
+        --tonic-highlight-bg: #1e2024;
+        --tonic-table-header-cell-bg: #1a1c22;
+        --tonic-table-header-cell-border-color: #44464c;
+        --tonic-table-header-cell-color: #c0c0c0;
+        --tonic-row-even-bg: #1e2026;
+        --tonic-row-odd-bg: #22242a;
+        --tonic-row-border-color: #35373d;
+        --tonic-window-btn-color: rgba(255, 255, 255, 0.5);
+        --tonic-text-dim: rgba(255, 255, 255, 0.5);
+        --tonic-text-muted: rgba(255, 255, 255, 0.25);
+        --tonic-cell-tint: rgba(255, 255, 255, 0.07);
+        --tonic-cell-tint-strong: rgba(255, 255, 255, 0.13);
+    }
+
+    .layout-container[data-theme="light"] {
+        color-scheme: light;
+        font-weight: 500;
+
+        /* svar overrides — Zed One Light palette */
+        --wx-font-weight: 500;
+        --wx-color-font: #242529;
+        --wx-color-font-alt: #58585a;
+        --wx-color-font-disabled: #9a9ba0;
+        /* #ebebec = Zed panel/sidebar — app chrome bg */
+        --wx-background: #ebebec;
+        /* #fafafa = Zed editor/content — near-white, but not pure white */
+        --wx-background-alt: #fafafa;
+        --wx-background-hover: #dfdfe0;
+        --wx-border: 1px solid #c9c9ca;
+        --wx-border-light: 1px solid #dfdfe0;
+        --wx-border-medium: 1px solid #b8b9bc;
+        /* #e2e3e5 = clearly grey gutter for row nums / col headers */
+        --wx-table-header-background: #e2e3e5;
+        --wx-table-select-background: #d0d8e8;
+        --wx-table-cell-border: 1px solid #c4c5c8;
+        /* Direct values — avoids variable chain resolution issues on WebKitGTK */
+        --wx-table-header-border: 1px solid #c9c9ca;
+        --wx-table-header-cell-border: 1px solid #c9c9ca;
+        --wx-button-background: #e5e6e8;
+        --wx-button-pressed: #d8d9db;
+        --wx-button-primary-pressed: #2d6a9e;
+        --wx-input-background: #fafafa;
+        --wx-input-background-disabled: #e5e6e8;
+        --wx-input-border: 1px solid #c9c9ca;
+        --wx-switch-background: #b0b1b4;
+        --wx-slider-background: #e5e6e8;
+        --wx-color-disabled: #c9c9ca;
+        --wx-color-disabled-alt: #b0b1b4;
+        --wx-notice-background: #fafafa;
+        --wx-notice-border: 1px solid #c9c9ca;
+        --wx-notice-type-icon-color: #6e6f74;
+
+        /* tonic tokens — light */
+        --tonic-content-bg: #fafafa;
+        --tonic-scrollbar: #b8b9bc;
+        --tonic-scrollbar-hover: #9a9b9e;
+        --tonic-popup-bg: #ffffff;
+        --tonic-popup-border-color: #c9c9ca;
+        --tonic-popup-font: #242529;
+        --tonic-icon-color: #58585a;
+        --tonic-btn-hover-bg: #dfdfe0;
+        --tonic-row-num-color: #58585a;
+        --tonic-col-header-color: #58585a;
+        --tonic-highlight-bg: #d5e5f5;
+        --tonic-table-header-cell-bg: #d4d5da;
+        --tonic-table-header-cell-border-color: #b8b9bc;
+        --tonic-table-header-cell-color: #242529;
+        --tonic-row-even-bg: #f5f5f7;
+        --tonic-row-odd-bg: #eaeaed;
+        --tonic-row-border-color: #d8d9dc;
+        --tonic-window-btn-color: #6e6f74;
+        --tonic-text-dim: #66676a;
+        --tonic-text-muted: #8e8f92;
+        --tonic-cell-tint: rgba(0, 0, 0, 0.035);
+        --tonic-cell-tint-strong: rgba(0, 0, 0, 0.07);
     }
 </style>

@@ -123,10 +123,10 @@
         color: #b0b0b0;
     }
     .expanded-cell:global(.table-row-even) {
-        background: #1e2026;
+        background: var(--tonic-row-even-bg);
     }
     .expanded-cell:global(.table-row-odd) {
-        background: #22242a;
+        background: var(--tonic-row-odd-bg);
     }
 
     .cell-text {
@@ -142,7 +142,7 @@
         height: 1.3em;
         padding: 0.15em;
         flex-shrink: 0;
-        color: rgba(255, 255, 255, 0.15);
+        color: var(--tonic-text-muted);
         border: var(--wx-border-light);
         border-radius: 1px;
     }

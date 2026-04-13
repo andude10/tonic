@@ -145,8 +145,8 @@
         flex-direction: column;
         gap: 12px;
         background: var(--wx-background);
-        color: rgba(255, 255, 255, 0.8);
-        border-left: 1px solid #44464c;
+        color: var(--wx-color-font);
+        border-left: var(--wx-border-medium);
     }
 
     .header {
@@ -155,7 +155,7 @@
         justify-content: space-between;
         gap: 14px;
         padding: 12px 14px;
-        border: 1px solid #44464c;
+        border: var(--wx-border-medium);
         border-radius: 2px;
         background: var(--wx-background-alt);
     }
@@ -164,7 +164,7 @@
         margin: 0;
         font-size: 13px;
         font-family: "JetBrains Mono", monospace;
-        color: rgba(255, 255, 255, 0.8);
+        color: var(--wx-color-font);
         letter-spacing: 0.03em;
     }
 
@@ -189,7 +189,7 @@
     }
 
     section {
-        border: 1px solid #35373d;
+        border: var(--wx-border-light);
         border-radius: 2px;
         background: var(--wx-background-hover);
         padding: 10px 14px;
@@ -201,7 +201,7 @@
         font-family: "JetBrains Mono", monospace;
         text-transform: uppercase;
         letter-spacing: 0.06em;
-        color: rgba(255, 255, 255, 0.35);
+        color: var(--tonic-text-muted);
     }
 
     .shortcut {
@@ -222,6 +222,6 @@
         font-size: 11px;
         min-width: 120px;
         flex-shrink: 0;
-        color: rgba(255, 255, 255, 0.7);
+        color: var(--tonic-text-dim);
     }
 </style>

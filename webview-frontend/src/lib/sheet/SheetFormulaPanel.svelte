@@ -99,7 +99,7 @@
         height: 1.875rem;
         padding: 0 0.25rem;
         user-select: none;
-        border-bottom: 1px solid #3c3e44;
+        border-bottom: var(--wx-border);
     }
 
     .panel-content {
@@ -113,7 +113,7 @@
     .cell-ref-group {
         display: flex;
         align-items: center;
-        border-right: 1px solid #3c3e44;
+        border-right: var(--wx-border);
         margin: -1px 0.25rem -1px 0;
         padding: 1px 0.375rem 1px 0;
     }
@@ -125,7 +125,7 @@
         padding-right: 0.8rem;
         border: none;
         background: transparent;
-        color: rgba(255, 255, 255, 0.7);
+        color: var(--tonic-text-dim);
         font-family: "JetBrains Mono", monospace;
         font-size: 0.75rem;
         font-weight: 500;
@@ -136,11 +136,11 @@
     .cell-ref-input:focus {
         outline: 1px solid var(--wx-color-primary);
         cursor: text;
-        color: rgba(255, 255, 255, 0.9);
+        color: var(--wx-color-font);
     }
 
     .cell-ref-input::placeholder {
-        color: rgba(255, 255, 255, 0.20);
+        color: var(--tonic-text-muted);
     }
 
     .content-group {
@@ -155,7 +155,7 @@
         font-family: "JetBrains Mono", monospace;
         font-size: 0.6875rem;
         font-weight: 500;
-        color: rgba(255, 255, 255, 0.30);
+        color: var(--tonic-text-muted);
         min-width: fit-content;
         display: flex;
         align-items: center;

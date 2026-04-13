@@ -67,7 +67,7 @@
         padding: 8px;
         font-family: "JetBrains Mono", monospace;
         user-select: none;
-        border-top: 1px solid #35373d;
+        border-top: var(--wx-border-light);
     }
     .stat-group {
         display: flex;
@@ -75,20 +75,20 @@
         border-radius: 2px;
         padding: 4px 8px;
         min-width: 110px;
-        border: 1px solid #35373d;
+        border: var(--wx-border-light);
     }
     .header {
         display: flex;
         justify-content: space-between;
         align-items: center;
         margin-bottom: 4px;
-        color: rgba(255, 255, 255, 0.5);
+        color: var(--tonic-text-dim);
     }
     button {
         background: none;
         border: none;
         cursor: pointer;
-        color: rgba(255, 255, 255, 0.3);
+        color: var(--tonic-text-muted);
         padding: 2px;
         display: flex;
         align-items: center;
@@ -109,21 +109,21 @@
         justify-content: space-between;
         gap: 10px;
         font-size: 12px;
-        color: rgba(255, 255, 255, 0.5);
+        color: var(--tonic-text-dim);
     }
     .high {
-        color: rgba(255, 255, 255, 0.25);
+        color: var(--tonic-text-muted);
         font-size: 0.85em;
         align-self: center;
     }
     .count {
-        color: rgba(255, 255, 255, 0.25);
+        color: var(--tonic-text-muted);
         font-size: 0.85em;
         align-self: center;
     }
     small {
         font-size: 0.7em;
         opacity: 0.5;
-        color: rgba(255, 255, 255, 0.35);
+        color: var(--tonic-text-muted);
     }
 </style>

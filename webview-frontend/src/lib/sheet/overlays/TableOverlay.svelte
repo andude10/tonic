@@ -177,8 +177,8 @@
         border-radius: 1px;
         pointer-events: none;
         /* important to have both border and outline of this size, otherwise cell's border is going to be visible */
-        border: 1px solid #1a1c22;
-        outline: 1px solid #1a1c22;
+        border: 1px solid var(--tonic-table-header-cell-bg);
+        outline: 1px solid var(--tonic-table-header-cell-bg);
         box-shadow:
             0 0 0 0 transparent,
             0 0 0 transparent,
@@ -217,7 +217,7 @@
 
     .table-title {
         position: absolute;
-        color: #b0b0b0;
+        color: var(--tonic-table-header-cell-color);
         font-family: "JetBrains Mono", monospace;
         font-size: 11px;
         font-weight: 600;
@@ -228,7 +228,7 @@
         pointer-events: auto;
         overflow: hidden;
         white-space: nowrap;
-        background: #1a1c22;
+        background: var(--tonic-table-header-cell-bg);
     }
 
     .title-text {
@@ -279,8 +279,8 @@
 
     .table-border.has-projection {
         box-shadow:
-            0 0 0 1px rgba(255, 255, 255, 0.06),
-            inset 0 1px 0 rgba(255, 255, 255, 0.08),
+            0 0 0 1px var(--tonic-cell-tint),
+            inset 0 1px 0 var(--tonic-cell-tint),
             inset 0 -1px 0 rgba(0, 0, 0, 0.3),
             0 0 12px rgba(0, 0, 0, 0.5),
             0 0 30px rgba(0, 0, 0, 0.3);
@@ -288,7 +288,7 @@
 
     .hidden-rows-overlay {
         position: absolute;
-        background: rgba(30, 32, 36);
+        background: var(--tonic-highlight-bg);
         pointer-events: none;
         display: flex;
         align-items: flex-start;
@@ -297,7 +297,7 @@
     }
 
     .hidden-rows-text {
-        color: rgba(255, 255, 255, 0.7);
+        color: var(--tonic-text-dim);
         font-family: "JetBrains Mono", monospace;
         font-size: 10px;
         font-weight: 500;

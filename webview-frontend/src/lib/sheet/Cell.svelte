@@ -331,8 +331,8 @@
     }
 
     .formula-indicator {
-        color: rgba(255, 255, 255, 0.15);
-        border: 1px solid #35373d;
+        color: var(--tonic-text-muted);
+        border: var(--wx-border-light);
     }
 
     .error-indicator {
@@ -367,13 +367,13 @@
         font-size: 10px;
         cursor: pointer;
         border-radius: 2px;
-        background: rgba(255, 255, 255, 0.07);
-        color: rgba(255, 255, 255, 0.6);
+        background: var(--tonic-cell-tint);
+        color: var(--tonic-text-dim);
         transition: background 100ms ease;
     }
 
     :global(.error-popup .error-copy-btn:hover) {
-        background: rgba(255, 255, 255, 0.13);
+        background: var(--tonic-cell-tint-strong);
     }
 
     .display-cell > :global(span:has(.table-header-btn)),
@@ -386,7 +386,7 @@
         padding: 0 0.15em;
         background: none;
         border: none;
-        color: rgba(255, 255, 255, 0.3);
+        color: var(--tonic-text-muted);
         cursor: pointer;
         font-size: 0.875em;
         flex-shrink: 0;
@@ -398,6 +398,6 @@
     }
 
     .table-header-btn:hover {
-        color: rgba(255, 255, 255, 0.7);
+        color: var(--tonic-text-dim);
     }
 </style>

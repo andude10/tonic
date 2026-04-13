@@ -1779,8 +1779,13 @@
         outline: none;
     }
 
+    :global(.wx-header) {
+        border-bottom: none !important;
+    }
+
     :global(.wx-table-box) {
         border-top: none !important;
+        background: var(--tonic-content-bg, var(--wx-background)) !important;
     }
 
     :global(.wx-cell[data-col-id=":rowNumber"]) {
@@ -1788,7 +1793,7 @@
         font-weight: var(--wx-header-font-weight) !important;
         font-family: "JetBrains Mono", monospace;
         font-size: 10px;
-        color: rgba(255, 255, 255, 0.55);
+        color: var(--tonic-row-num-color);
         text-align: center;
         display: flex !important;
         align-items: center;
@@ -1806,18 +1811,27 @@
         font-family: "JetBrains Mono", monospace;
         font-size: 10px;
         letter-spacing: 0.04em;
-        color: rgba(255, 255, 255, 0.6);
+        color: var(--tonic-col-header-color);
+        background: var(--wx-table-header-background) !important;
+        border-bottom: var(
+            --wx-table-header-border,
+            var(--wx-border)
+        ) !important;
+        border-right: var(
+            --wx-table-header-cell-border,
+            var(--wx-border)
+        ) !important;
     }
 
     :global(div[role="columnheader"].highlight-col) {
         box-shadow: inset 0 -2px 0 var(--wx-color-primary) !important;
-        background-color: #1e2024 !important;
+        background-color: var(--tonic-highlight-bg) !important;
         color: var(--wx-color-primary) !important;
     }
 
     :global(.wx-cell.highlight-row) {
         box-shadow: inset 2px 0 0 var(--wx-color-primary) !important;
-        background-color: #1e2024 !important;
+        background-color: var(--tonic-highlight-bg) !important;
         color: var(--wx-color-primary) !important;
     }
 
@@ -1826,11 +1840,11 @@
     }
 
     :global(.table-header-cell) {
-        background: #1a1c22 !important;
-        border-bottom: 1px solid #44464c !important;
+        background: var(--tonic-table-header-cell-bg) !important;
+        border-bottom: 1px solid var(--tonic-table-header-cell-border-color) !important;
         border-right: 0px !important;
         font-weight: 500;
-        color: #c0c0c0;
+        color: var(--tonic-table-header-cell-color);
     }
 
     :global(.table-row-even) {
@@ -1841,5 +1855,15 @@
     :global(.table-row-odd) {
         background: #22242a !important;
         border-bottom: 1px solid #35373d !important;
+    }
+
+    :global([data-theme="light"] .table-row-even) {
+        background: #f6f6f7 !important;
+        border-bottom: 1px solid #d2d3d6 !important;
+    }
+
+    :global([data-theme="light"] .table-row-odd) {
+        background: #eaebec !important;
+        border-bottom: 1px solid #d2d3d6 !important;
     }
 </style>
