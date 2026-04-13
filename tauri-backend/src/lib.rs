@@ -143,12 +143,12 @@ fn begin_mutation(state: &RwLock<TonicState>) -> Result<MutationGuard<'_>, Strin
     Ok(MutationGuard(state.write()))
 }
 
-fn emit_save_status(app: &AppHandle, state: &TonicState) {
+fn emit_save_status<R: tauri::Runtime>(app: &AppHandle<R>, state: &TonicState) {
     let _ = app.emit("save-status", state.engine.is_saved());
 }
 
-fn emit_table_projection_events(
-    app: &AppHandle,
+fn emit_table_projection_events<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     table_id: u32,
     was_active: bool,
     is_active: bool,
@@ -404,8 +404,8 @@ fn get_cells_in_viewport(
 }
 
 #[tauri::command]
-async fn enter_input(
-    app: AppHandle,
+async fn enter_input<R: tauri::Runtime>(
+    app: AppHandle<R>,
     cell_id: CellId,
     user_input: &str,
     state: tauri::State<'_, RwLock<TonicState>>,
@@ -421,8 +421,8 @@ async fn enter_input(
 }
 
 #[tauri::command]
-async fn delete_cells(
-    app: AppHandle,
+async fn delete_cells<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: tauri::State<'_, RwLock<TonicState>>,
     cells: Vec<CellId>,
 ) -> Result<(), String> {
@@ -439,8 +439,8 @@ async fn delete_cells(
 }
 
 #[tauri::command]
-async fn fill_cells(
-    app: AppHandle,
+async fn fill_cells<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: tauri::State<'_, RwLock<TonicState>>,
     sources: Vec<CellId>,
     dests: Vec<CellId>,
@@ -603,8 +603,8 @@ async fn fill_cells(
 }
 
 #[tauri::command]
-async fn paste_values(
-    app: AppHandle,
+async fn paste_values<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: tauri::State<'_, RwLock<TonicState>>,
     cells: Vec<(CellId, String)>,
 ) -> Result<(), String> {
@@ -627,8 +627,8 @@ async fn paste_values(
 }
 
 #[tauri::command]
-async fn undo_input(
-    app: AppHandle,
+async fn undo_input<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: tauri::State<'_, RwLock<TonicState>>,
 ) -> Result<Option<ChangeBounds>, String> {
     let timer = std::time::Instant::now();
@@ -640,8 +640,8 @@ async fn undo_input(
 }
 
 #[tauri::command]
-async fn redo_input(
-    app: AppHandle,
+async fn redo_input<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: tauri::State<'_, RwLock<TonicState>>,
 ) -> Result<Option<ChangeBounds>, String> {
     let timer = std::time::Instant::now();
@@ -677,7 +677,10 @@ fn disable_table_projection_by_id(sp: &mut Spreadsheet, table_id: u32) -> Result
     Ok(())
 }
 
-fn disable_all_table_projections(app: &AppHandle, sp: &mut Spreadsheet) -> Result<(), String> {
+fn disable_all_table_projections<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    sp: &mut Spreadsheet,
+) -> Result<(), String> {
     let table_ids: Vec<u32> = sp
         .tables
         .iter()
@@ -695,8 +698,8 @@ fn disable_all_table_projections(app: &AppHandle, sp: &mut Spreadsheet) -> Resul
 }
 
 #[tauri::command]
-async fn insert_column(
-    app: AppHandle,
+async fn insert_column<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: tauri::State<'_, RwLock<TonicState>>,
     col: u32,
     left: bool,
@@ -713,8 +716,8 @@ async fn insert_column(
 }
 
 #[tauri::command]
-async fn insert_row(
-    app: AppHandle,
+async fn insert_row<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: tauri::State<'_, RwLock<TonicState>>,
     row: u32,
     below: bool,
@@ -731,8 +734,8 @@ async fn insert_row(
 }
 
 #[tauri::command]
-async fn remove_column(
-    app: AppHandle,
+async fn remove_column<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: tauri::State<'_, RwLock<TonicState>>,
     col: u32,
 ) -> Result<(), String> {
@@ -748,8 +751,8 @@ async fn remove_column(
 }
 
 #[tauri::command]
-async fn remove_row(
-    app: AppHandle,
+async fn remove_row<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: tauri::State<'_, RwLock<TonicState>>,
     row: u32,
 ) -> Result<(), String> {
@@ -764,7 +767,7 @@ async fn remove_row(
     Ok(())
 }
 
-fn setup(app: &mut tauri::App) -> Result<(), Box<dyn Error + 'static>> {
+fn setup<R: tauri::Runtime>(app: &mut tauri::App<R>) -> Result<(), Box<dyn Error + 'static>> {
     engine::set_app_handle(app.handle().clone());
     let tonic_state = TonicState::new();
     let sheets_handle = SheetsHandle(Mutex::new(tonic_state.engine.spreadsheet.sheets.clone()));
@@ -780,8 +783,8 @@ fn update_file_info(state: &mut TonicState, path: &str) {
 }
 
 #[tauri::command]
-async fn save_file(
-    app: AppHandle,
+async fn save_file<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: tauri::State<'_, RwLock<TonicState>>,
     path: &str,
     ui_decorations_json: &str,
@@ -802,8 +805,8 @@ async fn save_file(
 }
 
 #[tauri::command]
-async fn rename_current_file(
-    app: AppHandle,
+async fn rename_current_file<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: tauri::State<'_, RwLock<TonicState>>,
     new_name: &str,
 ) -> Result<(), String> {
@@ -828,8 +831,8 @@ async fn rename_current_file(
 }
 
 #[tauri::command]
-async fn open_file(
-    app: AppHandle,
+async fn open_file<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: tauri::State<'_, RwLock<TonicState>>,
     sheets_handle: tauri::State<'_, SheetsHandle>,
     path: &str,
@@ -851,8 +854,8 @@ async fn open_file(
 }
 
 #[tauri::command]
-async fn new_file(
-    app: AppHandle,
+async fn new_file<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: tauri::State<'_, RwLock<TonicState>>,
     sheets_handle: tauri::State<'_, SheetsHandle>,
 ) -> Result<(), String> {
@@ -1181,8 +1184,8 @@ async fn change_table_name(
 }
 
 #[tauri::command]
-async fn toggle_table_sort(
-    app: AppHandle,
+async fn toggle_table_sort<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: tauri::State<'_, RwLock<TonicState>>,
     header: GridCellId,
     desc: bool,
@@ -1215,8 +1218,8 @@ async fn toggle_table_sort(
 }
 
 #[tauri::command]
-async fn toggle_table_filter(
-    app: AppHandle,
+async fn toggle_table_filter<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: tauri::State<'_, RwLock<TonicState>>,
     header: GridCellId,
     filter_option_id: u32,
@@ -1249,8 +1252,8 @@ async fn toggle_table_filter(
 }
 
 #[tauri::command]
-async fn select_all_table_filters(
-    app: AppHandle,
+async fn select_all_table_filters<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: tauri::State<'_, RwLock<TonicState>>,
     header: GridCellId,
 ) -> Result<(), String> {
@@ -1282,8 +1285,8 @@ async fn select_all_table_filters(
 }
 
 #[tauri::command]
-async fn clear_all_table_filters(
-    app: AppHandle,
+async fn clear_all_table_filters<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: tauri::State<'_, RwLock<TonicState>>,
     header: GridCellId,
 ) -> Result<(), String> {
@@ -1315,8 +1318,8 @@ async fn clear_all_table_filters(
 }
 
 #[tauri::command]
-async fn apply_table_projection(
-    app: AppHandle,
+async fn apply_table_projection<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: tauri::State<'_, RwLock<TonicState>>,
     table_name: String,
 ) -> Result<(), String> {
@@ -1397,8 +1400,8 @@ async fn apply_table_projection(
 }
 
 #[tauri::command]
-async fn disable_table_projection(
-    app: AppHandle,
+async fn disable_table_projection<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: tauri::State<'_, RwLock<TonicState>>,
     table_name: String,
 ) -> Result<(), String> {
@@ -1472,16 +1475,23 @@ async fn get_filter_options_for_table_column(
     Ok(result)
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    tauri::Builder::default()
-        .plugin(
+fn build_app_inner<R: tauri::Runtime>(
+    builder: tauri::Builder<R>,
+    enable_log_plugin: bool,
+) -> tauri::Builder<R> {
+    let builder = if enable_log_plugin {
+        builder.plugin(
             tauri_plugin_log::Builder::new()
                 .target(tauri_plugin_log::Target::new(
                     tauri_plugin_log::TargetKind::Webview,
                 ))
                 .build(),
         )
+    } else {
+        builder
+    };
+
+    builder
         .plugin(tauri_plugin_dialog::init())
         .setup(setup)
         .invoke_handler(tauri::generate_handler![
@@ -1525,94 +1535,23 @@ pub fn run() {
             list_scripts,
             get_script_content,
         ])
+}
+
+fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    build_app_inner(builder, true)
+}
+
+#[cfg(test)]
+fn build_test_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    build_app_inner(builder, false)
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    build_app(tauri::Builder::default())
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn extrapolate_for_test(
-        row_patterns: &[Option<(Decimal, Decimal)>],
-        col_patterns: &[Option<(Decimal, Decimal)>],
-        source_row_index: usize,
-        source_col_index: usize,
-        row_from_origin: i64,
-        col_from_origin: i64,
-        row_from_source: i64,
-        col_from_source: i64,
-    ) -> Option<Decimal> {
-        let line_value = |first_value: Decimal, step: Decimal, offset: i64| {
-            first_value + step * Decimal::from(offset)
-        };
-        let pattern_value =
-            |patterns: &[Option<(Decimal, Decimal)>], pattern_index: usize, axis_offset: i64| {
-                let (first_value, step) = patterns.get(pattern_index).copied().flatten()?;
-                Some(line_value(first_value, step, axis_offset))
-            };
-        let step_value = |patterns: &[Option<(Decimal, Decimal)>], axis_offset: i64| {
-            let Some((_, first_step)) = patterns.first().copied().flatten() else {
-                return None;
-            };
-
-            if axis_offset >= 0 && (axis_offset as usize) < patterns.len() {
-                return patterns[axis_offset as usize].map(|(_, step)| step);
-            }
-
-            if patterns.len() == 1 {
-                return Some(first_step);
-            }
-
-            let (_, second_step) = patterns.get(1).copied().flatten()?;
-            Some(line_value(
-                first_step,
-                second_step - first_step,
-                axis_offset,
-            ))
-        };
-
-        let horizontal_value = pattern_value(row_patterns, source_row_index, col_from_origin);
-        let vertical_value = pattern_value(col_patterns, source_col_index, row_from_origin);
-
-        if row_from_source != 0 && col_from_source != 0 {
-            if let (Some(value), Some(vertical_step)) =
-                (horizontal_value, step_value(col_patterns, col_from_origin))
-            {
-                return Some(value + vertical_step * Decimal::from(row_from_source));
-            }
-
-            if let (Some(value), Some(horizontal_step)) =
-                (vertical_value, step_value(row_patterns, row_from_origin))
-            {
-                return Some(value + horizontal_step * Decimal::from(col_from_source));
-            }
-        }
-
-        if row_from_source != 0 {
-            return vertical_value;
-        }
-
-        if col_from_source != 0 {
-            return horizontal_value;
-        }
-
-        None
-    }
-
-    #[test]
-    fn two_dimensional_fill_combines_row_and_column_progressions() {
-        let row_patterns = vec![
-            Some((Decimal::from(1), Decimal::from(1))),
-            Some((Decimal::from(2), Decimal::from(2))),
-        ];
-        let col_patterns = vec![
-            Some((Decimal::from(1), Decimal::from(1))),
-            Some((Decimal::from(2), Decimal::from(2))),
-        ];
-
-        let value = extrapolate_for_test(&row_patterns, &col_patterns, 1, 1, 2, 2, 1, 1);
-
-        assert_eq!(value, Some(Decimal::from(9)));
-    }
-}
+mod tests;

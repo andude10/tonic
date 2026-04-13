@@ -42,6 +42,9 @@ tokio-stream = { version = "0.1", features = ["time", "sync"] }
 forte = { git = "https://github.com/NthTensor/Forte.git", rev = "49d67201081b2d343e74d00bae5637bc2da307a9" }
 ariadne = { version = "0.6.0", default-features = false }
 
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
+
 # Optimize dependencies even in dev builds — huge speedup for
 # serde, flate2, chumsky etc. while keeping tonic_lib itself debuggable.
 [profile.dev.package."*"]

@@ -193,7 +193,7 @@ impl Block {
     }
 }
 
-/// Sparse infinite grid backed by BLOCK_DIM×BLOCK_DIM blocks.
+/// Sparse infinite grid
 #[derive(Serialize, Deserialize)]
 pub struct Grid {
     blocks: Vec<Option<Block>>,
@@ -222,7 +222,7 @@ impl Default for Grid {
         // todo: show errors to user when exceeding max size
         // todo: allow setting max cols/rows?
 
-        // stride=44 block-columns -> 44*16 = 704 columns (covers A–ZZ = 702)
+        // stride=44 block-columns -> 44*16 = 704 columns (covers A-ZZ = 702)
         // 1_250_000 row-blocks -> 1_250_000*16 = 20_000_000 rows
         const STRIDE: usize = 704 / BLOCK_DIM;
         const MAX_ROW_BLOCKS: usize = 20_000_000 / BLOCK_DIM;

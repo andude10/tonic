@@ -389,7 +389,7 @@ pub enum Expr {
     GreaterThan(ExprId, ExprId),
     LessThan(ExprId, ExprId),
 
-    // default formulas
+    // default functions
     Sum(ExprId),
     Avg(ExprId),
     Min(ExprId),
@@ -417,6 +417,11 @@ pub struct Formula {
     ///
     /// References should be adjusted relative to offsets if the formula is shared.
     pub formula_string: String,
+
+    /// Byte spans (start, end) for each ExprId in `ast`, relative to `formula_string[1..]`.
+    /// Used for error highlighting. May be empty for formulas loaded from old files.
+    #[serde(default)]
+    pub spans: Vec<(u32, u32)>,
 }
 
 pub type TableId = u32;

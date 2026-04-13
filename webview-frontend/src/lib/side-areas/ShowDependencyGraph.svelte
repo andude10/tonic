@@ -96,7 +96,7 @@
         flex-direction: column;
         gap: 12px;
         background: var(--wx-background);
-        color: rgba(255, 255, 255, 0.80);
+        color: rgba(255, 255, 255, 0.8);
         border-left: 1px solid #44464c;
     }
 

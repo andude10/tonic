@@ -135,18 +135,19 @@ pub fn format_parse_error<'src>(src: &str, err: &Rich<'_, Token<'src>>) -> Strin
     format_parsing_error(src, s.start + 1..s.end + 1, &err.to_string())
 }
 
-pub fn format_eval_error(formula_string: &str, message: &str) -> String {
+pub fn format_eval_error(formula_string: &str, message: &str, span: Option<(u32, u32)>) -> String {
     let src = if formula_string.starts_with('=') {
         &formula_string[1..]
     } else {
         formula_string
     };
-    build_report(
-        "Type error:",
-        src,
-        1..formula_string.len(),
-        message.to_string(),
-    )
+    // Spans are relative to formula_string[1..] (without '=').
+    // build_report writes "={src}", so add 1 to align with the '=' prefix.
+    let ariadne_span = match span {
+        Some((start, end)) => (start + 1) as usize..(end + 1) as usize,
+        None => 1..formula_string.len(),
+    };
+    build_report("Type error:", src, ariadne_span, message.to_string())
 }
 
 /// Input string
@@ -310,6 +311,7 @@ pub struct FormulaState<'a> {
     pub names: &'a mut SpreadsheetNames,
     pub cell_id: GridCellId,
     pub expr_arena: Vec<Expr>,
+    pub span_arena: Vec<(u32, u32)>,
 }
 
 type FormulaExtra<'tokens, 'src> =
@@ -323,9 +325,11 @@ impl<'src, I: Input<'src>> Inspector<'src, I> for FormulaState<'_> {
     fn on_rewind<'parse>(&mut self, _: &input::Checkpoint<'src, 'parse, I, Self::Checkpoint>) {}
 }
 
-fn push_expr(state: &mut FormulaState, expr: Expr) -> ExprId {
+fn push_expr(state: &mut FormulaState, expr: Expr, span: SimpleSpan) -> ExprId {
     let id = state.expr_arena.len() as ExprId;
     state.expr_arena.push(expr);
+    let r = span.into_range();
+    state.span_arena.push((r.start as u32, r.end as u32));
     id
 }
 
@@ -372,6 +376,7 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
                 let st: &mut FormulaState = extra.state();
                 let expr = if let Some(args) = args {
                     // function call: name(...)
+                    // todo: abstract the function defenition
                     match name {
                         "sum" => {
                             if args.len() != 1 {
@@ -443,7 +448,8 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
                         col: Coordinate::Absolute(named_cell.col),
                     }))
                 };
-                Ok(push_expr(extra.state(), expr))
+                let span = extra.span();
+                Ok(push_expr(extra.state(), expr, span))
             },
         );
 
@@ -483,7 +489,10 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
             select_ref! { Token::Text(s) => ExprAtom::Text(s.to_string()) },
             cell_or_range,
         ))
-        .map_with(|val, extra| push_expr(extra.state(), Expr::Atom(val)));
+        .map_with(|val, extra| {
+            let span = extra.span();
+            push_expr(extra.state(), Expr::Atom(val), span)
+        });
 
         // parenthesized expression: ( expr )
         let paren_expr = expr
@@ -494,48 +503,63 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
 
         atom.pratt((
             prefix(3, just(Token::Dash), |_, r, e| {
-                push_expr(e.state(), Expr::Negate(r))
+                let span = e.span();
+                push_expr(e.state(), Expr::Negate(r), span)
             }),
             infix(left(2), just(Token::Star), |l, _, r, e| {
-                push_expr(e.state(), Expr::Multiply(l, r))
+                let span = e.span();
+                push_expr(e.state(), Expr::Multiply(l, r), span)
             }),
             infix(left(2), just(Token::Slash), |l, _, r, e| {
-                push_expr(e.state(), Expr::Divide(l, r))
+                let span = e.span();
+                push_expr(e.state(), Expr::Divide(l, r), span)
             }),
             infix(left(1), just(Token::Plus), |l, _, r, e| {
-                push_expr(e.state(), Expr::Add(l, r))
+                let span = e.span();
+                push_expr(e.state(), Expr::Add(l, r), span)
             }),
             infix(left(1), just(Token::Dash), |l, _, r, e| {
-                push_expr(e.state(), Expr::Subtract(l, r))
+                let span = e.span();
+                push_expr(e.state(), Expr::Subtract(l, r), span)
             }),
             infix(left(0), just(Token::Eq), |l, _, r, e| {
-                push_expr(e.state(), Expr::Equal(l, r))
+                let span = e.span();
+                push_expr(e.state(), Expr::Equal(l, r), span)
             }),
             infix(left(0), just(Token::Gt), |l, _, r, e| {
-                push_expr(e.state(), Expr::GreaterThan(l, r))
+                let span = e.span();
+                push_expr(e.state(), Expr::GreaterThan(l, r), span)
             }),
             infix(left(0), just(Token::Lt), |l, _, r, e| {
-                push_expr(e.state(), Expr::LessThan(l, r))
+                let span = e.span();
+                push_expr(e.state(), Expr::LessThan(l, r), span)
             }),
         ))
     })
 }
 
 /// Parse a formula (already lexed) into a flat Vec<Expr> arena.
-/// Returns the arena and the root ExprId, or errors.
+/// Returns the arena, span table, and the root ExprId, or errors.
 pub fn parse_formula<'tokens, 'src: 'tokens>(
     tokens: &'tokens [Spanned<Token<'src>>],
     src_len: usize,
     state: &mut FormulaState<'tokens>,
-) -> (Option<(Vec<Expr>, ExprId)>, Vec<Rich<'tokens, Token<'src>>>) {
+) -> (
+    Option<(Vec<Expr>, Vec<(u32, u32)>, ExprId)>,
+    Vec<Rich<'tokens, Token<'src>>>,
+) {
     let eoi = SimpleSpan::new((), src_len..src_len);
     let result = create_formula_praser()
         .boxed()
         .parse_with_state(tokens.split_spanned(eoi), state);
     let errs: Vec<_> = result.errors().cloned().collect();
-    let output = result
-        .into_output()
-        .map(|root| (std::mem::take(&mut state.expr_arena), root));
+    let output = result.into_output().map(|root| {
+        (
+            std::mem::take(&mut state.expr_arena),
+            std::mem::take(&mut state.span_arena),
+            root,
+        )
+    });
     (output, errs)
 }
 
@@ -763,6 +787,7 @@ mod tests {
             names,
             cell_id: GridCellId { col: 0, row: 0 },
             expr_arena: Vec::new(),
+            span_arena: Vec::new(),
         };
         let (parsed, errs) = parse_formula(&tokens, src.len(), &mut state);
         assert!(
@@ -773,7 +798,8 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         );
-        parsed.expect("no output")
+        let (arena, _spans, root) = parsed.expect("no output");
+        (arena, root)
     }
 
     fn assert_parses(cases: &[(&str, Vec<Expr>)]) {

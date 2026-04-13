@@ -19,7 +19,7 @@ use crate::parser::{
 };
 use crate::storage::grid::{Cell, CellValue, GridCellId};
 use crate::storage::types::{
-    AbsoluteCellId, AtomType, CellRange, Coordinate, Expr, ExprAtom, Formula, FormulaId,
+    AbsoluteCellId, AtomType, CellRange, Coordinate, Expr, ExprAtom, ExprId, Formula, FormulaId,
     ProjectionFilterOption, Reference, SheetId, Sheets, Spreadsheet,
 };
 
@@ -81,7 +81,7 @@ static EXT_CALL_TX: std::sync::OnceLock<std::sync::mpsc::Sender<ExtCallRequest>>
     std::sync::OnceLock::new();
 
 /// Start the IPC bridge thread. Must be called once during app setup with the AppHandle.
-pub fn set_app_handle(app: AppHandle) {
+pub fn set_app_handle<R: tauri::Runtime>(app: AppHandle<R>) {
     let (tx, rx) = std::sync::mpsc::channel::<ExtCallRequest>();
     EXT_CALL_TX.set(tx).ok();
 
@@ -286,8 +286,25 @@ pub struct EngineGuard(PhantomData<()>);
 
 #[derive(Debug)]
 pub enum EvalError {
-    TypeError { expected: AtomType, got: AtomType },
+    TypeError {
+        expected: AtomType,
+        got: AtomType,
+        span: Option<(u32, u32)>,
+    },
     Error(String),
+}
+
+impl EvalError {
+    fn with_span(self, span: Option<(u32, u32)>) -> Self {
+        match self {
+            EvalError::TypeError { expected, got, .. } => EvalError::TypeError {
+                expected,
+                got,
+                span,
+            },
+            other => other,
+        }
+    }
 }
 
 struct DebugInfo {
@@ -471,6 +488,7 @@ impl Engine {
             names: &mut self.spreadsheet_mut().names,
             cell_id: parser_cell_id,
             expr_arena: Vec::new(),
+            span_arena: Vec::new(),
         };
         let (parsed, parse_errs) = parse_formula(&tokens, formula_text.len(), &mut state);
         // report any errors during parsing (syntax, name not found)
@@ -479,13 +497,14 @@ impl Engine {
             self.record_cell_change(id, Some(Cell::error_with_input(msg, input.to_string())));
             return;
         }
-        let Some((ast, _root_id)) = parsed else {
+        let Some((ast, spans, _root_id)) = parsed else {
             return;
         };
 
         // create and store formula
         let formula = Formula {
             ast,
+            spans,
             formula_string: input.to_string(),
         };
         let formula_id = self.spreadsheet_mut().formulas.insert(formula);
@@ -1446,10 +1465,12 @@ fn resolve_number(
                     Some(CellValue::Text(_)) => Err(EvalError::TypeError {
                         expected: AtomType::Number,
                         got: AtomType::Text,
+                        span: None,
                     }),
                     Some(CellValue::Bool(_)) => Err(EvalError::TypeError {
                         expected: AtomType::Number,
                         got: AtomType::Bool,
+                        span: None,
                     }),
                     Some(CellValue::Error(msg, _)) => Err(EvalError::Error(msg.to_string())),
                     None => Ok(Decimal::ZERO),
@@ -1458,6 +1479,7 @@ fn resolve_number(
             Reference::Range { .. } => Err(EvalError::TypeError {
                 expected: AtomType::Number,
                 got: AtomType::Reference,
+                span: None,
             }),
         },
         _ => Err(EvalError::TypeError {
@@ -1469,6 +1491,7 @@ fn resolve_number(
                 ExprAtom::Function(_) => AtomType::Function,
                 _ => unreachable!(),
             },
+            span: None,
         }),
     }
 }
@@ -1491,10 +1514,12 @@ fn resolve_bool(
                     Some(CellValue::Number(_)) => Err(EvalError::TypeError {
                         expected: AtomType::Bool,
                         got: AtomType::Number,
+                        span: None,
                     }),
                     Some(CellValue::Text(_)) => Err(EvalError::TypeError {
                         expected: AtomType::Bool,
                         got: AtomType::Text,
+                        span: None,
                     }),
                     Some(CellValue::Error(msg, _)) => Err(EvalError::Error(msg.to_string())),
                     None => Ok(false),
@@ -1503,6 +1528,7 @@ fn resolve_bool(
             Reference::Range { .. } => Err(EvalError::TypeError {
                 expected: AtomType::Bool,
                 got: AtomType::Reference,
+                span: None,
             }),
         },
         _ => Err(EvalError::TypeError {
@@ -1513,6 +1539,7 @@ fn resolve_bool(
                 ExprAtom::Function(_) => AtomType::Function,
                 _ => unreachable!(),
             },
+            span: None,
         }),
     }
 }
@@ -1571,6 +1598,7 @@ fn resolve_range(
                 ExprAtom::Reference(Reference::Single { .. }) => AtomType::Reference,
                 _ => unreachable!(),
             },
+            span: None,
         }),
     }
 }
@@ -1671,6 +1699,7 @@ fn resolve_extern_arg(atom: &ExprAtom, source_cell: &AbsoluteCellId) -> ExternAr
 /// Evaluate a single formula's AST, returning the computed CellValue.
 fn eval_formula(
     ast: &[Expr],
+    spans: &[(u32, u32)],
     source_cell: &AbsoluteCellId,
     sp: &Arc<Spreadsheet>,
     eval_store: &mut Vec<ExprAtom>,
@@ -1678,47 +1707,63 @@ fn eval_formula(
     eval_store.clear();
     let sheets = &sp.sheets;
     let external_functions = &sp.external_functions;
+    let sp_id = |id: &ExprId| spans.get(*id as usize).copied();
 
     for expr in ast {
         let res = match expr {
             Expr::Atom(atom) => atom.clone(),
             Expr::Negate(id) => {
-                let n = resolve_number(source_cell, &eval_store[*id as usize], sheets)?;
+                let n = resolve_number(source_cell, &eval_store[*id as usize], sheets)
+                    .map_err(|e| e.with_span(sp_id(id)))?;
                 ExprAtom::Number(-n)
             }
             Expr::Add(a_id, b_id) => {
-                let a = resolve_number(source_cell, &eval_store[*a_id as usize], sheets)?;
-                let b = resolve_number(source_cell, &eval_store[*b_id as usize], sheets)?;
+                let a = resolve_number(source_cell, &eval_store[*a_id as usize], sheets)
+                    .map_err(|e| e.with_span(sp_id(a_id)))?;
+                let b = resolve_number(source_cell, &eval_store[*b_id as usize], sheets)
+                    .map_err(|e| e.with_span(sp_id(b_id)))?;
                 ExprAtom::Number(a + b)
             }
             Expr::Subtract(a_id, b_id) => {
-                let a = resolve_number(source_cell, &eval_store[*a_id as usize], sheets)?;
-                let b = resolve_number(source_cell, &eval_store[*b_id as usize], sheets)?;
+                let a = resolve_number(source_cell, &eval_store[*a_id as usize], sheets)
+                    .map_err(|e| e.with_span(sp_id(a_id)))?;
+                let b = resolve_number(source_cell, &eval_store[*b_id as usize], sheets)
+                    .map_err(|e| e.with_span(sp_id(b_id)))?;
                 ExprAtom::Number(a - b)
             }
             Expr::Multiply(a_id, b_id) => {
-                let a = resolve_number(source_cell, &eval_store[*a_id as usize], sheets)?;
-                let b = resolve_number(source_cell, &eval_store[*b_id as usize], sheets)?;
+                let a = resolve_number(source_cell, &eval_store[*a_id as usize], sheets)
+                    .map_err(|e| e.with_span(sp_id(a_id)))?;
+                let b = resolve_number(source_cell, &eval_store[*b_id as usize], sheets)
+                    .map_err(|e| e.with_span(sp_id(b_id)))?;
                 ExprAtom::Number(a * b)
             }
             Expr::Divide(a_id, b_id) => {
-                let a = resolve_number(source_cell, &eval_store[*a_id as usize], sheets)?;
-                let b = resolve_number(source_cell, &eval_store[*b_id as usize], sheets)?;
+                let a = resolve_number(source_cell, &eval_store[*a_id as usize], sheets)
+                    .map_err(|e| e.with_span(sp_id(a_id)))?;
+                let b = resolve_number(source_cell, &eval_store[*b_id as usize], sheets)
+                    .map_err(|e| e.with_span(sp_id(b_id)))?;
                 ExprAtom::Number(a / b)
             }
             Expr::Equal(a_id, b_id) => {
-                let a = resolve_number(source_cell, &eval_store[*a_id as usize], sheets)?;
-                let b = resolve_number(source_cell, &eval_store[*b_id as usize], sheets)?;
+                let a = resolve_number(source_cell, &eval_store[*a_id as usize], sheets)
+                    .map_err(|e| e.with_span(sp_id(a_id)))?;
+                let b = resolve_number(source_cell, &eval_store[*b_id as usize], sheets)
+                    .map_err(|e| e.with_span(sp_id(b_id)))?;
                 ExprAtom::Bool(a == b)
             }
             Expr::GreaterThan(a_id, b_id) => {
-                let a = resolve_number(source_cell, &eval_store[*a_id as usize], sheets)?;
-                let b = resolve_number(source_cell, &eval_store[*b_id as usize], sheets)?;
+                let a = resolve_number(source_cell, &eval_store[*a_id as usize], sheets)
+                    .map_err(|e| e.with_span(sp_id(a_id)))?;
+                let b = resolve_number(source_cell, &eval_store[*b_id as usize], sheets)
+                    .map_err(|e| e.with_span(sp_id(b_id)))?;
                 ExprAtom::Bool(a > b)
             }
             Expr::LessThan(a_id, b_id) => {
-                let a = resolve_number(source_cell, &eval_store[*a_id as usize], sheets)?;
-                let b = resolve_number(source_cell, &eval_store[*b_id as usize], sheets)?;
+                let a = resolve_number(source_cell, &eval_store[*a_id as usize], sheets)
+                    .map_err(|e| e.with_span(sp_id(a_id)))?;
+                let b = resolve_number(source_cell, &eval_store[*b_id as usize], sheets)
+                    .map_err(|e| e.with_span(sp_id(b_id)))?;
                 ExprAtom::Bool(a < b)
             }
             Expr::Sum(range_id) => {
@@ -1766,7 +1811,8 @@ fn eval_formula(
             Expr::Count(range_id, value_id) => {
                 let (sheet_id, sr, sc, er, ec) =
                     resolve_range(source_cell, &eval_store[*range_id as usize])?;
-                let target = resolve_number(source_cell, &eval_store[*value_id as usize], sheets)?;
+                let target = resolve_number(source_cell, &eval_store[*value_id as usize], sheets)
+                    .map_err(|e| e.with_span(sp_id(value_id)))?;
                 let sheets_guard = sp.sheets.read();
                 let sheet = &sheets_guard[sheet_id as usize];
                 let mut count = 0u64;
@@ -1780,7 +1826,8 @@ fn eval_formula(
                 ExprAtom::Number(Decimal::from(count))
             }
             Expr::If(cond_id, then_id, else_id) => {
-                let cond = resolve_bool(source_cell, &eval_store[*cond_id as usize], sheets)?;
+                let cond = resolve_bool(source_cell, &eval_store[*cond_id as usize], sheets)
+                    .map_err(|e| e.with_span(sp_id(cond_id)))?;
                 if cond {
                     eval_store[*then_id as usize].clone()
                 } else {
@@ -1835,15 +1882,20 @@ fn eval_cell<'a>(
     let formula_id = sp.get_cell(&cell_id).and_then(|c| c.defined_by_formula);
     if let Some(formula_id) = formula_id {
         if let Some(formula) = sp.formulas.get(formula_id) {
-            let val = match eval_formula(&formula.ast, &cell_id, sp, &mut eval_store) {
-                Ok(v) => v,
-                Err(EvalError::Error(msg)) => CellValue::err(msg),
-                Err(EvalError::TypeError { expected, got }) => {
-                    let msg = format!("type error: expected {expected}, got {got}");
-                    let formatted = format_eval_error(&formula.formula_string, &msg);
-                    CellValue::err(formatted)
-                }
-            };
+            let val =
+                match eval_formula(&formula.ast, &formula.spans, &cell_id, sp, &mut eval_store) {
+                    Ok(v) => v,
+                    Err(EvalError::Error(msg)) => CellValue::err(msg),
+                    Err(EvalError::TypeError {
+                        expected,
+                        got,
+                        span,
+                    }) => {
+                        let msg = format!("type error: expected {expected}, got {got}");
+                        let formatted = format_eval_error(&formula.formula_string, &msg, span);
+                        CellValue::err(formatted)
+                    }
+                };
             sp.set_value(&cell_id, val);
         }
     }
