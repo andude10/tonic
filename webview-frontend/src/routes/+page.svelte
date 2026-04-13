@@ -8,6 +8,7 @@
     import DevBottomPanel from "$lib/DevBottomPanel.svelte";
     import ShowDependencyGraph from "$lib/side-areas/ShowDependencyGraph.svelte";
     import Extensions from "$lib/side-areas/Extensions.svelte";
+    import Shortcuts from "$lib/side-areas/Shortcuts.svelte";
     import { trackFps } from "$lib/stats.svelte";
     import { showError } from "$lib/notice";
     import type { IApi } from "@svar-ui/svelte-grid";
@@ -35,6 +36,7 @@
     let isLoading = $state(false);
     let isDependencyGraphVisible = $state(false);
     let isExtensionsVisible = $state(false);
+    let isShortcutsVisible = $state(false);
 
     const DIALOG_FILTER = { name: "Tonic Spreadsheet", extensions: ["tcs"] };
 
@@ -111,6 +113,9 @@
                 break;
             case "view-extensions":
                 isExtensionsVisible = true;
+                break;
+            case "help-shortcuts":
+                isShortcutsVisible = true;
                 break;
         }
     }
@@ -250,6 +255,13 @@
                     <Extensions
                         onclose={() => {
                             isExtensionsVisible = false;
+                        }}
+                    />
+                {/if}
+                {#if isShortcutsVisible}
+                    <Shortcuts
+                        onclose={() => {
+                            isShortcutsVisible = false;
                         }}
                     />
                 {/if}

@@ -55,5 +55,9 @@ export const menu_options: IMenuOption[] = [
             { id: "view-option", text: "..." },
         ],
     },
-    // more menu items
+    {
+        id: "help",
+        text: "Help",
+        data: [{ id: "help-shortcuts", text: "Shortcuts" }],
+    },
 ];
