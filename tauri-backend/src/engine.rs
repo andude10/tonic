@@ -291,6 +291,9 @@ pub enum EvalError {
         got: AtomType,
         span: Option<(u32, u32)>,
     },
+    DivisionByZero {
+        span: Option<(u32, u32)>,
+    },
     Error(String),
 }
 
@@ -302,6 +305,7 @@ impl EvalError {
                 got,
                 span,
             },
+            EvalError::DivisionByZero { .. } => EvalError::DivisionByZero { span },
             other => other,
         }
     }
@@ -1743,6 +1747,9 @@ fn eval_formula(
                     .map_err(|e| e.with_span(sp_id(a_id)))?;
                 let b = resolve_number(source_cell, &eval_store[*b_id as usize], sheets)
                     .map_err(|e| e.with_span(sp_id(b_id)))?;
+                if b.is_zero() {
+                    return Err(EvalError::DivisionByZero { span: sp_id(b_id) });
+                }
                 ExprAtom::Number(a / b)
             }
             Expr::Equal(a_id, b_id) => {
@@ -1893,6 +1900,11 @@ fn eval_cell<'a>(
                     }) => {
                         let msg = format!("type error: expected {expected}, got {got}");
                         let formatted = format_eval_error(&formula.formula_string, &msg, span);
+                        CellValue::err(formatted)
+                    }
+                    Err(EvalError::DivisionByZero { span }) => {
+                        let formatted =
+                            format_eval_error(&formula.formula_string, "division by zero", span);
                         CellValue::err(formatted)
                     }
                 };
