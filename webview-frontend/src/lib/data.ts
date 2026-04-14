@@ -22,36 +22,9 @@ export const menu_options: IMenuOption[] = [
         ],
     },
     {
-        id: "edit",
-        text: "Edit",
-        data: [
-            {
-                id: "edit-cut",
-                text: "Cut",
-                icon: "wxi wxi-content-cut",
-            },
-            {
-                id: "edit-copy",
-                text: "Copy",
-                icon: "wxi wxi-content-copy",
-            },
-            {
-                id: "edit-paste",
-                text: "Paste",
-                icon: "wxi wxi-content-paste",
-            },
-        ],
-    },
-    {
         id: "view",
         text: "View",
         data: [
-            {
-                id: "view-show-dependency-graph",
-                text: "Show dependency graph",
-            },
-            { id: "view-extensions", text: "Extensions" },
-            { id: "view-fullscreen", text: "Fullscreen" },
             {
                 id: "view-theme",
                 text: "Theme",

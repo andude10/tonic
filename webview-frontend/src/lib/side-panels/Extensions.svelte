@@ -1,5 +1,4 @@
 <script lang="ts">
-    import { SideArea } from "@svar-ui/svelte-core";
     import { invoke } from "@tauri-apps/api/core";
     import { open } from "@tauri-apps/plugin-dialog";
     import { onMount } from "svelte";
@@ -60,59 +59,102 @@
     });
 </script>
 
-<SideArea oncancel={onclose}>
-    <div class="panel">
-        <div class="header">
-            <div>
-                <h2>Extensions</h2>
-                <p>JavaScript files attached to this spreadsheet</p>
-            </div>
-            <div class="actions">
-                <button type="button" onclick={addScript}>Add file</button>
-                <button type="button" class="ghost" onclick={onclose}
-                    >Close</button
-                >
-            </div>
+<div class="panel">
+    <button class="panel-close" title="Close" onclick={onclose}>
+        <svg
+            viewBox="0 0 12 12"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+        >
+            <line x1="2" y1="2" x2="10" y2="10" /><line
+                x1="10"
+                y1="2"
+                x2="2"
+                y2="10"
+            />
+        </svg>
+    </button>
+    <div class="header">
+        <div>
+            <h2>Extensions</h2>
+            <p>JavaScript files attached to this spreadsheet</p>
         </div>
-
-        {#if isLoading}
-            <div class="state">Loading...</div>
-        {:else if errorMessage}
-            <div class="state error">{errorMessage}</div>
-        {:else if scripts.length === 0}
-            <div class="state">No extension files attached</div>
-        {:else}
-            <div class="script-list">
-                {#each scripts as name}
-                    <div class="script-item">
-                        <span class="script-name">{name}</span>
-                        <button
-                            type="button"
-                            class="remove-btn"
-                            onclick={() => removeScript(name)}
-                        >
-                            Remove
-                        </button>
-                    </div>
-                {/each}
-            </div>
-        {/if}
+        <div class="actions">
+            <button type="button" onclick={addScript}>Add file</button>
+        </div>
     </div>
-</SideArea>
+
+    {#if isLoading}
+        <div class="state">Loading...</div>
+    {:else if errorMessage}
+        <div class="state error">{errorMessage}</div>
+    {:else if scripts.length === 0}
+        <div class="state">No extension files attached</div>
+    {:else}
+        <div class="script-list">
+            {#each scripts as name}
+                <div class="script-item">
+                    <span class="script-name">{name}</span>
+                    <button
+                        type="button"
+                        class="remove-btn"
+                        onclick={() => removeScript(name)}
+                    >
+                        Remove
+                    </button>
+                </div>
+            {/each}
+        </div>
+    {/if}
+</div>
 
 <style>
     .panel {
+        position: relative;
         width: min(40vw, 500px);
         min-width: 340px;
         height: 100%;
         box-sizing: border-box;
         padding: 16px;
+        padding-top: 36px;
         display: flex;
         flex-direction: column;
         gap: 12px;
         background: var(--wx-background);
         color: var(--wx-color-font);
         border-left: var(--wx-border-medium);
+    }
+
+    .panel-close {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        width: 22px;
+        height: 22px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: none;
+        border: none;
+        cursor: pointer;
+        border-radius: 2px;
+        color: var(--tonic-text-dim);
+        padding: 0;
+        transition:
+            color 100ms ease,
+            background 100ms ease;
+    }
+
+    .panel-close:hover {
+        color: var(--wx-color-font);
+        background: var(--tonic-btn-hover-bg);
+    }
+
+    .panel-close svg {
+        width: 10px;
+        height: 10px;
     }
 
     .header {

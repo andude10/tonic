@@ -5,10 +5,10 @@
     import { menu_options } from "$lib/data";
     import WindowBar from "$lib/WindowBar.svelte";
     import Sheet from "$lib/sheet/Sheet.svelte";
-    import DevBottomPanel from "$lib/DevBottomPanel.svelte";
-    import ShowDependencyGraph from "$lib/side-areas/ShowDependencyGraph.svelte";
-    import Extensions from "$lib/side-areas/Extensions.svelte";
-    import Shortcuts from "$lib/side-areas/Shortcuts.svelte";
+    import BottomBar from "$lib/BottomBar.svelte";
+    import ShowDependencyGraph from "$lib/side-panels/ShowDependencyGraph.svelte";
+    import Extensions from "$lib/side-panels/Extensions.svelte";
+    import Shortcuts from "$lib/side-panels/Shortcuts.svelte";
     import { trackFps } from "$lib/stats.svelte";
     import { showError } from "$lib/notice";
     import type { IApi } from "@svar-ui/svelte-grid";
@@ -18,6 +18,7 @@
     import { open, save } from "@tauri-apps/plugin-dialog";
     import { listen } from "@tauri-apps/api/event";
     import { onMount } from "svelte";
+    import { fly } from "svelte/transition";
     import {
         initExtensionDispatcher,
         loadAllExtensions,
@@ -35,9 +36,11 @@
     let isSaved = $state(true);
     let isSaving = $state(false);
     let isLoading = $state(false);
-    let isDependencyGraphVisible = $state(false);
-    let isExtensionsVisible = $state(false);
-    let isShortcutsVisible = $state(false);
+    let activePanel: string | null = $state(null);
+
+    function togglePanel(id: string) {
+        activePanel = activePanel === id ? null : id;
+    }
 
     const DIALOG_FILTER = { name: "Tonic Spreadsheet", extensions: ["tcs"] };
 
@@ -155,13 +158,13 @@
                 await commitSaveAs();
                 break;
             case "view-show-dependency-graph":
-                isDependencyGraphVisible = true;
+                togglePanel("graph");
                 break;
             case "view-extensions":
-                isExtensionsVisible = true;
+                togglePanel("extensions");
                 break;
             case "help-shortcuts":
-                isShortcutsVisible = true;
+                togglePanel("shortcuts");
                 break;
             case "view-theme-dark":
                 theme = "dark";
@@ -300,59 +303,60 @@
                 </WindowBar>
 
                 <Sheet bind:this={sheet} />
-                {#if isDependencyGraphVisible}
-                    <ShowDependencyGraph
-                        onclose={() => {
-                            isDependencyGraphVisible = false;
-                        }}
-                    />
-                {/if}
-                {#if isExtensionsVisible}
-                    <Extensions
-                        onclose={() => {
-                            isExtensionsVisible = false;
-                        }}
-                    />
-                {/if}
-                {#if isShortcutsVisible}
-                    <Shortcuts
-                        onclose={() => {
-                            isShortcutsVisible = false;
-                        }}
-                    />
+                {#if activePanel}
+                    <div
+                        class="side-panel-popup"
+                        transition:fly={{ x: 400, duration: 200 }}
+                    >
+                        {#if activePanel === "graph"}
+                            <ShowDependencyGraph
+                                onclose={() => (activePanel = null)}
+                            />
+                        {:else if activePanel === "extensions"}
+                            <Extensions onclose={() => (activePanel = null)} />
+                        {:else if activePanel === "shortcuts"}
+                            <Shortcuts onclose={() => (activePanel = null)} />
+                        {/if}
+                    </div>
                 {/if}
                 {#if dialogOpen}<div class="dialog-overlay"></div>{/if}
                 {#if isLoading}<div class="dialog-overlay">
                         <div class="loading-text"></div>
                     </div>{/if}
 
-                <DevBottomPanel />
+                <BottomBar {activePanel} ontoggle={togglePanel} />
             </div>
         </Globals>
     </WillowDark>
 </div>
 
 <style>
-    /* Side areas - position below WindowBar, above grid scrollbars */
-    :global(.wx-sidearea) {
-        top: 32px !important;
-        right: 0 !important;
-        height: calc(100% - 32px) !important;
-        z-index: 10 !important;
-        min-width: 0 !important;
-        background: transparent !important;
-        border: none !important;
-        border-radius: 0 !important;
-        box-shadow: none !important;
+    /* Side panel popup — floats over the grid, anchored to bottom-right */
+    .side-panel-popup {
+        position: absolute;
+        top: 32px;
+        right: 0;
+        bottom: 28px;
+        z-index: 10;
+        display: flex;
+        align-items: stretch;
+        pointer-events: none;
     }
 
-    :global(.wx-sidearea button) {
+    .side-panel-popup > :global(*) {
+        pointer-events: auto;
+        box-shadow: -4px 0 16px rgba(0, 0, 0, 0.18);
+    }
+
+    /* Button styles for side panels (previously provided by SideArea) */
+    :global(.side-panel-popup button:not(.panel-close)) {
         border: var(--wx-border);
         background: var(--wx-button-background);
         color: var(--wx-color-font);
         border-radius: var(--wx-border-radius);
-        padding: 7px 13px;
+        padding: 5px 12px;
         font-size: 12px;
+        font-family: inherit;
         font-weight: 500;
         cursor: pointer;
         transition:
@@ -360,7 +364,7 @@
             border-color 120ms ease;
     }
 
-    :global(.wx-sidearea button:hover) {
+    :global(.side-panel-popup button:not(.panel-close):hover) {
         background: var(--tonic-btn-hover-bg);
     }
 
