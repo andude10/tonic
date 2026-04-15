@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::storage::types::FormulaId;
 
 const BLOCK_SHIFT: usize = 4;
-const BLOCK_DIM: usize = 1 << BLOCK_SHIFT; // 16
-const BLOCK_MASK: usize = BLOCK_DIM - 1; // 0xF
+const BLOCK_DIMENSIONS: usize = 1 << BLOCK_SHIFT; // 16
+const BLOCK_MASK: usize = BLOCK_DIMENSIONS - 1; // 0xF
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct GridCellId {
@@ -115,10 +115,10 @@ mod cell_slot_serde {
     use serde::ser::SerializeSeq;
 
     pub fn serialize<S: serde::Serializer>(
-        cells: &Box<[[CellSlot; BLOCK_DIM]; BLOCK_DIM]>,
+        cells: &Box<[[CellSlot; BLOCK_DIMENSIONS]; BLOCK_DIMENSIONS]>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
-        let mut seq = serializer.serialize_seq(Some(BLOCK_DIM))?;
+        let mut seq = serializer.serialize_seq(Some(BLOCK_DIMENSIONS))?;
         for row in cells.iter() {
             let row_data: Vec<Option<Cell>> = row.iter().map(|slot| slot.read().clone()).collect();
             seq.serialize_element(&row_data)?;
@@ -128,14 +128,14 @@ mod cell_slot_serde {
 
     pub fn deserialize<'de, D: serde::Deserializer<'de>>(
         deserializer: D,
-    ) -> Result<Box<[[CellSlot; BLOCK_DIM]; BLOCK_DIM]>, D::Error> {
+    ) -> Result<Box<[[CellSlot; BLOCK_DIMENSIONS]; BLOCK_DIMENSIONS]>, D::Error> {
         let rows: Vec<Vec<Option<Cell>>> = serde::Deserialize::deserialize(deserializer)?;
-        let mut cells: Box<[[CellSlot; BLOCK_DIM]; BLOCK_DIM]> =
+        let mut cells: Box<[[CellSlot; BLOCK_DIMENSIONS]; BLOCK_DIMENSIONS]> =
             Box::new(std::array::from_fn(|_| {
                 std::array::from_fn(|_| RwLock::new(None))
             }));
-        for (r, row) in rows.into_iter().enumerate().take(BLOCK_DIM) {
-            for (c, cell) in row.into_iter().enumerate().take(BLOCK_DIM) {
+        for (r, row) in rows.into_iter().enumerate().take(BLOCK_DIMENSIONS) {
+            for (c, cell) in row.into_iter().enumerate().take(BLOCK_DIMENSIONS) {
                 *cells[r][c].get_mut() = cell;
             }
         }
@@ -146,7 +146,7 @@ mod cell_slot_serde {
 #[derive(Serialize, Deserialize)]
 struct Block {
     #[serde(with = "cell_slot_serde")]
-    cells: Box<[[CellSlot; BLOCK_DIM]; BLOCK_DIM]>,
+    cells: Box<[[CellSlot; BLOCK_DIMENSIONS]; BLOCK_DIMENSIONS]>,
     nonempty_cells_count: u32,
 }
 
@@ -167,8 +167,8 @@ impl PartialEq for Block {
         if self.nonempty_cells_count != other.nonempty_cells_count {
             return false;
         }
-        for r in 0..BLOCK_DIM {
-            for c in 0..BLOCK_DIM {
+        for r in 0..BLOCK_DIMENSIONS {
+            for c in 0..BLOCK_DIMENSIONS {
                 if *self.cells[r][c].read() != *other.cells[r][c].read() {
                     return false;
                 }
@@ -224,8 +224,8 @@ impl Default for Grid {
 
         // stride=44 block-columns -> 44*16 = 704 columns (covers A-ZZ = 702)
         // 1_250_000 row-blocks -> 1_250_000*16 = 20_000_000 rows
-        const STRIDE: usize = 704 / BLOCK_DIM;
-        const MAX_ROW_BLOCKS: usize = 20_000_000 / BLOCK_DIM;
+        const STRIDE: usize = 704 / BLOCK_DIMENSIONS;
+        const MAX_ROW_BLOCKS: usize = 20_000_000 / BLOCK_DIMENSIONS;
         const MAX_BLOCKS: usize = MAX_ROW_BLOCKS * STRIDE;
         let mut blocks = Vec::with_capacity(MAX_BLOCKS);
         blocks.resize_with(MAX_BLOCKS, || None);
@@ -256,19 +256,19 @@ impl Grid {
             };
             let block_row = block_idx / self.stride;
             let block_col = block_idx % self.stride;
-            for row in (0..BLOCK_DIM).rev() {
+            for row in (0..BLOCK_DIMENSIONS).rev() {
                 if block.cells[row].iter().any(|slot| slot.read().is_some()) {
                     self.max_row = self
                         .max_row
-                        .max(block_row as u32 * BLOCK_DIM as u32 + row as u32);
+                        .max(block_row as u32 * BLOCK_DIMENSIONS as u32 + row as u32);
                     break;
                 }
             }
-            for col in (0..BLOCK_DIM).rev() {
-                if (0..BLOCK_DIM).any(|row| block.cells[row][col].read().is_some()) {
+            for col in (0..BLOCK_DIMENSIONS).rev() {
+                if (0..BLOCK_DIMENSIONS).any(|row| block.cells[row][col].read().is_some()) {
                     self.max_col = self
                         .max_col
-                        .max(block_col as u32 * BLOCK_DIM as u32 + col as u32);
+                        .max(block_col as u32 * BLOCK_DIMENSIONS as u32 + col as u32);
                     break;
                 }
             }
@@ -450,7 +450,7 @@ impl Grid {
                 let row_end = if block_row == block_row_end {
                     end_row as usize & BLOCK_MASK
                 } else {
-                    BLOCK_DIM - 1
+                    BLOCK_DIMENSIONS - 1
                 };
                 let col_start = if block_col == block_col_start {
                     start_col as usize & BLOCK_MASK
@@ -460,7 +460,7 @@ impl Grid {
                 let col_end = if block_col == block_col_end {
                     end_col as usize & BLOCK_MASK
                 } else {
-                    BLOCK_DIM - 1
+                    BLOCK_DIMENSIONS - 1
                 };
 
                 for row in row_start..=row_end {
@@ -471,8 +471,8 @@ impl Grid {
                         };
                         f(
                             GridCellId {
-                                row: (block_row as u32 * BLOCK_DIM as u32) + row as u32,
-                                col: (block_col as u32 * BLOCK_DIM as u32) + col as u32,
+                                row: (block_row as u32 * BLOCK_DIMENSIONS as u32) + row as u32,
+                                col: (block_col as u32 * BLOCK_DIMENSIONS as u32) + col as u32,
                             },
                             cell,
                         );
@@ -508,16 +508,16 @@ impl Grid {
             };
             let block_row = block_idx / self.stride;
             let block_col = block_idx % self.stride;
-            for row in 0..BLOCK_DIM {
-                for col in 0..BLOCK_DIM {
+            for row in 0..BLOCK_DIMENSIONS {
+                for col in 0..BLOCK_DIMENSIONS {
                     let guard = block.cells[row][col].read();
                     let Some(cell) = guard.as_ref() else {
                         continue;
                     };
                     f(
                         GridCellId {
-                            row: (block_row as u32 * BLOCK_DIM as u32) + row as u32,
-                            col: (block_col as u32 * BLOCK_DIM as u32) + col as u32,
+                            row: (block_row as u32 * BLOCK_DIMENSIONS as u32) + row as u32,
+                            col: (block_col as u32 * BLOCK_DIMENSIONS as u32) + col as u32,
                         },
                         cell,
                     );
@@ -609,7 +609,7 @@ mod tests {
     #[test]
     fn cells_across_block_boundaries() {
         let mut grid = Grid::default();
-        let boundary = BLOCK_DIM as u32;
+        let boundary = BLOCK_DIMENSIONS as u32;
         grid.insert_cell(
             &id(boundary - 1, boundary - 1),
             cell(CellValue::Text("a".into())),

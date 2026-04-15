@@ -430,12 +430,13 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
                         }
                     }
                 } else {
+                    // todo: remove hardcode fix below.
                     // bare name: check if it's a known function missing parens
                     const BUILTINS: &[&str] = &["sum", "avg", "min", "max", "count", "if"];
                     if BUILTINS.contains(&name) || st.names.user_function_names.contains_key(name) {
                         return Err(Rich::custom(
                             span,
-                            format!("'{name}' is a function, expected '('"),
+                            format!("'{name}' is a function, expected function arguments"),
                         ));
                     }
                     let named_cell =
