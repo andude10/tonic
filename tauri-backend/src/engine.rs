@@ -1,18 +1,17 @@
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::marker::PhantomData;
-use std::sync::atomic::{self, AtomicU32, AtomicU64};
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use std::time::Instant;
 
 use parking_lot::RwLock;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Listener};
 use tauri_plugin_log::log::{debug, info};
 
 use std::io;
 
-use crate::file_api;
 use crate::parser::{
     format_eval_error, format_lex_error, format_parse_error, lex_formula, parse_formula,
     FormulaState,
@@ -22,177 +21,16 @@ use crate::storage::types::{
     AbsoluteCellId, AtomType, CellRange, Coordinate, Expr, ExprAtom, ExprId, Formula, FormulaId,
     ProjectionFilterOption, Reference, SheetId, Sheets, Spreadsheet,
 };
+use crate::{call_extern_functions, file_api};
 
 /// A single cell mutation: (cell_id, old_value, new_value).
 #[derive(Clone)]
 pub struct CellUpdate(pub AbsoluteCellId, pub Option<Cell>, pub Option<Cell>);
 
-// argument sent to JS for external function calls
-// literal values are sent directly, references as coordinates
-// (the JS dispatcher resolves refs via resolve_reference command)
-#[derive(Serialize, Clone, Debug)]
-#[serde(tag = "type", content = "value")]
-enum ExternArg {
-    #[serde(rename = "number")]
-    Number(String),
-    #[serde(rename = "text")]
-    Text(String),
-    #[serde(rename = "boolean")]
-    Boolean(bool),
-    #[serde(rename = "single_ref")]
-    SingleRef { sheet_id: u32, row: u32, col: u32 },
-    #[serde(rename = "range_ref")]
-    RangeRef {
-        sheet_id: u32,
-        start_row: u32,
-        start_col: u32,
-        end_row: u32,
-        end_col: u32,
-    },
-}
-
-static CALL_ID: AtomicU64 = AtomicU64::new(0);
+use crate::ipc_encoding::ExtFnArg;
 
 /// Dedicated thread pool for parallel formula evaluation (heartbeat scheduling).
 static EVAL_POOL: forte::ThreadPool = forte::ThreadPool::new();
-
-// --- external function IPC bridge ---
-//
-// flow: forte worker → EXT_CALL_TX → ipc thread → app.emit(batch) → JS
-//       JS → app.emit(response per call) → persistent listener → resp_tx → forte worker
-
-struct ExtCallRequest {
-    call_id: u64,
-    func_name: String,
-    args: Vec<ExternArg>,
-    resp_tx: std::sync::mpsc::Sender<ExtFnResponse>,
-}
-
-// response with callId so the persistent listener can route it
-#[derive(Deserialize)]
-struct ExtFnResponseWithId {
-    #[serde(rename = "callId")]
-    call_id: u64,
-    #[serde(flatten)]
-    resp: ExtFnResponse,
-}
-
-static EXT_CALL_TX: std::sync::OnceLock<std::sync::mpsc::Sender<ExtCallRequest>> =
-    std::sync::OnceLock::new();
-
-/// Start the IPC bridge thread. Must be called once during app setup with the AppHandle.
-pub fn set_app_handle<R: tauri::Runtime>(app: AppHandle<R>) {
-    let (tx, rx) = std::sync::mpsc::channel::<ExtCallRequest>();
-    EXT_CALL_TX.set(tx).ok();
-
-    // pending calls: callId → response sender. shared between the listener and the IPC thread.
-    let pending: Arc<std::sync::Mutex<HashMap<u64, std::sync::mpsc::Sender<ExtFnResponse>>>> =
-        Arc::new(std::sync::Mutex::new(HashMap::new()));
-
-    // single persistent listener for all responses (no per-call app.once)
-    let listener_pending = pending.clone();
-    app.listen("ext-fn-response", move |event: tauri::Event| {
-        if let Ok(resp) = serde_json::from_str::<ExtFnResponseWithId>(event.payload()) {
-            if let Some(tx) = listener_pending.lock().unwrap().remove(&resp.call_id) {
-                let _ = tx.send(resp.resp);
-            }
-        }
-    });
-
-    std::thread::Builder::new()
-        .name("ext-ipc".into())
-        .spawn(move || {
-            const BATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1);
-
-            loop {
-                // block until at least one request arrives
-                let first = match rx.recv() {
-                    Ok(req) => req,
-                    Err(_) => break, // channel closed
-                };
-
-                // drain all immediately available requests into a batch
-                let mut batch = vec![first];
-                while let Ok(req) = rx.recv_timeout(BATCH_TIMEOUT) {
-                    batch.push(req);
-                }
-
-                // register all response channels and build the batch payload
-                let mut calls = Vec::with_capacity(batch.len());
-                {
-                    let mut map = pending.lock().unwrap();
-                    for req in batch {
-                        map.insert(req.call_id, req.resp_tx);
-                        calls.push(serde_json::json!({
-                            "callId": req.call_id,
-                            "funcName": req.func_name,
-                            "args": req.args,
-                        }));
-                    }
-                }
-
-                // single emit with all calls
-                let _ = app.emit("ext-fn-call-batch", calls);
-            }
-        })
-        .expect("failed to spawn ext-ipc thread");
-}
-
-// response from a JS extension function call
-#[derive(Deserialize)]
-struct ExtFnResponse {
-    #[serde(default)]
-    v: Option<String>,
-    #[serde(default)]
-    t: Option<String>,
-    #[serde(default)]
-    e: Option<String>,
-}
-
-// call a JS-side external function.
-// sends the request through EXT_CALL_TX to the IPC thread and blocks on the response.
-// forte workers never touch Tauri APIs — all IPC goes through the dedicated thread.
-fn call_extern_js_function(func_name: &str, args: Vec<ExternArg>) -> Result<CellValue, EvalError> {
-    let tx = EXT_CALL_TX
-        .get()
-        .ok_or_else(|| EvalError::Error("ext-ipc not initialized".into()))?;
-
-    let call_id = CALL_ID.fetch_add(1, atomic::Ordering::Relaxed);
-    let (resp_tx, resp_rx) = std::sync::mpsc::channel();
-
-    tx.send(ExtCallRequest {
-        call_id,
-        func_name: func_name.to_string(),
-        args,
-        resp_tx,
-    })
-    .map_err(|_| EvalError::Error("ext-ipc channel closed".into()))?;
-
-    let resp = resp_rx
-        .recv_timeout(std::time::Duration::from_secs(30))
-        .map_err(|e| match e {
-            std::sync::mpsc::RecvTimeoutError::Timeout => {
-                EvalError::Error(format!("{}(): timeout", func_name))
-            }
-            std::sync::mpsc::RecvTimeoutError::Disconnected => {
-                EvalError::Error(format!("{}(): ipc channel dropped", func_name))
-            }
-        })?;
-
-    if let Some(err) = resp.e {
-        return Err(EvalError::Error(err));
-    }
-
-    let val = resp.v.unwrap_or_default();
-    match resp.t.as_deref() {
-        Some("number") => match val.parse::<Decimal>() {
-            Ok(n) => Ok(CellValue::Number(n)),
-            Err(_) => Ok(CellValue::Text(val.into())),
-        },
-        Some("boolean") => Ok(CellValue::Text(val.into())),
-        _ => Ok(CellValue::Text(val.into())),
-    }
-}
 
 /// Bounding rectangle of affected cells. Returned by undo/redo.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -387,6 +225,7 @@ impl ColumnOrRowChangeSpec {
 impl Engine {
     pub fn new() -> Self {
         EVAL_POOL.resize_to_available();
+        call_extern_functions::init();
 
         Self {
             spreadsheet: Arc::new(Spreadsheet::new()),
@@ -408,32 +247,59 @@ impl Engine {
 
     fn set_cell(&mut self, id: &AbsoluteCellId, new_cell: Option<Cell>) -> Option<Cell> {
         let old_cell = self.spreadsheet.get_cell(id);
-        if old_cell
-            .as_ref()
-            .and_then(|cell| cell.defined_by_formula)
-            .is_some()
-        {
-            self.spreadsheet_mut()
-                .dependency_graph
-                .remove_formula_cell(*id);
-        }
+        let old_formula_id = old_cell.as_ref().and_then(|c| c.defined_by_formula);
+        let new_formula_id = new_cell.as_ref().and_then(|c| c.defined_by_formula);
 
-        match new_cell.as_ref() {
-            Some(cell) => self.spreadsheet.insert_cell(id, cell.clone()),
-            None => self.spreadsheet.remove_cell(id),
-        }
-
-        if let Some(formula_id) = new_cell.as_ref().and_then(|cell| cell.defined_by_formula) {
-            let ast = self
-                .spreadsheet
-                .formulas
-                .get(formula_id)
-                .map(|f| f.ast.clone());
-            if let Some(ast) = ast {
+        match (old_formula_id, new_formula_id) {
+            (Some(old_fid), Some(new_fid)) => {
+                // both old and new are formulas — use update which skips if deps unchanged
+                let old_ast = self
+                    .spreadsheet
+                    .formulas
+                    .get(old_fid)
+                    .map(|f| f.ast.clone());
+                // insert new cell first so the new formula is accessible
+                self.spreadsheet.insert_cell(id, new_cell.clone().unwrap());
+                let new_ast = self
+                    .spreadsheet
+                    .formulas
+                    .get(new_fid)
+                    .map(|f| f.ast.clone());
+                if let (Some(old_ast), Some(new_ast)) = (old_ast, new_ast) {
+                    self.spreadsheet_mut()
+                        .dependency_graph
+                        .update_formula_cell(*id, &old_ast, &new_ast);
+                }
+            }
+            (Some(_), None) => {
                 self.spreadsheet_mut()
                     .dependency_graph
-                    .insert_formula_cell(*id, &ast);
+                    .remove_formula_cell(*id);
+                match new_cell.as_ref() {
+                    Some(cell) => self.spreadsheet.insert_cell(id, cell.clone()),
+                    None => self.spreadsheet.remove_cell(id),
+                }
             }
+            (None, Some(new_fid)) => {
+                match new_cell.as_ref() {
+                    Some(cell) => self.spreadsheet.insert_cell(id, cell.clone()),
+                    None => self.spreadsheet.remove_cell(id),
+                }
+                if let Some(ast) = self
+                    .spreadsheet
+                    .formulas
+                    .get(new_fid)
+                    .map(|f| f.ast.clone())
+                {
+                    self.spreadsheet_mut()
+                        .dependency_graph
+                        .insert_formula_cell(*id, &ast);
+                }
+            }
+            (None, None) => match new_cell.as_ref() {
+                Some(cell) => self.spreadsheet.insert_cell(id, cell.clone()),
+                None => self.spreadsheet.remove_cell(id),
+            },
         }
 
         old_cell
@@ -588,19 +454,18 @@ impl Engine {
 
         // step 3: evaluate formulas in topological order using forte's scoped parallelism.
         //
-        // each cell is spawned as a closure on the scope. external calls block the
-        // individual worker (via mpsc recv on the IPC bridge), while other workers
-        // continue evaluating independent cells.
+        // each cell is spawned as an async future on the scope. cells without external
+        // calls complete synchronously on first poll. cells that hit an extern call yield
+        // at the .await, freeing the worker. when the JS response arrives, the future is
+        // re-queued. this lets many cells be in flight per worker (vs 1-per-worker when
+        // blocking), so independent cells coalesce into one JS batch instead of N waves.
         let eval_time = Instant::now();
         if !wave.is_empty() {
             let sp = &self.spreadsheet;
             EVAL_POOL.with_worker(|worker| {
                 worker.scope(|scope| {
                     for cell in &wave {
-                        let cell = *cell;
-                        scope.spawn_on(worker, move |_: &forte::Worker| {
-                            eval_cell(cell, sp, scope);
-                        });
+                        scope.spawn_on(worker, eval_cell(*cell, sp, scope));
                     }
                 });
             });
@@ -666,7 +531,6 @@ impl Engine {
                 self.set_cell(id, new.clone());
             }
         } else {
-            // when undoing, walk backward to revert writes in exact reverse order
             for CellUpdate(id, old, _) in changes.iter().rev() {
                 self.set_cell(id, old.clone());
             }
@@ -1670,38 +1534,43 @@ fn parallel_sum_count(
     forte::Worker::with_current(|w| split(sp, sheet_id, sr, sc, er, ec, w.unwrap()))
 }
 
-// convert an eval-store atom to an ExternArg for JS dispatch
-// references are sent as coordinates — the JS dispatcher resolves them
-// via the resolve_reference command (which reads sheets directly, no lock conflict)
-fn resolve_extern_arg(atom: &ExprAtom, source_cell: &AbsoluteCellId) -> ExternArg {
+fn resolve_extern_arg(atom: &ExprAtom, source_cell: &AbsoluteCellId, sheets: &Sheets) -> ExtFnArg {
     match atom {
-        ExprAtom::Number(n) => ExternArg::Number(n.to_string()),
-        ExprAtom::Text(s) => ExternArg::Text(s.to_string()),
-        ExprAtom::Bool(b) => ExternArg::Boolean(*b),
-        ExprAtom::Reference(Reference::Single { sheet_id, row, col }) => ExternArg::SingleRef {
-            sheet_id: *sheet_id,
-            row: row.to_index(source_cell.row),
-            col: col.to_index(source_cell.col),
-        },
-        ExprAtom::Reference(Reference::Range {
-            sheet_id,
-            start_row,
-            start_col,
-            end_row,
-            end_col,
-        }) => ExternArg::RangeRef {
-            sheet_id: *sheet_id,
-            start_row: start_row.to_index(source_cell.row),
-            start_col: start_col.to_index(source_cell.col),
-            end_row: end_row.to_index(source_cell.row),
-            end_col: end_col.to_index(source_cell.col),
-        },
-        _ => ExternArg::Text(String::new()),
+        ExprAtom::Number(n) => ExtFnArg::Value(CellValue::Number(*n)),
+        ExprAtom::Text(s) => ExtFnArg::Value(CellValue::Text(s.as_str().into())),
+        ExprAtom::Bool(b) => ExtFnArg::Value(CellValue::Bool(*b)),
+        ExprAtom::Reference(r) => {
+            let range = r.to_cell_range(source_cell);
+            let sheet = &sheets[range.sheet_id as usize];
+            if range.is_single() {
+                match sheet.get_value(&GridCellId {
+                    row: range.start_row,
+                    col: range.start_col,
+                }) {
+                    Some(v) => ExtFnArg::Value(v),
+                    None => ExtFnArg::Empty,
+                }
+            } else {
+                let rows = (range.end_row - range.start_row + 1) as usize;
+                let cols = (range.end_col - range.start_col + 1) as usize;
+                let values = (range.start_row..=range.end_row)
+                    .flat_map(|r| {
+                        (range.start_col..=range.end_col).map(move |c| {
+                            sheet
+                                .get_value(&GridCellId { row: r, col: c })
+                                .unwrap_or(CellValue::Text("".into()))
+                        })
+                    })
+                    .collect();
+                ExtFnArg::Range { rows, cols, values }
+            }
+        }
+        _ => ExtFnArg::Empty,
     }
 }
 
 /// Evaluate a single formula's AST, returning the computed CellValue.
-fn eval_formula(
+async fn eval_formula(
     ast: &[Expr],
     spans: &[(u32, u32)],
     source_cell: &AbsoluteCellId,
@@ -1854,12 +1723,18 @@ fn eval_formula(
                     )));
                 }
 
-                let js_args: Vec<ExternArg> = args
-                    .iter()
-                    .map(|expr_id| resolve_extern_arg(&eval_store[*expr_id as usize], source_cell))
-                    .collect();
+                // pre-resolve refs here (worker holds the sheets lock anyway),
+                // so JS doesn't need a resolve_references round-trip per batch.
+                let js_args: Vec<ExtFnArg> = {
+                    let sheets = sp.sheets.read();
+                    args.iter()
+                        .map(|expr_id| {
+                            resolve_extern_arg(&eval_store[*expr_id as usize], source_cell, &sheets)
+                        })
+                        .collect()
+                };
 
-                let cell_value = call_extern_js_function(&func.name, js_args)?;
+                let cell_value = crate::call_extern_functions::call(&func.name, js_args).await?;
                 match cell_value {
                     CellValue::Number(n) => ExprAtom::Number(n),
                     CellValue::Text(s) => ExprAtom::Text(s.to_string()),
@@ -1879,43 +1754,55 @@ fn eval_formula(
 }
 
 // evaluate a single cell, write result to grid, and spawn ready dependants onto the scope.
-// external calls block this worker via the IPC bridge (mpsc channel), other workers continue.
-fn eval_cell<'a>(
+// async because extern calls yield at await points, freeing the worker to poll other
+// pending cells. cells without extern calls complete synchronously on first poll.
+//
+// explicit `-> impl Future + Send` (not `async fn`) so Send inference propagates through
+// the call chain reliably — bare `async fn`'s opaque future sometimes fails to infer Send
+// when called from generic contexts like forte's `scope.spawn`.
+fn eval_cell<'scope, 'env: 'scope>(
     cell_id: AbsoluteCellId,
-    sp: &'a Arc<Spreadsheet>,
-    scope: &'a forte::Scope<'a, '_>,
-) {
-    let mut eval_store = Vec::new();
-    let formula_id = sp.get_cell(&cell_id).and_then(|c| c.defined_by_formula);
-    if let Some(formula_id) = formula_id {
-        if let Some(formula) = sp.formulas.get(formula_id) {
-            let val =
-                match eval_formula(&formula.ast, &formula.spans, &cell_id, sp, &mut eval_store) {
-                    Ok(v) => v,
-                    Err(EvalError::Error(msg)) => CellValue::err(msg),
-                    Err(EvalError::TypeError {
-                        expected,
-                        got,
-                        span,
-                    }) => {
-                        let msg = format!("type error: expected {expected}, got {got}");
-                        let formatted = format_eval_error(&formula.formula_string, &msg, span);
-                        CellValue::err(formatted)
-                    }
-                    Err(EvalError::DivisionByZero { span }) => {
-                        let formatted =
-                            format_eval_error(&formula.formula_string, "division by zero", span);
-                        CellValue::err(formatted)
-                    }
-                };
-            sp.set_value(&cell_id, val);
+    sp: &'scope Arc<Spreadsheet>,
+    scope: &'scope forte::Scope<'scope, 'env>,
+) -> impl Future<Output = ()> + Send + use<'scope, 'env> {
+    async move {
+        let mut eval_store = Vec::new();
+        let formula_id = sp.get_cell(&cell_id).and_then(|c| c.defined_by_formula);
+        if let Some(formula_id) = formula_id {
+            if let Some(formula) = sp.formulas.get(formula_id) {
+                let val =
+                    match eval_formula(&formula.ast, &formula.spans, &cell_id, sp, &mut eval_store)
+                        .await
+                    {
+                        Ok(v) => v,
+                        Err(EvalError::Error(msg)) => CellValue::err(msg),
+                        Err(EvalError::TypeError {
+                            expected,
+                            got,
+                            span,
+                        }) => {
+                            let msg = format!("type error: expected {expected}, got {got}");
+                            let formatted = format_eval_error(&formula.formula_string, &msg, span);
+                            CellValue::err(formatted)
+                        }
+                        Err(EvalError::DivisionByZero { span }) => {
+                            let formatted = format_eval_error(
+                                &formula.formula_string,
+                                "division by zero",
+                                span,
+                            );
+                            CellValue::err(formatted)
+                        }
+                    };
+                sp.set_value(&cell_id, val);
+            }
         }
-    }
-    let ready = sp
-        .dependency_graph
-        .decrease_pending_counter(&sp.sheets.read(), CellRange::single(cell_id));
-    for r in ready {
-        scope.spawn(move |_: &forte::Worker| eval_cell(r, sp, scope));
+        let ready = sp
+            .dependency_graph
+            .decrease_pending_counter(&sp.sheets.read(), CellRange::single(cell_id));
+        for r in ready {
+            scope.spawn(eval_cell(r, sp, scope));
+        }
     }
 }
 

@@ -19,7 +19,7 @@ interface FuncDescriptor {
 
 const registry = new Map<string, FuncEntry>();
 
-function coerce(value: unknown, type: string): unknown {
+function castArg(value: unknown, type: string): unknown {
     if (type === "any") return value;
     if (type === "number") {
         if (typeof value === "number") return value;
@@ -105,7 +105,7 @@ self.onmessage = (e: MessageEvent) => {
         try {
             // coerce args to declared types
             const coerced = (args as unknown[]).map((a, i) =>
-                coerce(a, reg.paramTypes[i] ?? "any"),
+                castArg(a, reg.paramTypes[i] ?? "any"),
             );
             const result = reg.fn(...coerced);
 

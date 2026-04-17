@@ -1,186 +1,258 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen, emit } from "@tauri-apps/api/event";
 
-interface ExternArg {
-    type: "number" | "text" | "boolean" | "single_ref" | "range_ref";
-    value: unknown;
+const textDecoder = new TextDecoder();
+const textEncoder = new TextEncoder();
+const EMPTY_BODY = new Uint8Array();
+
+// --- binary tags (mirrors ipc_encoding.rs) ---
+
+const TAG_EMPTY = 0;
+const TAG_TEXT = 1;
+const TAG_NUMBER = 2;
+const TAG_BOOL = 3;
+const TAG_ERROR = 4;
+const TAG_RANGE = 5;
+
+// --- binary decoding ---
+
+function readU32(view: DataView, o: { v: number }): number {
+    const n = view.getUint32(o.v, true);
+    o.v += 4;
+    return n;
 }
 
-interface ExtFnCall {
-    callId: number;
-    funcName: string;
-    args: ExternArg[];
+function readString(
+    view: DataView,
+    bytes: Uint8Array,
+    o: { v: number },
+): string {
+    const len = readU32(view, o);
+    const s = textDecoder.decode(bytes.subarray(o.v, o.v + len));
+    o.v += len;
+    return s;
 }
 
-// rust sends {v, t} for success, {e} for error — must match ExtFnResponse in engine.rs
-interface ExtFnResponse {
-    v?: string;
-    t?: string;
-    e?: string;
+function decodeScalar(
+    view: DataView,
+    bytes: Uint8Array,
+    o: { v: number },
+): unknown {
+    const tag = bytes[o.v++];
+    const s = readString(view, bytes, o);
+    if (tag === TAG_NUMBER) return s === "" ? 0 : Number(s);
+    if (tag === TAG_BOOL) return s === "true";
+    return s;
 }
 
-// function name -> worker that owns it
-const funcToWorker = new Map<string, Worker>();
-
-// pending call callbacks keyed by callId
-const pendingCalls = new Map<number, { resolve: (r: ExtFnResponse) => void }>();
-
-// build a Reference enum matching the rust serde format
-function toReference(arg: ExternArg): object {
-    if (arg.type === "single_ref") {
-        const v = arg.value as { sheet_id: number; row: number; col: number };
-        return {
-            Single: {
-                sheet_id: v.sheet_id,
-                row: { Absolute: v.row },
-                col: { Absolute: v.col },
-            },
-        };
+function decodeArg(
+    view: DataView,
+    bytes: Uint8Array,
+    o: { v: number },
+): unknown {
+    const tag = bytes[o.v++];
+    if (tag === TAG_RANGE) {
+        const rows = readU32(view, o);
+        const cols = readU32(view, o);
+        const result: unknown[][] = [];
+        for (let r = 0; r < rows; r++) {
+            const row: unknown[] = [];
+            for (let c = 0; c < cols; c++)
+                row.push(decodeScalar(view, bytes, o));
+            result.push(row);
+        }
+        return result;
     }
-    const v = arg.value as {
-        sheet_id: number;
-        start_row: number;
-        start_col: number;
-        end_row: number;
-        end_col: number;
-    };
-    return {
-        Range: {
-            sheet_id: v.sheet_id,
-            start_row: { Absolute: v.start_row },
-            start_col: { Absolute: v.start_col },
-            end_row: { Absolute: v.end_row },
-            end_col: { Absolute: v.end_col },
-        },
-    };
+    const s = readString(view, bytes, o);
+    if (tag === TAG_NUMBER) return s === "" ? 0 : Number(s);
+    if (tag === TAG_BOOL) return s === "true";
+    return s;
 }
 
-const decoder = new TextDecoder();
+// --- binary encoding (responses: flat sequence of CellValues) ---
 
-// invoke resolve_reference (returns raw bytes), decode to string
-async function resolveRef(arg: ExternArg): Promise<string> {
-    const buf = await invoke<ArrayBuffer>("resolve_reference", {
-        reference: toReference(arg),
-    });
-    return decoder.decode(buf);
+interface CallResult {
+    value: string;
+    tag: number;
 }
 
-// resolve all args to JS values
-// references are resolved via resolve_reference (reads sheets directly, no lock conflict with eval)
-async function resolveArgs(args: ExternArg[]): Promise<unknown[]> {
-    return Promise.all(
-        args.map(async (arg) => {
-            if (arg.type === "number") return Number(arg.value);
-            if (arg.type === "boolean") return arg.value;
-            if (arg.type === "single_ref") {
-                const str = await resolveRef(arg);
-                const num = Number(str);
-                return isNaN(num) ? str : num;
-            }
-            if (arg.type === "range_ref") {
-                const json = await resolveRef(arg);
-                try {
-                    return JSON.parse(json);
-                } catch {
-                    return json;
-                }
-            }
-            return String(arg.value);
-        }),
-    );
+function encodeResponses(results: CallResult[]): Uint8Array {
+    const encoded = results.map((r) => textEncoder.encode(r.value));
+    let size = 0;
+    for (const e of encoded) size += 1 + 4 + e.byteLength;
+    const buf = new Uint8Array(size);
+    const view = new DataView(buf.buffer);
+    let o = 0;
+    for (let i = 0; i < results.length; i++) {
+        buf[o++] = results[i].tag;
+        view.setUint32(o, encoded[i].byteLength, true);
+        o += 4;
+        buf.set(encoded[i], o);
+        o += encoded[i].byteLength;
+    }
+    return buf;
 }
 
-function handleWorkerMessage(worker: Worker, e: MessageEvent) {
-    const msg = e.data;
+// --- function registry (runs on main thread, no workers) ---
 
-    if (msg.type === "registered") {
-        funcToWorker.set(msg.name, worker);
+interface FuncEntry {
+    paramTypes: string[];
+    returns: string;
+    fn: Function;
+}
+
+const registry = new Map<string, FuncEntry>();
+
+function castArg(value: unknown, type: string): unknown {
+    if (type === "any") return value;
+    if (type === "number") {
+        if (typeof value === "number") return value;
+        const n = Number(value);
+        if (!isNaN(n)) return n;
+        throw new TypeError(`expected number, got ${typeof value}`);
+    }
+    if (type === "text") return String(value);
+    if (type === "boolean") return Boolean(value);
+    return value;
+}
+
+function detectReturnType(value: unknown): string {
+    if (typeof value === "number" && isFinite(value)) return "number";
+    if (typeof value === "boolean") return "boolean";
+    return "text";
+}
+
+// exposed to extension code via globalThis.tonic
+const tonic = {
+    registerFunction(
+        name: string,
+        second:
+            | string[]
+            | Function
+            | {
+                  params: Record<string, string>;
+                  returns?: string;
+                  fn: Function;
+              },
+        third?: Function,
+    ) {
+        let paramTypes: string[];
+        let returns: string;
+        let fn: Function;
+
+        if (typeof second === "function") {
+            fn = second;
+            paramTypes = Array(fn.length).fill("any");
+            returns = "any";
+        } else if (Array.isArray(second)) {
+            paramTypes = second;
+            fn = third!;
+            returns = "any";
+        } else {
+            paramTypes = Object.values(second.params);
+            returns = second.returns ?? "any";
+            fn = second.fn;
+        }
+
+        registry.set(name, { paramTypes, returns, fn });
         invoke("register_function", {
-            name: msg.name,
-            args: msg.paramTypes,
-            fileName: (worker as any).__fileName ?? "",
+            name,
+            args: paramTypes,
+            fileName: currentLoadingFile,
         }).catch((err) =>
             console.error("[ext] register_function failed:", err),
         );
-        return;
-    }
+    },
+};
 
-    if (msg.type === "call-result" || msg.type === "call-error") {
-        const pending = pendingCalls.get(msg.callId);
-        if (!pending) return;
-        pendingCalls.delete(msg.callId);
-        if (msg.type === "call-error") {
-            pending.resolve({ e: msg.error });
-        } else {
-            pending.resolve({ v: msg.value, t: msg.returnType ?? "text" });
-        }
-        return;
-    }
+let currentLoadingFile = "";
 
-    if (msg.type === "load-error") {
-        console.error(`[ext] failed to load ${msg.fileName}:`, msg.error);
+function runCall(funcName: string, args: unknown[]): CallResult {
+    const reg = registry.get(funcName);
+    if (!reg)
+        return { value: `function '${funcName}' not found`, tag: TAG_ERROR };
+    try {
+        const coerced = args.map((a, i) =>
+            castArg(a, reg.paramTypes[i] ?? "any"),
+        );
+        const result = reg.fn(...coerced);
+        if (result instanceof Error)
+            return { value: result.message, tag: TAG_ERROR };
+        const tag =
+            reg.returns === "any" ? detectReturnType(result) : reg.returns;
+        return {
+            value: String(result),
+            tag:
+                tag === "number"
+                    ? TAG_NUMBER
+                    : tag === "boolean"
+                      ? TAG_BOOL
+                      : TAG_TEXT,
+        };
+    } catch (err) {
+        return { value: String(err), tag: TAG_ERROR };
     }
 }
 
-export function loadExtension(fileName: string, code: string): Worker {
-    const worker = new Worker(new URL("./worker-sandbox.ts", import.meta.url), {
-        type: "module",
-    });
-    (worker as any).__fileName = fileName;
-    worker.onmessage = (e) => handleWorkerMessage(worker, e);
-    worker.postMessage({ type: "load", fileName, code });
-    return worker;
+// --- extension loading ---
+
+const loadedFiles = new Set<string>();
+
+export function loadExtension(fileName: string, code: string) {
+    currentLoadingFile = fileName;
+    loadedFiles.add(fileName);
+    try {
+        const indirectEval = eval;
+        indirectEval(code);
+    } catch (err) {
+        console.error(`[ext] failed to load ${fileName}:`, err);
+    }
+    currentLoadingFile = "";
 }
 
 export function unloadExtension(fileName: string): void {
-    for (const [name, worker] of funcToWorker.entries()) {
-        if ((worker as any).__fileName === fileName) {
-            funcToWorker.delete(name);
-        }
+    for (const [name, _entry] of registry.entries()) {
+        // no per-entry fileName tracking needed — unregister_functions_by_file
+        // on the Rust side handles cleanup by fileName
     }
+    loadedFiles.delete(fileName);
 }
+
+// --- poll loop ---
 
 export function initExtensionDispatcher(): void {
-    // listen for batched calls from the Rust IPC thread
-    listen<ExtFnCall[]>("ext-fn-call-batch", (event) => {
-        for (const call of event.payload) {
-            dispatchCall(call.callId, call.funcName, call.args);
-        }
-    });
-}
+    (globalThis as any).tonic = tonic;
 
-async function dispatchCall(
-    callId: number,
-    funcName: string,
-    args: ExternArg[],
-): Promise<void> {
-    try {
-        const worker = funcToWorker.get(funcName);
-        if (!worker) {
-            emit("ext-fn-response", {
-                callId,
-                e: `function '${funcName}' not found`,
-            });
-            return;
-        }
+    let responseBody: Uint8Array = EMPTY_BODY;
 
-        const resolved = await resolveArgs(args);
-
-        const resp = await new Promise<ExtFnResponse>((resolve) => {
-            pendingCalls.set(callId, { resolve });
-            worker.postMessage({
-                type: "call",
-                callId,
-                funcName,
-                args: resolved,
-            });
-        });
-
-        // respond on unified event name with callId in payload
-        emit("ext-fn-response", { callId, ...resp });
-    } catch (err) {
-        emit("ext-fn-response", { callId, e: String(err) });
+    function pollLoop() {
+        const body = responseBody;
+        responseBody = EMPTY_BODY;
+        invoke<ArrayBuffer>("ext_fn_poll", body).then(
+            (buf) => {
+                if (buf.byteLength === 0) {
+                    setTimeout(pollLoop, 16);
+                    return;
+                }
+                const bytes = new Uint8Array(buf);
+                const view = new DataView(buf);
+                const o = { v: 0 };
+                const results: CallResult[] = [];
+                while (o.v < bytes.byteLength) {
+                    const funcName = readString(view, bytes, o);
+                    const argCount = readU32(view, o);
+                    const args: unknown[] = [];
+                    for (let i = 0; i < argCount; i++)
+                        args.push(decodeArg(view, bytes, o));
+                    results.push(runCall(funcName, args));
+                }
+                responseBody = encodeResponses(results);
+                pollLoop();
+            },
+            () => setTimeout(pollLoop, 16),
+        );
     }
+
+    pollLoop();
 }
 
 export async function loadAllExtensions(): Promise<void> {

@@ -22,14 +22,16 @@ use std::collections::BTreeMap;
 
 use crate::engine::{ChangeBounds, Engine};
 use crate::parser::shift_formula_refs;
-use crate::storage::grid::{Cell, CellValue, GridCellId};
+use crate::storage::grid::{CellValue, GridCellId};
 use crate::storage::types::{
-    AbsoluteCellId, AtomType, ExternalFunction, Projection, ProjectionFilterOption, Reference,
-    ScriptFile, Sheets, Spreadsheet, Table,
+    AbsoluteCellId, AtomType, ExternalFunction, Projection, ProjectionFilterOption, ScriptFile,
+    Sheets, Spreadsheet, Table,
 };
 
+mod call_extern_functions;
 mod engine;
 mod file_api;
+mod ipc_encoding;
 mod parser;
 pub(crate) mod storage {
     pub(crate) mod dependency_graph;
@@ -161,43 +163,6 @@ fn emit_table_projection_events<R: tauri::Runtime>(
     }
     if let Some(hidden) = hidden_rows {
         let _ = app.emit("update-table-hidden-rows", (table_id, hidden));
-    }
-}
-
-/// Encode a single cell into the binary buffer.
-/// Format: [row: u32 LE][col: u32 LE][flags: u8][display_len: u32 LE][display_bytes]
-///   if error flag set: [error_msg_len: u32 LE][error_msg_bytes]
-/// Flags: bit 0 = formula, bit 2 = error
-fn encode_cell(buf: &mut Vec<u8>, row: u32, col: u32, cell: Option<&Cell>) {
-    buf.extend_from_slice(&row.to_le_bytes());
-    buf.extend_from_slice(&col.to_le_bytes());
-    match cell {
-        Some(cell) => {
-            let mut flags = 0u8;
-            if cell.defined_by_formula.is_some() {
-                flags |= 1;
-            }
-            let error_msg = if let CellValue::Error(msg, _) = &cell.val {
-                flags |= 4;
-                Some(msg.as_str())
-            } else {
-                None
-            };
-            buf.push(flags);
-            let display = cell.val.to_string();
-            let display_bytes = display.as_bytes();
-            buf.extend_from_slice(&(display_bytes.len() as u32).to_le_bytes());
-            buf.extend_from_slice(display_bytes);
-            if let Some(msg) = error_msg {
-                let msg_bytes = msg.as_bytes();
-                buf.extend_from_slice(&(msg_bytes.len() as u32).to_le_bytes());
-                buf.extend_from_slice(msg_bytes);
-            }
-        }
-        None => {
-            buf.push(0);
-            buf.extend_from_slice(&0u32.to_le_bytes());
-        }
     }
 }
 
@@ -344,7 +309,7 @@ fn get_cells_in_viewport(
                     col,
                 };
                 let cell = spreadsheet.get_projected_cell(&id);
-                encode_cell(&mut vp.current_buf, row, col, cell.as_ref());
+                ipc_encoding::encode_viewport_cell(&mut vp.current_buf, row, col, cell.as_ref());
             }
         }
 
@@ -373,7 +338,7 @@ fn get_cells_in_viewport(
                 let grid_id = GridCellId { row, col };
                 match grid.try_get_cell(&grid_id) {
                     None => return tauri::ipc::Response::new(Vec::new()),
-                    Some(None) => encode_cell(&mut buf, row, col, None),
+                    Some(None) => ipc_encoding::encode_viewport_cell(&mut buf, row, col, None),
                     Some(Some(cell)) => {
                         let pending = cell.pending_dependencies.load(Ordering::Relaxed);
                         if pending > 0 {
@@ -387,9 +352,9 @@ fn get_cells_in_viewport(
                             buf.extend_from_slice(bytes);
                         } else if matches!(&cell.val, CellValue::Error(s, _) if s.is_empty()) {
                             // placeholder error from mutation phase, encode as empty
-                            encode_cell(&mut buf, row, col, None);
+                            ipc_encoding::encode_viewport_cell(&mut buf, row, col, None);
                         } else {
-                            encode_cell(&mut buf, row, col, Some(&cell));
+                            ipc_encoding::encode_viewport_cell(&mut buf, row, col, Some(&cell));
                         }
                     }
                 }
@@ -768,7 +733,6 @@ async fn remove_row<R: tauri::Runtime>(
 }
 
 fn setup<R: tauri::Runtime>(app: &mut tauri::App<R>) -> Result<(), Box<dyn Error + 'static>> {
-    engine::set_app_handle(app.handle().clone());
     let tonic_state = TonicState::new();
     let sheets_handle = SheetsHandle(Mutex::new(tonic_state.engine.spreadsheet.sheets.clone()));
     app.manage(RwLock::new(tonic_state));
@@ -1005,52 +969,6 @@ fn get_script_content(state: tauri::State<'_, RwLock<TonicState>>, name: String)
         .iter()
         .find(|s| s.name == name)
         .map(|s| s.content.clone())
-}
-
-// resolve a reference to its value(s), returns raw bytes for efficiency
-// single ref -> cell value string, range ref -> JSON 2D array
-// reads sheets directly via SheetsHandle so it works during eval
-#[tauri::command(async)]
-fn resolve_reference(
-    sheets_handle: tauri::State<'_, SheetsHandle>,
-    reference: Reference,
-) -> tauri::ipc::Response {
-    let origin = AbsoluteCellId {
-        sheet_id: 0,
-        row: 0,
-        col: 0,
-    };
-    let range = reference.to_cell_range(&origin);
-    let sheets_arc = sheets_handle.get();
-    let sheets = sheets_arc.read();
-    let sheet = &sheets[range.sheet_id as usize];
-
-    if range.is_single() {
-        let id = GridCellId {
-            row: range.start_row,
-            col: range.start_col,
-        };
-        let val = sheet
-            .get_value(&id)
-            .map(|v| v.to_string())
-            .unwrap_or_default();
-        return tauri::ipc::Response::new(val.into_bytes());
-    }
-
-    let rows: Vec<Vec<String>> = (range.start_row..=range.end_row)
-        .map(|r| {
-            (range.start_col..=range.end_col)
-                .map(|c| {
-                    sheet
-                        .get_value(&GridCellId { row: r, col: c })
-                        .map(|v| v.to_string())
-                        .unwrap_or_default()
-                })
-                .collect()
-        })
-        .collect();
-    let json = serde_json::to_vec(&rows).unwrap_or_default();
-    tauri::ipc::Response::new(json)
 }
 
 #[tauri::command]
@@ -1527,7 +1445,7 @@ fn build_app_inner<R: tauri::Runtime>(
             get_filter_options_for_table_column,
             apply_table_projection,
             disable_table_projection,
-            resolve_reference,
+            crate::call_extern_functions::ext_fn_poll,
             register_function,
             unregister_functions_by_file,
             add_script,

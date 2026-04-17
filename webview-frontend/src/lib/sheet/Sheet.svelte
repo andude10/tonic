@@ -815,10 +815,7 @@
     }
 
     function commitEdit() {
-        if (!focusedCell) return;
-        const cell = getCell(focusedCell);
-        if (!cell) return;
-        if (editorInput == cell.computedValue) return;
+        if (!focusedCell || !isEditing) return;
         invoke("enter_input", {
             cellId: focusedCell,
             userInput: editorInput,

@@ -345,7 +345,6 @@
 
     .side-panel-popup > :global(*) {
         pointer-events: auto;
-        box-shadow: -4px 0 16px rgba(0, 0, 0, 0.18);
     }
 
     /* Button styles for side panels (previously provided by SideArea) */
@@ -746,7 +745,7 @@
         --wx-border-light: 1px solid #dfdfe0;
         --wx-border-medium: 1px solid #b8b9bc;
         /* #e2e3e5 = clearly grey gutter for row nums / col headers */
-        --wx-table-header-background: #e2e3e5;
+        --wx-table-header-background: #dddfe2;
         --wx-table-select-background: #d0d8e8;
         --wx-table-cell-border: 1px solid #c4c5c8;
         /* Direct values — avoids variable chain resolution issues on WebKitGTK */

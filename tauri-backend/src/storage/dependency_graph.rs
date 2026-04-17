@@ -183,6 +183,10 @@ impl DependencyGraph {
         Self::default()
     }
 
+    pub fn graph_size(&self) -> (usize, usize) {
+        (self.graph.node_count(), self.graph.edge_count())
+    }
+
     pub fn clear(&mut self) {
         self.graph = StableDiGraph::new();
         self.vertex_index = RTree::new();
@@ -197,6 +201,27 @@ impl DependencyGraph {
         for dependency_range in dependency_ranges {
             self.insert_dependency_range(dependency_range, dependant_range);
         }
+    }
+
+    /// Replace a formula cell's dependencies. Skips the remove+insert if deps are unchanged,
+    /// avoiding edge fragmentation when only the formula body changed.
+    pub fn update_formula_cell(
+        &mut self,
+        formula_cell: AbsoluteCellId,
+        old_ast: &[Expr],
+        new_ast: &[Expr],
+    ) {
+        let mut old_deps = dependency_ranges_from_ast(old_ast, &formula_cell);
+        let mut new_deps = dependency_ranges_from_ast(new_ast, &formula_cell);
+        old_deps.sort_unstable();
+        old_deps.dedup();
+        new_deps.sort_unstable();
+        new_deps.dedup();
+        if old_deps == new_deps {
+            return;
+        }
+        self.remove_formula_cell(formula_cell);
+        self.insert_formula_cell(formula_cell, new_ast);
     }
 
     // remove a formula cell from the dependency graph (paper Sec. IV-C, removeDep)
@@ -651,7 +676,7 @@ impl DependencyGraph {
     }
 
     // find edges adjacent to the new dependant that might be extendable.
-    // checks ±1 in row and column directions for overlapping dependant vertices.
+    // checks +-1 in row and column directions for overlapping dependant vertices.
     fn find_candidate_edge_indexes(&self, dependant_range: CellRange) -> Vec<EdgeIndex> {
         let mut candidate_edge_indexes = Vec::new();
 
@@ -805,7 +830,10 @@ impl DependencyGraph {
 
 // --- free functions: AST helpers ---
 
-fn dependency_ranges_from_ast(ast: &[Expr], source_cell: &AbsoluteCellId) -> Vec<CellRange> {
+pub(crate) fn dependency_ranges_from_ast(
+    ast: &[Expr],
+    source_cell: &AbsoluteCellId,
+) -> Vec<CellRange> {
     let mut dependency_ranges = Vec::new();
 
     for expr in ast {

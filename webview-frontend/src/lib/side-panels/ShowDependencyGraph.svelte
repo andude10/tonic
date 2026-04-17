@@ -50,22 +50,6 @@
 </script>
 
 <div class="panel">
-    <button class="panel-close" title="Close" onclick={onclose}>
-        <svg
-            viewBox="0 0 12 12"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-        >
-            <line x1="2" y1="2" x2="10" y2="10" /><line
-                x1="10"
-                y1="2"
-                x2="2"
-                y2="10"
-            />
-        </svg>
-    </button>
     <div class="header">
         <div>
             <h2>Dependency graph</h2>
@@ -74,6 +58,22 @@
 
         <div class="actions">
             <button type="button" onclick={loadDependencyGraph}>Refresh</button>
+            <button class="panel-close" title="Close" onclick={onclose}>
+                <svg
+                    viewBox="0 0 12 12"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                >
+                    <line x1="2" y1="2" x2="10" y2="10" /><line
+                        x1="10"
+                        y1="2"
+                        x2="2"
+                        y2="10"
+                    />
+                </svg>
+            </button>
         </div>
     </div>
 
@@ -101,30 +101,28 @@
         height: 100%;
         box-sizing: border-box;
         padding: 16px;
-        padding-top: 36px;
         display: flex;
         flex-direction: column;
         gap: 12px;
         background: var(--wx-background);
         color: var(--wx-color-font);
         border-left: var(--wx-border-medium);
+        border-top: var(--wx-border-medium);
     }
 
     .panel-close {
-        position: absolute;
-        top: 8px;
-        right: 8px;
-        width: 22px;
-        height: 22px;
         display: flex;
         align-items: center;
         justify-content: center;
+        width: 22px;
+        height: 22px;
         background: none;
         border: none;
         cursor: pointer;
         border-radius: 2px;
         color: var(--tonic-text-dim);
         padding: 0;
+        flex-shrink: 0;
         transition:
             color 100ms ease,
             background 100ms ease;
@@ -145,10 +143,8 @@
         align-items: flex-start;
         justify-content: space-between;
         gap: 14px;
-        padding: 12px 14px;
-        border: var(--wx-border-medium);
-        border-radius: 2px;
-        background: var(--wx-background-alt);
+        padding: 0 0 12px;
+        border-bottom: var(--wx-border-light);
     }
 
     .header h2 {
