@@ -1,4 +1,5 @@
 <script lang="ts">
+    import type { Snippet } from "svelte";
     import { type IApi } from "@svar-ui/svelte-grid";
     import {
         columnIndexToLetter,
@@ -25,6 +26,8 @@
     import { showError } from "$lib/notice";
     import { getContext } from "svelte";
     import Render from "./Render.svelte";
+
+    let { sidebar }: { sidebar?: Snippet } = $props();
 
     const helpers = getContext<{ showNotice: (msg: any) => void }>(
         "wx-helpers",
@@ -1728,49 +1731,59 @@
 
 <SheetFormulaPanel />
 
-<div
-    class="grid-wrapper"
-    onmousemove={handleMouseMove}
-    onmouseup={handleMouseUp}
-    onmousedown={handleMouseDown}
-    onkeydowncapture={handleKeyDown}
-    onkeyupcapture={handleKeyUp}
-    tabindex="-1"
-    role="grid"
->
-    <ContextMenu
-        options={contextMenuOptions}
-        onclick={handleContextMenuClick}
-        at="point"
-        resolver={contextMenuResolver}
+<div class="grid-row">
+    <div
+        class="grid-wrapper"
+        onmousemove={handleMouseMove}
+        onmouseup={handleMouseUp}
+        onmousedown={handleMouseDown}
+        onkeydowncapture={handleKeyDown}
+        onkeyupcapture={handleKeyUp}
+        tabindex="-1"
+        role="grid"
     >
-        <Render
-            bind:this={render}
-            {isFilling}
-            {fillOriginalBounds}
-            {clonedFormulaBounds}
-            {parsedFormulaReferencesHighlights}
-            {activeRefIndex}
-            {selections}
-            {activeSelectionBounds}
-            activeFocusHasBorder={showFocusBorder}
-            activeFocusHasBackground={showFocusBackground}
-            {focusedCellBounds}
-            {isSelecting}
-            bind:rowCount
-            bind:columnCount
-            onfillstart={handleFillStart}
-            oninit={handleGridInit}
-        />
-    </ContextMenu>
+        <ContextMenu
+            options={contextMenuOptions}
+            onclick={handleContextMenuClick}
+            at="point"
+            resolver={contextMenuResolver}
+        >
+            <Render
+                bind:this={render}
+                {isFilling}
+                {fillOriginalBounds}
+                {clonedFormulaBounds}
+                {parsedFormulaReferencesHighlights}
+                {activeRefIndex}
+                {selections}
+                {activeSelectionBounds}
+                activeFocusHasBorder={showFocusBorder}
+                activeFocusHasBackground={showFocusBackground}
+                {focusedCellBounds}
+                {isSelecting}
+                bind:rowCount
+                bind:columnCount
+                onfillstart={handleFillStart}
+                oninit={handleGridInit}
+            />
+        </ContextMenu>
+    </div>
+    {#if sidebar}
+        {@render sidebar()}
+    {/if}
 </div>
 
 <style>
+    .grid-row {
+        flex: 1 1 auto;
+        min-height: 0;
+        display: flex;
+    }
+
     .grid-wrapper {
         flex: 1 1 auto;
         min-height: 0;
         min-width: 0;
-        margin-top: 0;
         position: relative;
         overflow: hidden;
         outline: none;

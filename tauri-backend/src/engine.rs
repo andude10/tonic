@@ -1536,9 +1536,9 @@ fn parallel_sum_count(
 
 fn resolve_extern_arg(atom: &ExprAtom, source_cell: &AbsoluteCellId, sheets: &Sheets) -> ExtFnArg {
     match atom {
-        ExprAtom::Number(n) => ExtFnArg::Value(CellValue::Number(*n)),
-        ExprAtom::Text(s) => ExtFnArg::Value(CellValue::Text(s.as_str().into())),
-        ExprAtom::Bool(b) => ExtFnArg::Value(CellValue::Bool(*b)),
+        ExprAtom::Number(_) | ExprAtom::Text(_) | ExprAtom::Bool(_) => {
+            ExtFnArg::Value(atom.clone().into())
+        }
         ExprAtom::Reference(r) => {
             let range = r.to_cell_range(source_cell);
             let sheet = &sheets[range.sheet_id as usize];
@@ -1723,8 +1723,6 @@ async fn eval_formula(
                     )));
                 }
 
-                // pre-resolve refs here (worker holds the sheets lock anyway),
-                // so JS doesn't need a resolve_references round-trip per batch.
                 let js_args: Vec<ExtFnArg> = {
                     let sheets = sp.sheets.read();
                     args.iter()
@@ -1734,15 +1732,11 @@ async fn eval_formula(
                         .collect()
                 };
 
-                let cell_value = crate::call_extern_functions::call(&func.name, js_args).await?;
-                match cell_value {
-                    CellValue::Number(n) => ExprAtom::Number(n),
-                    CellValue::Text(s) => ExprAtom::Text(s.to_string()),
-                    CellValue::Bool(b) => ExprAtom::Bool(b),
-                    CellValue::Error(s, _) => {
-                        return Err(EvalError::Error(s.to_string()));
-                    }
+                let cell_value = call_extern_functions::call(&func.name, js_args).await?;
+                if let CellValue::Error(s, _) = &cell_value {
+                    return Err(EvalError::Error(s.to_string()));
                 }
+                ExprAtom::from(cell_value)
             }
         };
         eval_store.push(res);

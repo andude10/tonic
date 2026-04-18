@@ -18,7 +18,7 @@
     import { open, save } from "@tauri-apps/plugin-dialog";
     import { listen } from "@tauri-apps/api/event";
     import { onMount } from "svelte";
-    import { fly } from "svelte/transition";
+
     import {
         initExtensionDispatcher,
         loadAllExtensions,
@@ -302,23 +302,27 @@
                     ></MenuBar>
                 </WindowBar>
 
-                <Sheet bind:this={sheet} />
-                {#if activePanel}
-                    <div
-                        class="side-panel-popup"
-                        transition:fly={{ x: 400, duration: 200 }}
-                    >
-                        {#if activePanel === "graph"}
-                            <ShowDependencyGraph
-                                onclose={() => (activePanel = null)}
-                            />
-                        {:else if activePanel === "extensions"}
-                            <Extensions onclose={() => (activePanel = null)} />
-                        {:else if activePanel === "shortcuts"}
-                            <Shortcuts onclose={() => (activePanel = null)} />
+                <Sheet bind:this={sheet}>
+                    {#snippet sidebar()}
+                        {#if activePanel}
+                            <div class="side-panel-popup">
+                                {#if activePanel === "graph"}
+                                    <ShowDependencyGraph
+                                        onclose={() => (activePanel = null)}
+                                    />
+                                {:else if activePanel === "extensions"}
+                                    <Extensions
+                                        onclose={() => (activePanel = null)}
+                                    />
+                                {:else if activePanel === "shortcuts"}
+                                    <Shortcuts
+                                        onclose={() => (activePanel = null)}
+                                    />
+                                {/if}
+                            </div>
                         {/if}
-                    </div>
-                {/if}
+                    {/snippet}
+                </Sheet>
                 {#if dialogOpen}<div class="dialog-overlay"></div>{/if}
                 {#if isLoading}<div class="dialog-overlay">
                         <div class="loading-text"></div>
@@ -331,20 +335,10 @@
 </div>
 
 <style>
-    /* Side panel popup — floats over the grid, anchored to bottom-right */
     .side-panel-popup {
-        position: absolute;
-        top: 32px;
-        right: 0;
-        bottom: 28px;
-        z-index: 10;
         display: flex;
         align-items: stretch;
-        pointer-events: none;
-    }
-
-    .side-panel-popup > :global(*) {
-        pointer-events: auto;
+        flex-shrink: 0;
     }
 
     /* Button styles for side panels (previously provided by SideArea) */

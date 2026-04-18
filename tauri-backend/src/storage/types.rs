@@ -354,6 +354,29 @@ pub enum ExprAtom {
     Reference(Reference),
 }
 
+impl From<CellValue> for ExprAtom {
+    fn from(val: CellValue) -> Self {
+        match val {
+            CellValue::Number(n) => ExprAtom::Number(n),
+            CellValue::Text(s) => ExprAtom::Text(s.to_string()),
+            CellValue::Bool(b) => ExprAtom::Bool(b),
+            CellValue::Error(s, _) => ExprAtom::InvalidReferenceError(s.to_string()),
+        }
+    }
+}
+
+impl From<ExprAtom> for CellValue {
+    fn from(atom: ExprAtom) -> Self {
+        match atom {
+            ExprAtom::Number(n) => CellValue::Number(n),
+            ExprAtom::Text(s) => CellValue::Text(s.into()),
+            ExprAtom::Bool(b) => CellValue::Bool(b),
+            ExprAtom::InvalidReferenceError(s) => CellValue::err(s),
+            ExprAtom::Function(_) | ExprAtom::Reference(_) => CellValue::err("#VALUE!"),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum AtomType {
     Bool,

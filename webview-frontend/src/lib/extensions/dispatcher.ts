@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { showError } from "$lib/notice";
 
 const textDecoder = new TextDecoder();
 const textEncoder = new TextEncoder();
@@ -158,9 +159,7 @@ const tonic = {
             name,
             args: paramTypes,
             fileName: currentLoadingFile,
-        }).catch((err) =>
-            console.error("[ext] register_function failed:", err),
-        );
+        }).catch((err) => showError(String(err)));
     },
 };
 
@@ -210,10 +209,6 @@ export function loadExtension(fileName: string, code: string) {
 }
 
 export function unloadExtension(fileName: string): void {
-    for (const [name, _entry] of registry.entries()) {
-        // no per-entry fileName tracking needed — unregister_functions_by_file
-        // on the Rust side handles cleanup by fileName
-    }
     loadedFiles.delete(fileName);
 }
 
