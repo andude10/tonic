@@ -100,7 +100,7 @@ pub enum ExtFnArg {
     },
 }
 
-/// Encode a batch of ext function calls into binary.
+/// Encode a batch of ext function calls.
 /// Format per call: [func_name_len: u32][func_name][arg_count: u32][args...]
 pub fn encode_ext_fn_calls(buf: &mut Vec<u8>, calls: &[(String, Vec<ExtFnArg>)]) {
     for (func_name, args) in calls {
@@ -122,5 +122,89 @@ pub fn encode_ext_fn_calls(buf: &mut Vec<u8>, calls: &[(String, Vec<ExtFnArg>)])
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal::Decimal;
+
+    fn roundtrip(val: &CellValue) -> CellValue {
+        let mut buf = Vec::new();
+        encode_cell_value(&mut buf, val);
+        let mut offset = 0;
+        decode_cell_value(&buf, &mut offset)
+    }
+
+    #[test]
+    fn roundtrip_number() {
+        let val = CellValue::Number(Decimal::new(314, 2));
+        assert_eq!(roundtrip(&val), val);
+    }
+
+    #[test]
+    fn roundtrip_text() {
+        let val = CellValue::Text("hello".into());
+        assert_eq!(roundtrip(&val), val);
+    }
+
+    #[test]
+    fn roundtrip_bool() {
+        assert_eq!(roundtrip(&CellValue::Bool(true)), CellValue::Bool(true));
+        assert_eq!(roundtrip(&CellValue::Bool(false)), CellValue::Bool(false));
+    }
+
+    #[test]
+    fn roundtrip_error() {
+        let val = CellValue::err("bad");
+        let decoded = roundtrip(&val);
+        assert!(matches!(decoded, CellValue::Error(s, _) if s.as_str() == "bad"));
+    }
+
+    #[test]
+    fn decode_empty_tag() {
+        let mut buf = Vec::new();
+        encode_empty(&mut buf);
+        let mut offset = 0;
+        let val = decode_cell_value(&buf, &mut offset);
+        assert_eq!(val, CellValue::Text("".into()));
+    }
+
+    #[test]
+    fn multiple_values_in_sequence() {
+        let mut buf = Vec::new();
+        let vals = [
+            CellValue::Number(Decimal::from(1)),
+            CellValue::Text("x".into()),
+            CellValue::Bool(true),
+        ];
+        for v in &vals {
+            encode_cell_value(&mut buf, v);
+        }
+        let mut offset = 0;
+        for expected in &vals {
+            assert_eq!(&decode_cell_value(&buf, &mut offset), expected);
+        }
+    }
+
+    #[test]
+    fn encode_ext_fn_calls_structure() {
+        let calls = vec![(
+            "double".to_string(),
+            vec![ExtFnArg::Value(CellValue::Number(Decimal::from(42)))],
+        )];
+        let mut buf = Vec::new();
+        encode_ext_fn_calls(&mut buf, &calls);
+        let mut o = 0;
+        let name_len = u32::from_le_bytes(buf[o..o + 4].try_into().unwrap()) as usize;
+        o += 4;
+        assert_eq!(&buf[o..o + name_len], b"double");
+        o += name_len;
+        let arg_count = u32::from_le_bytes(buf[o..o + 4].try_into().unwrap());
+        o += 4;
+        assert_eq!(arg_count, 1);
+        let decoded = decode_cell_value(&buf, &mut o);
+        assert_eq!(decoded, CellValue::Number(Decimal::from(42)));
     }
 }

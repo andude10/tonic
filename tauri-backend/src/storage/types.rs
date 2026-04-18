@@ -624,3 +624,109 @@ impl Spreadsheet {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn r(sr: u32, sc: u32, er: u32, ec: u32) -> CellRange {
+        CellRange::new(0, sr, sc, er, ec)
+    }
+
+    #[test]
+    fn is_single() {
+        assert!(r(1, 1, 1, 1).is_single());
+        assert!(!r(1, 1, 1, 2).is_single());
+    }
+
+    #[test]
+    fn is_line() {
+        assert!(r(1, 1, 1, 5).is_line());
+        assert!(r(1, 1, 5, 1).is_line());
+        assert!(!r(1, 1, 2, 2).is_line());
+        assert!(r(3, 3, 3, 3).is_line()); // single cell is a line
+    }
+
+    #[test]
+    fn intersection_overlap() {
+        let a = r(0, 0, 5, 5);
+        let b = r(3, 3, 8, 8);
+        assert_eq!(a.intersection(&b), Some(r(3, 3, 5, 5)));
+    }
+
+    #[test]
+    fn intersection_disjoint() {
+        assert_eq!(r(0, 0, 1, 1).intersection(&r(3, 3, 4, 4)), None);
+    }
+
+    #[test]
+    fn contains() {
+        let outer = r(0, 0, 10, 10);
+        assert!(outer.contains(&r(2, 2, 5, 5)));
+        assert!(!outer.contains(&r(2, 2, 15, 5)));
+    }
+
+    #[test]
+    fn subtract_full() {
+        let a = r(1, 1, 3, 3);
+        assert!(a.subtract(&a).is_empty());
+    }
+
+    #[test]
+    fn subtract_no_overlap() {
+        let a = r(0, 0, 2, 2);
+        let b = r(5, 5, 6, 6);
+        assert_eq!(a.subtract(&b), vec![a]);
+    }
+
+    #[test]
+    fn subtract_partial() {
+        let a = r(0, 0, 3, 3);
+        let b = r(0, 0, 1, 3); // top two rows
+        let remaining = a.subtract(&b);
+        assert!(!remaining.is_empty());
+        // remaining should cover rows 2-3
+        assert!(remaining.iter().all(|r| r.start_row >= 2));
+    }
+
+    #[test]
+    fn bounding_union() {
+        let a = r(1, 1, 3, 3);
+        let b = r(5, 5, 7, 7);
+        let u = a.bounding_union(&b);
+        assert_eq!(u, r(1, 1, 7, 7));
+    }
+
+    #[test]
+    fn shifted() {
+        let a = r(2, 3, 4, 5);
+        assert_eq!(a.shifted(1, -1), Some(r(3, 2, 5, 4)));
+        assert_eq!(r(0, 0, 0, 0).shifted(-1, 0), None); // underflow
+    }
+
+    #[test]
+    fn for_each_cell_count() {
+        let a = r(0, 0, 2, 2);
+        let mut count = 0;
+        a.for_each_cell(|_| count += 1);
+        assert_eq!(count, 9); // 3x3
+    }
+
+    #[test]
+    fn expratom_cellvalue_roundtrip() {
+        let cases = [
+            CellValue::Number(rust_decimal::Decimal::from(42)),
+            CellValue::Text("hi".into()),
+            CellValue::Bool(true),
+            CellValue::err("oops"),
+        ];
+        for val in &cases {
+            let atom = ExprAtom::from(val.clone());
+            let back = CellValue::from(atom);
+            match (val, &back) {
+                (CellValue::Error(a, _), CellValue::Error(b, _)) => assert_eq!(a, b),
+                _ => assert_eq!(val, &back),
+            }
+        }
+    }
+}

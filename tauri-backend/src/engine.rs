@@ -501,6 +501,16 @@ impl Engine {
         info!("Eval (updating tables) took: {:?}", table_time.elapsed());
     }
 
+    /// Trigger eval on current batch without logging to undo history.
+    /// Used by benchmarks to measure post_cell_changes_hook in isolation.
+    #[doc(hidden)]
+    pub fn eval_batch_for_bench(&mut self) {
+        let changes = std::mem::take(&mut self.batch);
+        if !changes.is_empty() {
+            self.post_cell_changes_hook(changes);
+        }
+    }
+
     /// Finalize the batch: push to undo log, truncate redo history.
     pub fn end_batch(&mut self, _: EngineGuard) {
         if self.batch.is_empty() {

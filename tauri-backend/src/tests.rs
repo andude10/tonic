@@ -625,3 +625,113 @@ fn undo_redo_replays_structural_and_value_changes_with_correct_recalculation() {
     assert_eq!(after_redo_delete[&(2, 0)].display, "");
     assert_eq!(after_redo_delete[&(0, 1)].display, "1");
 }
+
+#[test]
+fn fuzz_test() {
+    use rand::Rng;
+
+    let app = TestHarness::new();
+    let grid_size = 20u32;
+    let mut rng = rand::rng();
+    macro_rules! rc {
+        () => {
+            (
+                rng.random_range(0..grid_size),
+                rng.random_range(0..grid_size),
+            )
+        };
+    }
+
+    let formulas = [
+        "=A1",
+        "=A1+B1",
+        "=sum(A1:C3)",
+        "=A1*2+1",
+        "=if(A1>0,A1,-A1)",
+        "=B2",
+        "=sum(A1:A20)",
+        "=A1+A2+A3",
+        "=0",
+        "=1/0",
+    ];
+    let values = ["0", "1", "-1", "999999", "hello", "", "3.14", "true", "=A1"];
+
+    for _ in 0..500 {
+        match rng.random_range(0..10u32) {
+            0..=2 => {
+                let (r, c) = rc!();
+                app.paste(&[(r, c, values[rng.random_range(0..values.len())])]);
+            }
+            3..=4 => {
+                let (r, c) = rc!();
+                let _ = app.invoke_response(
+                    "enter_input",
+                    json!({ "cellId": cell(r, c), "userInput": formulas[rng.random_range(0..formulas.len())] }),
+                    HeaderMap::new(),
+                );
+            }
+            5 => {
+                let cells: Vec<_> = (0..rng.random_range(1..6u32)).map(|_| rc!()).collect();
+                app.delete(&cells);
+            }
+            6 => {
+                let (sr, sc) = rc!();
+                let dests: Vec<_> = (0..rng.random_range(1..6u32)).map(|_| rc!()).collect();
+                app.fill_from_single_source(sr, sc, &dests);
+            }
+            7 => {
+                let _ = app.invoke_response("undo_input", json!({}), HeaderMap::new());
+            }
+            8 => {
+                let _ = app.invoke_response("redo_input", json!({}), HeaderMap::new());
+            }
+            9 => {
+                let _ = app.viewport_map(0, grid_size - 1, 0, grid_size - 1);
+            }
+            _ => {}
+        }
+    }
+
+    let view = app.viewport_map(0, grid_size - 1, 0, grid_size - 1);
+    assert!(!view.is_empty());
+
+    for _ in 0..10 {
+        let pos = rng.random_range(0..grid_size);
+        let _ = app.invoke_response(
+            "insert_row",
+            json!({ "position": pos, "sheetId": 0 }),
+            HeaderMap::new(),
+        );
+        let _ = app.invoke_response(
+            "insert_column",
+            json!({ "position": pos, "sheetId": 0 }),
+            HeaderMap::new(),
+        );
+    }
+    for _ in 0..5 {
+        let pos = rng.random_range(0..grid_size);
+        let _ = app.invoke_response(
+            "remove_row",
+            json!({ "position": pos, "sheetId": 0 }),
+            HeaderMap::new(),
+        );
+        let _ = app.invoke_response(
+            "remove_column",
+            json!({ "position": pos, "sheetId": 0 }),
+            HeaderMap::new(),
+        );
+    }
+
+    let final_view = app.viewport_map(0, grid_size - 1, 0, grid_size - 1);
+    assert!(!final_view.is_empty());
+
+    for _ in 0..50 {
+        let _ = app.invoke_response("undo_input", json!({}), HeaderMap::new());
+    }
+    for _ in 0..50 {
+        let _ = app.invoke_response("redo_input", json!({}), HeaderMap::new());
+    }
+
+    let after_undo_redo = app.viewport_map(0, grid_size - 1, 0, grid_size - 1);
+    assert!(!after_undo_redo.is_empty());
+}

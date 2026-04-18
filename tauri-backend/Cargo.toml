@@ -46,6 +46,13 @@ ariadne = { version = "0.6.0", default-features = false }
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
+rand = "0.9"
+criterion = { version = "0.5", features = ["html_reports"] }
+stats_alloc = "0.1"
+
+[[bench]]
+name = "eval"
+harness = false
 
 # Optimize dependencies even in dev builds — huge speedup for
 # serde, flate2, chumsky etc. while keeping tonic_lib itself debuggable.

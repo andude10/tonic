@@ -29,16 +29,16 @@ use crate::storage::types::{
 };
 
 mod call_extern_functions;
-mod engine;
+pub mod engine;
 mod file_api;
 mod ipc_encoding;
 mod parser;
-pub(crate) mod storage {
-    pub(crate) mod dependency_graph;
-    pub(crate) mod grid;
-    pub(crate) mod name_resolution;
-    pub(crate) mod stable_vec;
-    pub(crate) mod types;
+pub mod storage {
+    pub mod dependency_graph;
+    pub mod grid;
+    pub mod name_resolution;
+    pub mod stable_vec;
+    pub mod types;
 }
 
 /// Frontend cell ID (0-indexed row/col, no sheet). Converted to AbsoluteCellId with sheet_id=0.

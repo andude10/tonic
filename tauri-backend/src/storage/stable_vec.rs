@@ -55,3 +55,36 @@ impl<T> DerefMut for StableVec<T> {
         &mut self.entries
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insert_and_get() {
+        let mut v = StableVec::new();
+        let i = v.insert("a");
+        assert_eq!(v.get(i), Some(&"a"));
+    }
+
+    #[test]
+    fn reuses_freed_slot() {
+        let mut v = StableVec::new();
+        let a = v.insert("a");
+        let b = v.insert("b");
+        v.entries[a as usize] = None;
+        v.free.push(a);
+        let c = v.insert("c");
+        assert_eq!(c, a);
+        assert_eq!(v.get(c), Some(&"c"));
+        assert_eq!(v.get(b), Some(&"b"));
+    }
+
+    #[test]
+    fn get_mut_modifies_in_place() {
+        let mut v = StableVec::new();
+        let i = v.insert(1);
+        *v.get_mut(i).unwrap() = 42;
+        assert_eq!(v.get(i), Some(&42));
+    }
+}
