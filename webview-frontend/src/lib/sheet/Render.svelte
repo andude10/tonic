@@ -613,6 +613,7 @@
         {sizes}
         {select}
         {cellStyle}
+        filterValues={{}}
     />
     {#if showAddRows}
         <div class="add-bar add-rows-bar">

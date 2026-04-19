@@ -12,8 +12,8 @@
         $props();
 
     const shared = getSheetSharedState();
-    const [row, col] = cellKey.split(",").map(Number);
-    const colLetter = columnIndexToLetter(col);
+    let [row, col] = $derived(cellKey.split(",").map(Number));
+    let colLetter = $derived(columnIndexToLetter(col));
 
     let isFocused = $derived(
         shared.focusedCell?.row === row && shared.focusedCell?.col === col,

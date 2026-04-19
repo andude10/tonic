@@ -423,7 +423,7 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
                                 st.names.user_function_names.get(name).ok_or_else(|| {
                                     Rich::custom(span, format!("unresolved function '{name}'"))
                                 })?;
-                            Expr::ExtrnalFunctionCall {
+                            Expr::ExternalFunctionCall {
                                 func_id: *func_id,
                                 args,
                             }

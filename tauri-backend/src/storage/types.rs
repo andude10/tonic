@@ -420,7 +420,7 @@ pub enum Expr {
     Count(ExprId, ExprId),
     If(ExprId, ExprId, ExprId),
 
-    ExtrnalFunctionCall {
+    ExternalFunctionCall {
         func_id: UserFuncId,
         args: Vec<ExprId>,
     },

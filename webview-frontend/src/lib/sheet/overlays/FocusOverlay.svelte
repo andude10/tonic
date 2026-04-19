@@ -57,8 +57,12 @@
 
     // hide corner handle when it would visually overlap with right or bottom handle
     // (happens when the cell is too small — less than ~30px in either dimension)
-    let totalWidth = $derived(rect ? rect.width + extraWidth : 0);
-    let totalHeight = $derived(rect ? rect.height + extraHeight : 0);
+    let totalWidth = $derived(
+        rect ? (rect as PixelRect).width + extraWidth : 0,
+    );
+    let totalHeight = $derived(
+        rect ? (rect as PixelRect).height + extraHeight : 0,
+    );
     let showCornerHandle = $derived(totalWidth > 30 && totalHeight > 30);
 
     // multi-cell drag: include selected cells in the same column/row as the focused cell.
@@ -69,7 +73,10 @@
         const fc = shared.focusedCell;
         if (!fc) return;
         const cellKey = `${fc.row},${fc.col}`;
-        const entry = shared.expandedCells.get(cellKey) ?? { extraWidth: 0, extraHeight: 0 };
+        const entry = shared.expandedCells.get(cellKey) ?? {
+            extraWidth: 0,
+            extraHeight: 0,
+        };
         const startX = ev.clientX;
         const startY = ev.clientY;
         const startExtraW = entry.extraWidth;
@@ -78,12 +85,20 @@
         // collect all cells affected by this drag (multi-cell selection support)
         const affectedKeys = [cellKey];
         for (const sel of shared.selections) {
-            if ((edge === "right" || edge === "both") && fc.col >= sel.minC && fc.col <= sel.maxC)
+            if (
+                (edge === "right" || edge === "both") &&
+                fc.col >= sel.minC &&
+                fc.col <= sel.maxC
+            )
                 for (let r = sel.minR; r <= sel.maxR; r++) {
                     const k = `${r},${fc.col}`;
                     if (!affectedKeys.includes(k)) affectedKeys.push(k);
                 }
-            if ((edge === "bottom" || edge === "both") && fc.row >= sel.minR && fc.row <= sel.maxR)
+            if (
+                (edge === "bottom" || edge === "both") &&
+                fc.row >= sel.minR &&
+                fc.row <= sel.maxR
+            )
                 for (let c = sel.minC; c <= sel.maxC; c++) {
                     const k = `${fc.row},${c}`;
                     if (!affectedKeys.includes(k)) affectedKeys.push(k);
@@ -98,8 +113,14 @@
             for (const key of affectedKeys) {
                 const cur = next.get(key) ?? { extraWidth: 0, extraHeight: 0 };
                 next.set(key, {
-                    extraWidth: edge === "bottom" ? cur.extraWidth : Math.max(0, startExtraW + dx),
-                    extraHeight: edge === "right" ? cur.extraHeight : Math.max(0, startExtraH + dy),
+                    extraWidth:
+                        edge === "bottom"
+                            ? cur.extraWidth
+                            : Math.max(0, startExtraW + dx),
+                    extraHeight:
+                        edge === "right"
+                            ? cur.extraHeight
+                            : Math.max(0, startExtraH + dy),
                 });
             }
             shared.expandedCells = next;

@@ -1,11 +1,6 @@
-import type { CellId } from "../shared";
+import type { CellId, CellRange } from "../shared";
 
-export type CellRange = {
-    minR: number;
-    maxR: number;
-    minC: number;
-    maxC: number;
-};
+export type { CellRange };
 
 export type PixelRect = {
     left: number;

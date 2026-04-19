@@ -31,7 +31,7 @@
     } = $props();
 
     const shared = getSheetSharedState();
-    const colIndex = columnLetterToIndex(column.id);
+    let colIndex = $derived(columnLetterToIndex(column.id));
 
     let focusedThisCell = $derived(
         shared.focusedCell?.row === (row.id as number) - 1 &&
@@ -39,7 +39,7 @@
     );
 
     // Hide cell content when an ExpandedCellOverlay renders this cell
-    const expandKey = `${(row.id as number) - 1},${colIndex}`;
+    let expandKey = $derived(`${(row.id as number) - 1},${colIndex}`);
     let hasExpandOverlay = $derived(
         shared.expandedCells.has(expandKey) ||
             (shared.expandModeActive && focusedThisCell),

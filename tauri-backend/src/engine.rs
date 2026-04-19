@@ -1719,7 +1719,7 @@ async fn eval_formula(
                     eval_store[*else_id as usize].clone()
                 }
             }
-            Expr::ExtrnalFunctionCall { func_id, args } => {
+            Expr::ExternalFunctionCall { func_id, args } => {
                 let Some(func) = external_functions.get(*func_id) else {
                     return Err(EvalError::Error(format!("unknown function id {}", func_id)));
                 };
