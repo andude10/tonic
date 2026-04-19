@@ -112,76 +112,8 @@
 
 <style>
     .panel {
-        position: relative;
         width: min(40vw, 500px);
         min-width: 340px;
-        height: 100%;
-        box-sizing: border-box;
-        padding: 16px;
-        display: flex;
-        flex-direction: column;
-        gap: 12px;
-        background: var(--wx-background);
-        color: var(--wx-color-font);
-        border-left: var(--wx-border-medium);
-        border-top: var(--wx-border-medium);
-    }
-
-    .panel-close {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        width: 22px;
-        height: 22px;
-        background: none;
-        border: none;
-        cursor: pointer;
-        border-radius: 2px;
-        color: var(--tonic-text-dim);
-        padding: 0;
-        flex-shrink: 0;
-        transition:
-            color 100ms ease,
-            background 100ms ease;
-    }
-
-    .panel-close:hover {
-        color: var(--wx-color-font);
-        background: var(--tonic-btn-hover-bg);
-    }
-
-    .panel-close svg {
-        width: 10px;
-        height: 10px;
-    }
-
-    .header {
-        display: flex;
-        align-items: flex-start;
-        justify-content: space-between;
-        gap: 14px;
-        padding: 0 0 12px;
-        border-bottom: var(--wx-border-light);
-    }
-
-    .header h2 {
-        margin: 0;
-        font-size: 13px;
-        font-family: "JetBrains Mono", monospace;
-        color: var(--wx-color-font);
-        letter-spacing: 0.03em;
-    }
-
-    .header p {
-        margin: 3px 0 0;
-        opacity: 0.4;
-        font-size: 11px;
-    }
-
-    .actions {
-        display: flex;
-        gap: 8px;
-        flex-shrink: 0;
     }
 
     .script-list {

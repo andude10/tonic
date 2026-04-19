@@ -177,8 +177,8 @@
         border-radius: 1px;
         pointer-events: none;
         /* important to have both border and outline of this size, otherwise cell's border is going to be visible */
-        border: 1px solid var(--tonic-table-header-cell-bg);
-        outline: 1px solid var(--tonic-table-header-cell-bg);
+        border: 1px solid var(--tonic-table-header-cell-border-color);
+        outline: 1px solid var(--tonic-table-header-cell-border-color);
         box-shadow:
             0 0 0 0 transparent,
             0 0 0 transparent,
@@ -217,7 +217,7 @@
 
     .table-title {
         position: absolute;
-        color: var(--tonic-table-header-cell-color);
+        color: var(--wx-color-font);
         font-family: "JetBrains Mono", monospace;
         font-size: 11px;
         font-weight: 600;
@@ -288,7 +288,7 @@
 
     .hidden-rows-overlay {
         position: absolute;
-        background: var(--tonic-highlight-bg);
+        background: var(--tonic-table-header-cell-bg);
         pointer-events: none;
         display: flex;
         align-items: flex-start;

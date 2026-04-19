@@ -5,6 +5,7 @@
         columnIndexToLetter,
         columnLetterToIndex,
         parseSvarID,
+        REF_COLORS,
         setSheetSharedState,
         type CellData,
         type CellId,
@@ -467,15 +468,6 @@
         return false;
     }
     let _lastKeyUpTime = 0;
-
-    const REF_COLORS = [
-        "#4184BF",
-        "#F27405",
-        "#08A64D",
-        "#F2A516",
-        "#4B93BF",
-        "#d3869b",
-    ];
 
     type FormulaReferenceHighlight = {
         bounds: { minR: number; maxR: number; minC: number; maxC: number };
@@ -1572,7 +1564,7 @@
             if (ev.key === "Enter") {
                 ev.preventDefault();
 
-                if (!isEditing) {
+                if (!isEditing && !expandModeActive) {
                     isEditing = true;
                     moveFocusToInlineEditor(focusedCell);
                     return;
@@ -1600,7 +1592,7 @@
             }
 
             // on any text input or backspace, enter edit mode
-            if (!isEditing) {
+            if (!isEditing && !expandModeActive) {
                 if (ev.key === "Backspace") {
                     editorInput = editorInput.slice(0, -1);
                     isEditing = true;

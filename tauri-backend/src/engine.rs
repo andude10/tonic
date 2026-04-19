@@ -1294,7 +1294,6 @@ impl Engine {
         for sheet in self.spreadsheet.sheets.write().iter_mut() {
             sheet.refresh_bounds();
         }
-
         let dependency_graph_time = Instant::now();
         self.spreadsheet_mut().rebuild_dependency_graph();
         info!(

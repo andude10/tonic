@@ -13,8 +13,8 @@
         "windows": [
             {
                 "title": "tonic",
-                "width": 1600,
-                "height": 1400,
+                "width": 1200,
+                "height": 800,
                 "decorations": false,
                 "backgroundColor": "#2a2b2d",
                 "visible": false

@@ -341,7 +341,72 @@
         flex-shrink: 0;
     }
 
-    /* Button styles for side panels (previously provided by SideArea) */
+    /* shared side panel styles */
+    :global(.side-panel-popup .panel) {
+        position: relative;
+        height: 100%;
+        box-sizing: border-box;
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        background: var(--wx-background);
+        color: var(--wx-color-font);
+    }
+
+    :global(.side-panel-popup .panel-close) {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 22px;
+        height: 22px;
+        background: none;
+        border: none;
+        cursor: pointer;
+        border-radius: 2px;
+        color: var(--tonic-text-dim);
+        padding: 0;
+        flex-shrink: 0;
+        transition:
+            color 100ms ease,
+            background 100ms ease;
+    }
+    :global(.side-panel-popup .panel-close:hover) {
+        color: var(--wx-color-font);
+        background: var(--tonic-btn-hover-bg);
+    }
+    :global(.side-panel-popup .panel-close svg) {
+        width: 10px;
+        height: 10px;
+    }
+
+    :global(.side-panel-popup .header) {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 14px;
+        padding: 0 0 12px;
+        border-bottom: var(--wx-border-light);
+    }
+    :global(.side-panel-popup .header h2) {
+        margin: 0;
+        font-size: 13px;
+        font-family: "JetBrains Mono", monospace;
+        color: var(--wx-color-font);
+        letter-spacing: 0.03em;
+    }
+    :global(.side-panel-popup .header p) {
+        margin: 3px 0 0;
+        opacity: 0.4;
+        font-size: 11px;
+    }
+
+    :global(.side-panel-popup .actions) {
+        display: flex;
+        gap: 8px;
+        flex-shrink: 0;
+    }
+
     :global(.side-panel-popup button:not(.panel-close)) {
         border: var(--wx-border);
         background: var(--wx-button-background);
@@ -356,7 +421,6 @@
             background 120ms ease,
             border-color 120ms ease;
     }
-
     :global(.side-panel-popup button:not(.panel-close):hover) {
         background: var(--tonic-btn-hover-bg);
     }

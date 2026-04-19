@@ -38,7 +38,8 @@
 <style>
     .clone-source-overlay {
         position: absolute;
-        border: 1px dashed rgba(65, 132, 191, 0.55);
+        border: 2px dashed rgba(65, 132, 191, 0.7);
+        background: rgba(65, 132, 191, 0.06);
         border-radius: 1px;
         will-change: transform, width, height;
         pointer-events: none;

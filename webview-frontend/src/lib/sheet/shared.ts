@@ -1,5 +1,13 @@
 import { createContext } from "svelte";
 
+export const REF_COLORS = [
+    "#d98c5f",
+    "#6aab7b",
+    "#c4a24d",
+    "#9a7ec8",
+    "#5ba8a8",
+];
+
 /** User-facing cell ID: letter column, 1-indexed row. Only at SVAR grid boundary. */
 export type UICell = { row: number; column: string };
 /** Internal cell ID: 0-indexed row and col. */

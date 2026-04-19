@@ -6,6 +6,7 @@
         getSheetSharedState,
         isCellData,
         parseSvarID,
+        REF_COLORS,
         type CellData,
         type CellId,
         type SheetRow,
@@ -27,15 +28,6 @@
     import RefOverlay from "./overlays/RefOverlay.svelte";
     import TableOverlay from "./overlays/TableOverlay.svelte";
     import ExpandedCellOverlay from "./overlays/ExpandedCellOverlay.svelte";
-
-    const REF_COLORS = [
-        "#4184BF",
-        "#F27405",
-        "#08A64D",
-        "#F2A516",
-        "#4B93BF",
-        "#d3869b",
-    ];
 
     type FormulaReferenceHighlight = {
         bounds: { minR: number; maxR: number; minC: number; maxC: number };

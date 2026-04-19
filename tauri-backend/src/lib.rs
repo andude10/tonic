@@ -870,15 +870,22 @@ async fn register_function(
         .collect::<Result<_, _>>()?;
 
     let sp = state.engine.spreadsheet_mut();
-    if sp.names.user_function_names.contains_key(&name) {
-        return Err(format!("function '{}' already registered", name));
-    }
 
-    let func_id = sp.external_functions.insert(ExternalFunction {
-        name: name.clone(),
-        args: arg_types,
-        file_name,
-    });
+    // if the function already exists (e.g. loaded from file), update in place to
+    // preserve the func_id baked into formula ASTs. otherwise insert new.
+    let func_id = if let Some(&existing_id) = sp.names.user_function_names.get(&name) {
+        if let Some(entry) = sp.external_functions.get_mut(existing_id) {
+            entry.args = arg_types;
+            entry.file_name = file_name;
+        }
+        existing_id
+    } else {
+        sp.external_functions.insert(ExternalFunction {
+            name: name.clone(),
+            args: arg_types,
+            file_name,
+        })
+    };
     sp.names.user_function_names.insert(name.clone(), func_id);
     sp.names.user_function_names_lookup.insert(func_id, name);
     Ok(())
