@@ -4,9 +4,9 @@
     "version": "0.1.0",
     "identifier": "com.andude.tonic",
     "build": {
-        "beforeDevCommand": "pnpm dev",
+        "beforeDevCommand": "pnpm --dir ../webview-frontend dev",
         "devUrl": "http://localhost:1420",
-        "beforeBuildCommand": "pnpm build",
+        "beforeBuildCommand": "pnpm --dir ../webview-frontend build",
         "frontendDist": "../webview-frontend/build"
     },
     "app": {
