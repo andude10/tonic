@@ -712,6 +712,13 @@
         height: 100%;
     }
 
+    .render-wrapper :global(.wx-scroll),
+    .render-wrapper :global(.wx-body),
+    .render-wrapper :global(.wx-data),
+    .render-wrapper :global(.wx-row) {
+        overflow-anchor: none;
+    }
+
     .add-bar {
         position: absolute;
         z-index: 6;
