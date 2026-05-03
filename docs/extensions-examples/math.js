@@ -15,7 +15,7 @@ tonic.registerFunction("clamp", {
     fn: (value, min, max) => Math.min(Math.max(value, min), max),
 });
 
-// shorthand: just name + function, types inferred at runtime
+// shorthand: just name + function
 tonic.registerFunction("hypot", (a, b) => Math.sqrt(a * a + b * b));
 
 // returning an Error makes it a cell error

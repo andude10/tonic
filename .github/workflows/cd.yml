@@ -60,4 +60,4 @@ jobs:
                   tagName: ${{ github.ref_name }}
                   releaseName: "Tonic ${{ github.ref_name }}"
                   releaseDraft: true
-                  args: ${{ matrix.args }} -c tauri.ci.conf.json
+                  args: ${{ matrix.args }} --config '{"build":{"beforeBuildCommand":null}}'
