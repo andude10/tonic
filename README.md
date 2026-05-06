@@ -1,6 +1,6 @@
 ## Tonic
 
-![Showcase](./docs\screenshots\simple-showcase.png)
+![Showcase](./docs/screenshots/simple-showcase.png)
 
 Tonic is an experimental desktop spreadsheet for Windows, Linux, and macOS. It aims to implement new, fun features that usually do not exist in classic spreadsheets, for example:
 
