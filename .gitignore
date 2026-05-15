@@ -11,3 +11,5 @@ webview-frontend/vite.config.js.timestamp-*
 
 tauri-backend/target/
 tauri-backend/gen/schemas
+
+gpui
