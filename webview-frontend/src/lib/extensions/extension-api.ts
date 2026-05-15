@@ -1,5 +1,3 @@
-// web worker sandbox for running extension scripts
-//
 // extension API:
 //   tonic.registerFunction("double", (x) => x * 2)
 //   tonic.registerFunction("add", ["number", "number"], (a, b) => a + b)

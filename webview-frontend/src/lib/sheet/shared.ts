@@ -35,6 +35,12 @@ export type CellRange = {
 
 export type FilterOption = { id: number; val: string; selected: boolean };
 
+export type InvalidateFrotnendPayload = {
+    viewport?: true;
+    file_name?: string | null;
+    file_path?: string | null;
+};
+
 export type TableData = {
     id: number;
     headerBounds: CellRange;

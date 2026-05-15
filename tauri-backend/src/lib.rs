@@ -4,8 +4,8 @@
 // run concurrently. Read commands use try_read() and return empty if a mutation
 // is in progress. Mutating commands are serialized via the "writing" AtomicBool flag.
 //
-// Frontend polls for cells that are in the current viewport (cells currently
-// visible on screen) each 20ms or so (via get_cells_in_viewport command).
+// Frontend requests display cell chunks and refreshes them when backend emits
+// invalidate-frontend events.
 
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -58,15 +58,8 @@ impl CellId {
     }
 }
 
-struct ViewportState {
-    current_buf: Vec<u8>,
-    last_viewport_buf: Vec<u8>,
-    last_viewport_range: (u32, u32, u32, u32),
-}
-
 struct TonicState {
     engine: Engine,
-    viewport: Mutex<ViewportState>,
 
     // flag: only one mutating command can run at a time.
     // checked via compare_exchange before acquiring write lock.
@@ -80,11 +73,6 @@ impl TonicState {
     fn new() -> Self {
         Self {
             engine: Engine::new(),
-            viewport: Mutex::new(ViewportState {
-                current_buf: Vec::new(),
-                last_viewport_buf: Vec::new(),
-                last_viewport_range: (u32::MAX, u32::MAX, u32::MAX, u32::MAX),
-            }),
             writing: AtomicBool::new(false),
             file_name: None,
             file_path: None,
@@ -147,6 +135,40 @@ fn begin_mutation(state: &RwLock<TonicState>) -> Result<MutationGuard<'_>, Strin
 
 fn emit_save_status<R: tauri::Runtime>(app: &AppHandle<R>, state: &TonicState) {
     let _ = app.emit("save-status", state.engine.is_saved());
+}
+
+#[derive(Clone, Default, Serialize)]
+struct InvalidateFrotnendPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    viewport: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_name: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_path: Option<Option<String>>,
+}
+
+impl InvalidateFrotnendPayload {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn viewport(mut self) -> Self {
+        self.viewport = Some(true);
+        self
+    }
+
+    fn file_name(mut self, state: &TonicState) -> Self {
+        self.file_name = Some(state.file_name.clone());
+        self.file_path = Some(state.file_path.clone());
+        self
+    }
+}
+
+fn emit_invalidate_frontend_event<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    payload: InvalidateFrotnendPayload,
+) {
+    let _ = app.emit("invalidate-frontend", payload);
 }
 
 fn emit_table_projection_events<R: tauri::Runtime>(
@@ -224,7 +246,8 @@ fn get_name_for_cell(
 }
 
 #[tauri::command]
-async fn rename_cell(
+async fn rename_cell<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: tauri::State<'_, RwLock<TonicState>>,
     cell_id: CellId,
     name: String,
@@ -236,7 +259,9 @@ async fn rename_cell(
         .spreadsheet_mut()
         .names
         .create_cell_name(&name, &abs_id)
-        .ok_or_else(|| format!("Name '{}' is not available", name))
+        .ok_or_else(|| format!("Name '{}' is not available", name))?;
+    emit_invalidate_frontend_event(&app, InvalidateFrotnendPayload::new().viewport());
+    Ok(())
 }
 
 #[tauri::command(async)]
@@ -260,22 +285,7 @@ fn get_editor_value_for_cells(
 }
 
 #[tauri::command(async)]
-fn init_viewport(state: tauri::State<'_, RwLock<TonicState>>) {
-    let Some(state) = state.try_read() else {
-        return;
-    };
-    let mut vp = state.viewport.lock();
-    vp.last_viewport_buf.clear();
-    vp.last_viewport_range = (u32::MAX, u32::MAX, u32::MAX, u32::MAX);
-}
-
-#[tauri::command(async)]
-fn is_writing(state: tauri::State<'_, RwLock<TonicState>>) -> bool {
-    state.try_read().is_none()
-}
-
-#[tauri::command(async)]
-fn get_cells_in_viewport(
+fn get_display_cells(
     state: tauri::State<'_, RwLock<TonicState>>,
     sheets_handle: tauri::State<'_, SheetsHandle>,
     request: tauri::ipc::Request<'_>,
@@ -298,9 +308,7 @@ fn get_cells_in_viewport(
 
     if let Some(state) = state.try_read() {
         let spreadsheet = &state.engine.spreadsheet;
-        let mut vp = state.viewport.lock();
-
-        vp.current_buf.clear();
+        let mut buf = Vec::new();
         for row in row_start..=row_end {
             for col in col_start..=col_end {
                 let id = AbsoluteCellId {
@@ -309,20 +317,10 @@ fn get_cells_in_viewport(
                     col,
                 };
                 let cell = spreadsheet.get_projected_cell(&id);
-                ipc_encoding::encode_viewport_cell(&mut vp.current_buf, row, col, cell.as_ref());
+                ipc_encoding::encode_viewport_cell(&mut buf, row, col, cell.as_ref());
             }
         }
-
-        let range = (row_start, row_end, col_start, col_end);
-        let viewport_changed = range != vp.last_viewport_range;
-        vp.last_viewport_range = range;
-
-        if !viewport_changed && vp.current_buf == vp.last_viewport_buf {
-            return tauri::ipc::Response::new(Vec::new());
-        }
-        let vp = &mut *vp;
-        std::mem::swap(&mut vp.current_buf, &mut vp.last_viewport_buf);
-        tauri::ipc::Response::new(vp.last_viewport_buf.clone())
+        tauri::ipc::Response::new(buf)
     } else {
         // writing in progress: read cells directly from grid, show pending status
         let sheets_arc = sheets_handle.get();
@@ -382,6 +380,7 @@ async fn enter_input<R: tauri::Runtime>(
         .parse_and_insert_string(&t, cell_id.to_absolute(), user_input);
     state.engine.end_batch(t);
     emit_save_status(&app, &state);
+    emit_invalidate_frontend_event(&app, InvalidateFrotnendPayload::new().viewport());
     Ok(())
 }
 
@@ -400,6 +399,7 @@ async fn delete_cells<R: tauri::Runtime>(
     state.engine.end_batch(t);
     debug!("Delete took: {:?}", timer.elapsed());
     emit_save_status(&app, &state);
+    emit_invalidate_frontend_event(&app, InvalidateFrotnendPayload::new().viewport());
     Ok(())
 }
 
@@ -564,6 +564,7 @@ async fn fill_cells<R: tauri::Runtime>(
     state.engine.end_batch(t);
     debug!("fill_cells took: {:?}", timer.elapsed());
     emit_save_status(&app, &state);
+    emit_invalidate_frontend_event(&app, InvalidateFrotnendPayload::new().viewport());
     Ok(())
 }
 
@@ -588,6 +589,7 @@ async fn paste_values<R: tauri::Runtime>(
     state.engine.end_batch(t);
     debug!("Paste took: {:?}", timer.elapsed());
     emit_save_status(&app, &state);
+    emit_invalidate_frontend_event(&app, InvalidateFrotnendPayload::new().viewport());
     Ok(())
 }
 
@@ -601,6 +603,7 @@ async fn undo_input<R: tauri::Runtime>(
     let bounds = state.engine.undo();
     debug!("Undo took: {:?}", timer.elapsed());
     emit_save_status(&app, &state);
+    emit_invalidate_frontend_event(&app, InvalidateFrotnendPayload::new().viewport());
     Ok(bounds)
 }
 
@@ -614,6 +617,7 @@ async fn redo_input<R: tauri::Runtime>(
     let bounds = state.engine.redo();
     debug!("Redo took: {:?}", timer.elapsed());
     emit_save_status(&app, &state);
+    emit_invalidate_frontend_event(&app, InvalidateFrotnendPayload::new().viewport());
     Ok(bounds)
 }
 
@@ -677,6 +681,7 @@ async fn insert_column<R: tauri::Runtime>(
 
     debug!("insert_column took: {:?}", timer.elapsed());
     emit_save_status(&app, &state);
+    emit_invalidate_frontend_event(&app, InvalidateFrotnendPayload::new().viewport());
     Ok(())
 }
 
@@ -695,6 +700,7 @@ async fn insert_row<R: tauri::Runtime>(
 
     debug!("insert_row took: {:?}", timer.elapsed());
     emit_save_status(&app, &state);
+    emit_invalidate_frontend_event(&app, InvalidateFrotnendPayload::new().viewport());
     Ok(())
 }
 
@@ -712,6 +718,7 @@ async fn remove_column<R: tauri::Runtime>(
 
     debug!("remove_column took: {:?}", timer.elapsed());
     emit_save_status(&app, &state);
+    emit_invalidate_frontend_event(&app, InvalidateFrotnendPayload::new().viewport());
     Ok(())
 }
 
@@ -729,6 +736,7 @@ async fn remove_row<R: tauri::Runtime>(
 
     debug!("remove_row took: {:?}", timer.elapsed());
     emit_save_status(&app, &state);
+    emit_invalidate_frontend_event(&app, InvalidateFrotnendPayload::new().viewport());
     Ok(())
 }
 
@@ -765,6 +773,7 @@ async fn save_file<R: tauri::Runtime>(
     }
     update_file_info(&mut state, &path);
     emit_save_status(&app, &state);
+    emit_invalidate_frontend_event(&app, InvalidateFrotnendPayload::new().file_name(&state));
     Ok(())
 }
 
@@ -777,6 +786,7 @@ async fn rename_current_file<R: tauri::Runtime>(
     let mut state = begin_mutation(state.inner())?;
     let Some(old_path) = state.file_path.clone() else {
         state.file_name = Some(new_name.to_string());
+        emit_invalidate_frontend_event(&app, InvalidateFrotnendPayload::new().file_name(&state));
         return Ok(());
     };
     let old = std::path::Path::new(&old_path);
@@ -791,6 +801,7 @@ async fn rename_current_file<R: tauri::Runtime>(
     })?;
     update_file_info(&mut state, &new_path_str);
     emit_save_status(&app, &state);
+    emit_invalidate_frontend_event(&app, InvalidateFrotnendPayload::new().file_name(&state));
     Ok(())
 }
 
@@ -807,13 +818,14 @@ async fn open_file<R: tauri::Runtime>(
         e.to_string()
     })?;
     sheets_handle.update(&state.engine.spreadsheet.sheets);
-    {
-        let mut vp = state.viewport.lock();
-        vp.last_viewport_buf.clear();
-        vp.last_viewport_range = (u32::MAX, u32::MAX, u32::MAX, u32::MAX);
-    }
     update_file_info(&mut state, path);
     emit_save_status(&app, &state);
+    emit_invalidate_frontend_event(
+        &app,
+        InvalidateFrotnendPayload::new()
+            .viewport()
+            .file_name(&state),
+    );
     Ok(decorations)
 }
 
@@ -829,6 +841,12 @@ async fn new_file<R: tauri::Runtime>(
     state.engine.create_empty_spreadsheet();
     sheets_handle.update(&state.engine.spreadsheet.sheets);
     emit_save_status(&app, &state);
+    emit_invalidate_frontend_event(
+        &app,
+        InvalidateFrotnendPayload::new()
+            .viewport()
+            .file_name(&state),
+    );
     Ok(())
 }
 
@@ -1137,6 +1155,7 @@ async fn toggle_table_sort<R: tauri::Runtime>(
         .get(proj_id)
         .map_or(false, |p| p.active);
     emit_table_projection_events(&app, table_id, was_active, is_active, None);
+    emit_invalidate_frontend_event(&app, InvalidateFrotnendPayload::new().viewport());
 
     debug!("toggle_table_sort took: {:?}", timer.elapsed());
     Ok(())
@@ -1171,6 +1190,7 @@ async fn toggle_table_filter<R: tauri::Runtime>(
         .get(proj_id)
         .map_or(false, |p| p.active);
     emit_table_projection_events(&app, table_id, was_active, is_active, Some(hidden));
+    emit_invalidate_frontend_event(&app, InvalidateFrotnendPayload::new().viewport());
 
     debug!("toggle_table_filter took: {:?}", timer.elapsed());
     Ok(())
@@ -1204,6 +1224,7 @@ async fn select_all_table_filters<R: tauri::Runtime>(
         .get(proj_id)
         .map_or(false, |p| p.active);
     emit_table_projection_events(&app, table_id, was_active, is_active, Some(hidden));
+    emit_invalidate_frontend_event(&app, InvalidateFrotnendPayload::new().viewport());
 
     debug!("select_all_table_filters took: {:?}", timer.elapsed());
     Ok(())
@@ -1237,6 +1258,7 @@ async fn clear_all_table_filters<R: tauri::Runtime>(
         .get(proj_id)
         .map_or(false, |p| p.active);
     emit_table_projection_events(&app, table_id, was_active, is_active, Some(hidden));
+    emit_invalidate_frontend_event(&app, InvalidateFrotnendPayload::new().viewport());
 
     debug!("clear_all_table_filters took: {:?}", timer.elapsed());
     Ok(())
@@ -1321,6 +1343,7 @@ async fn apply_table_projection<R: tauri::Runtime>(
 
     let _ = app.emit("disable-table-projection", table_id);
     emit_save_status(&app, &state);
+    emit_invalidate_frontend_event(&app, InvalidateFrotnendPayload::new().viewport());
     Ok(())
 }
 
@@ -1342,6 +1365,7 @@ async fn disable_table_projection<R: tauri::Runtime>(
 
     let _ = app.emit("disable-table-projection", table_id);
     let _ = app.emit("update-table-hidden-rows", (table_id, 0u32));
+    emit_invalidate_frontend_event(&app, InvalidateFrotnendPayload::new().viewport());
     Ok(())
 }
 
@@ -1420,8 +1444,6 @@ fn build_app_inner<R: tauri::Runtime>(
         .plugin(tauri_plugin_dialog::init())
         .setup(setup)
         .invoke_handler(tauri::generate_handler![
-            is_writing,
-            init_viewport,
             enter_input,
             fill_cells,
             delete_cells,
@@ -1430,7 +1452,7 @@ fn build_app_inner<R: tauri::Runtime>(
             insert_row,
             remove_column,
             remove_row,
-            get_cells_in_viewport,
+            get_display_cells,
             get_editor_value_for_cell,
             get_editor_value_for_cells,
             get_name_for_cell,

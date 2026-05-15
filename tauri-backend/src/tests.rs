@@ -147,8 +147,6 @@ impl TestHarness {
         col_start: u32,
         col_end: u32,
     ) -> BTreeMap<(u32, u32), ViewCell> {
-        self.invoke_unit("init_viewport", json!({}));
-
         let mut headers = HeaderMap::new();
         headers.insert(
             "row-start",
@@ -161,7 +159,7 @@ impl TestHarness {
         );
         headers.insert("col-end", col_end.to_string().parse().expect("col-end"));
 
-        let bytes = self.invoke_raw_ok("get_cells_in_viewport", json!({}), headers);
+        let bytes = self.invoke_raw_ok("get_display_cells", json!({}), headers);
         decode_viewport(bytes)
             .into_iter()
             .map(|cell| ((cell.row, cell.col), cell))

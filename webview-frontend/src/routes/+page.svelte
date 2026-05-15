@@ -4,6 +4,7 @@
     import { MenuBar, type IMenuOption } from "@svar-ui/svelte-menu";
     import WindowBar from "$lib/WindowBar.svelte";
     import Sheet from "$lib/sheet/Sheet.svelte";
+    import type { InvalidateFrotnendPayload } from "$lib/sheet/shared";
     import BottomBar from "$lib/BottomBar.svelte";
     import ShowDependencyGraph from "$lib/side-panels/ShowDependencyGraph.svelte";
     import Extensions from "$lib/side-panels/Extensions.svelte";
@@ -85,13 +86,6 @@
         },
     ];
 
-    async function syncFileInfo() {
-        const [name, path] =
-            await invoke<[string | null, string | null]>("get_file_info");
-        currentFilePath = path;
-        fileTitle = name;
-    }
-
     async function commitSaveAs() {
         dialogOpen = true;
         const path = await save({ filters: [DIALOG_FILTER] });
@@ -101,7 +95,6 @@
         const uiDecorationsJson = sheet.saveDecorationsToJson();
         await invoke("save_file", { path, uiDecorationsJson });
         isSaving = false;
-        await syncFileInfo();
     }
 
     async function commitSave() {
@@ -113,7 +106,6 @@
                 uiDecorationsJson,
             });
             isSaving = false;
-            await syncFileInfo();
         } else {
             await commitSaveAs();
         }
@@ -170,7 +162,6 @@
         switch (id) {
             case "file-new":
                 await invoke("new_file");
-                await syncFileInfo();
                 sheet.onFileLoad();
                 break;
             case "file-open": {
@@ -187,7 +178,6 @@
                     path,
                 });
                 isLoading = false;
-                await syncFileInfo();
                 sheet.onFileLoad(decorationsJson);
                 await loadAllExtensions();
                 break;
@@ -226,8 +216,8 @@
         const finalName = newName.endsWith(".tcs") ? newName : newName + ".tcs";
         try {
             await invoke("rename_current_file", { newName: finalName });
-            await syncFileInfo();
-            el.textContent = fileTitle ?? "";
+            fileTitle = finalName;
+            el.textContent = finalName;
         } catch (e) {
             showError("Rename failed: " + e);
             el.textContent = fileTitle ?? "";
@@ -255,19 +245,26 @@
         listen<boolean>("save-status", (ev) => {
             isSaved = ev.payload;
         });
+        listen<InvalidateFrotnendPayload>("invalidate-frontend", (ev) => {
+            if (ev.payload.file_name !== undefined)
+                fileTitle = ev.payload.file_name;
+            if (ev.payload.file_path !== undefined)
+                currentFilePath = ev.payload.file_path;
+        });
 
-        // create new file if none is open
-        await syncFileInfo();
+        const [name, path] =
+            await invoke<[string | null, string | null]>("get_file_info");
+        currentFilePath = path;
+        fileTitle = name;
         if (!currentFilePath) {
             await invoke("new_file");
         }
-        await syncFileInfo();
         await loadAllExtensions();
 
         // on start-up, window flashes white screen before rendering
         // it is known webview issue: https://github.com/tauri-apps/tauri/issues/1564
         // this allows to show window once everything is loaded
-        getCurrentWindow().show();
+        await getCurrentWindow().show();
     });
 </script>
 

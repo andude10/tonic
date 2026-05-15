@@ -12,16 +12,21 @@
     // throttle fps display to 2/s — devPanel.fps updates every rAF (60/s) which
     // would re-render this component every frame unnecessarily
     let displayFps = $state(0);
+    let displayGetDisplayCellsCalls = $state(0);
     $effect(() => {
         const id = setInterval(() => {
             displayFps = devPanel.fps;
+            displayGetDisplayCellsCalls =
+                devPanel.counts.get_display_cells ?? 0;
         }, 500);
         return () => clearInterval(id);
     });
 </script>
 
 <div class="bottom-bar">
-    <span class="fps">{displayFps} fps</span>
+    <span class="fps">
+        {displayFps} fps | get_display_cells: {displayGetDisplayCellsCalls}
+    </span>
     <span class="spacer"></span>
     <button
         class="panel-btn"

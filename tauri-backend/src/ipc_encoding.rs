@@ -49,7 +49,7 @@ pub fn decode_cell_value(bytes: &[u8], offset: &mut usize) -> CellValue {
     }
 }
 
-// --- Viewport cell encoding (used by get_cells_in_viewport) ---
+// --- Viewport cell encoding (used by get_display_cells) ---
 
 /// Format: [row: u32 LE][col: u32 LE][flags: u8][display_len: u32 LE][display_bytes]
 ///   if error flag set: [error_msg_len: u32 LE][error_msg_bytes]

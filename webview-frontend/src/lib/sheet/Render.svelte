@@ -9,9 +9,12 @@
         REF_COLORS,
         type CellData,
         type CellId,
+        type InvalidateFrotnendPayload,
         type SheetRow,
     } from "$lib/sheet/shared";
     import { invoke } from "@tauri-apps/api/core";
+    import { listen } from "@tauri-apps/api/event";
+    import { endTimer, startTimer } from "$lib/stats.svelte";
     import Cell from "./Cell.svelte";
     import { onMount } from "svelte";
     import {
@@ -82,6 +85,11 @@
 
     const COL_WIDTH = 90;
     const ROW_NUMBER_WIDTH = 50;
+    const CELLS_CACHE_ROWS = 500;
+    const CELLS_CACHE_COLUMNS = 50;
+    const INITIAL_FETCH_ROW_END = 40;
+    const CELLS_CACHE_FETCH_THROTTLE_MS = 100;
+    const SCROLL_VISUAL_THROTTLE_MS = 16;
 
     const textDecoder = new TextDecoder();
     const EMPTY_BODY = new Uint8Array();
@@ -92,7 +100,7 @@
 
     // --- data model ---
     // viewportRows and viewportColumns are the only data the Grid sees.
-    // Both are replaced with fresh arrays each render tick. Old arrays are GC'd.
+    // Display rows are sliced from the cells cache below.
 
     let viewportRows: SheetRow[] = $state([]);
     let viewportColumns: IColumnConfig[] = $state(buildColumns(columnCount));
@@ -114,20 +122,21 @@
         return cols;
     }
 
-    // Build a fresh row array for the current viewport range.
-    // Each row has { id, rowNumber, A: {..}, B: {..}, ... } with empty cells.
+    // build empty rows; backend payload fills display cells
     function buildViewportRows(
         start: number,
         end: number,
-        colCount: number,
+        colStart = 0,
+        colEnd = columnCount - 1,
     ): SheetRow[] {
         const count = end - start + 1;
         const rows: SheetRow[] = new Array(count);
         for (let i = 0; i < count; i++) {
             const id = start + i + 1; // 1-indexed for SVAR Grid
-            const row: SheetRow = { id, rowNumber: id };
-            for (let c = 0; c < colCount; c++) {
-                row[columnIndexToLetter(c)] = {
+            const row = { id, rowNumber: id } as SheetRow;
+            for (let c = colStart; c <= colEnd; c++) {
+                const colId = columnIndexToLetter(c);
+                row[colId] = {
                     computedValue: "",
                     isFormula: false,
                 };
@@ -143,27 +152,30 @@
         return shared.cellStyles.get(`${row.id},${col.id}`) ?? "";
     }
 
-    // --- viewport tracking ---
+    // --- display cells ---
 
-    let viewportRowStart = 0;
-    let viewportRowEnd = 40;
     let viewportColumnStart = 0;
     let viewportColumnEnd = 25;
+    let viewportRowStart = 0;
+    let viewportRowEnd = -1;
+    let cachedRows: SheetRow[] = [];
+    let cachedRowStart = 0;
+    let cachedRowEnd = -1;
+    let cachedColumnStart = 0;
+    let cachedColumnEnd = -1;
+    let cellsFetchInterval: ReturnType<typeof setInterval> | null = null;
+    let pendingCellsFetch: { start: number; end: number } | null = null;
 
     function updateApproximateColumnViewportBounds() {
         const el = getScrollContainer();
         if (!el || !el.clientWidth) return;
         viewportColumnStart = (el.scrollLeft / COL_WIDTH) | 0;
         viewportColumnEnd = Math.min(
-            ((el.scrollLeft + el.clientWidth) / COL_WIDTH + 0.999) | 0,
+            Math.ceil((el.scrollLeft + el.clientWidth) / COL_WIDTH),
             columnCount - 1,
         );
     }
 
-    // --- decode ---
-
-    // Decode binary cell data directly into a fresh rows array.
-    // rows[0] corresponds to rowStart, rows[1] to rowStart+1, etc.
     function decodeCellsInto(
         rows: SheetRow[],
         rowStart: number,
@@ -186,6 +198,7 @@
             const displayStart = offset;
             offset += displayLen;
 
+            // payload rows are absolute; cache rows start at rowStart
             const targetRow = rows[row - rowStart];
             if (!targetRow) continue;
             const cell = targetRow[columnIndexToLetter(col)];
@@ -212,68 +225,39 @@
         }
     }
 
-    // --- render loop ---
+    function cellsCacheBounds(
+        start: number,
+        end: number,
+        size: number,
+        limit: number,
+    ) {
+        const count = Math.max(size, end - start + 1);
+        const before = ((count - (end - start + 1)) / 2) | 0;
+        let cacheStart = Math.max(0, start - before);
+        let cacheEnd = Math.min(limit - 1, cacheStart + count - 1);
+        cacheStart = Math.max(0, cacheEnd - count + 1);
+        return { start: cacheStart, end: cacheEnd };
+    }
 
-    let _scrolling = false;
+    function updateFocusedCellInfo() {
+        const cell = shared.focusedCell;
+        if (!cell) return;
 
-    function renderLoop() {
-        const rowStart = viewportRowStart;
-        const rowEnd = viewportRowEnd;
-        const colStart = viewportColumnStart;
-        const colEnd = viewportColumnEnd;
-        const colCount = columnCount;
-
-        const cellsPromise = invoke<ArrayBuffer>(
-            "get_cells_in_viewport",
-            EMPTY_BODY,
-            {
-                headers: {
-                    "row-start": String(rowStart),
-                    "row-end": String(rowEnd),
-                    "col-start": String(colStart),
-                    "col-end": String(colEnd),
-                },
-            },
-        );
-
-        const editorPromise = shared.focusedCell
-            ? invoke<ArrayBuffer>("get_editor_value_for_cell", {
-                  cellId: shared.focusedCell,
-              })
-            : null;
-        const namePromise = shared.focusedCell
-            ? invoke<ArrayBuffer>("get_name_for_cell", {
-                  cellId: shared.focusedCell,
-              })
-            : null;
-
-        invoke<boolean>("is_writing").then((w) => {
-            document.documentElement.classList.toggle("busy", w);
-        });
-
-        Promise.all([cellsPromise, editorPromise, namePromise]).then(
-            ([cellsBuf, editorBuf, nameBuf]) => {
-                // if viewport changed since we made IPC call, it means that cellsBuf is stale, and we can discard it
+        Promise.all([
+            invoke<ArrayBuffer>("get_editor_value_for_cell", {
+                cellId: cell,
+            }),
+            invoke<ArrayBuffer>("get_name_for_cell", {
+                cellId: cell,
+            }),
+        ]).then(
+            ([editorBuf, nameBuf]) => {
                 if (
-                    rowStart != viewportRowStart ||
-                    rowEnd != viewportRowEnd ||
-                    colStart != viewportColumnStart ||
-                    colEnd != viewportColumnEnd
+                    !shared.focusedCell ||
+                    shared.focusedCell.row !== cell.row ||
+                    shared.focusedCell.col !== cell.col
                 ) {
                     return;
-                }
-
-                // "cellsBuf" length is 0 when the cells in the current viewport did not change,
-                // in which case we do nothing
-                if (cellsBuf.byteLength > 0) {
-                    const rows = buildViewportRows(rowStart, rowEnd, colCount);
-                    decodeCellsInto(
-                        rows,
-                        rowStart,
-                        new Uint8Array(cellsBuf),
-                        new DataView(cellsBuf),
-                    );
-                    viewportRows = rows;
                 }
                 if (editorBuf && !shared.isEditing) {
                     shared.editorInput = textDecoder.decode(
@@ -288,18 +272,89 @@
             },
             () => {},
         );
-
-        requestAnimationFrame(renderLoop);
     }
 
-    function startRenderLoop() {
-        invoke("init_viewport").then(() => {
-            updateApproximateColumnViewportBounds();
-            requestAnimationFrame(renderLoop);
-        });
+    async function fetchCellsCache(
+        visibleRowStart: number,
+        visibleRowEnd: number,
+    ) {
+        if (rowCount <= 0 || columnCount <= 0) {
+            cachedRows = [];
+            cachedRowEnd = -1;
+            viewportRows = [];
+            return;
+        }
+        const rowBounds = cellsCacheBounds(
+            visibleRowStart,
+            visibleRowEnd,
+            CELLS_CACHE_ROWS,
+            rowCount,
+        );
+        const colBounds = cellsCacheBounds(
+            viewportColumnStart,
+            viewportColumnEnd,
+            CELLS_CACHE_COLUMNS,
+            columnCount,
+        );
+        const rowStart = rowBounds.start;
+        const rowEnd = rowBounds.end;
+        const colStart = colBounds.start;
+        const colEnd = colBounds.end;
+
+        startTimer("get_display_cells", true);
+        const cellsBuf = await invoke<ArrayBuffer>(
+            "get_display_cells",
+            EMPTY_BODY,
+            {
+                headers: {
+                    "row-start": String(rowStart),
+                    "row-end": String(rowEnd),
+                    "col-start": String(colStart),
+                    "col-end": String(colEnd),
+                },
+            },
+        ).finally(() => endTimer("get_display_cells"));
+
+        if (cellsBuf.byteLength === 0) return;
+
+        const currentStart =
+            viewportRowEnd >= viewportRowStart
+                ? viewportRowStart
+                : visibleRowStart;
+        const currentEnd =
+            viewportRowEnd >= viewportRowStart ? viewportRowEnd : visibleRowEnd;
+
+        // if user scrolled away while IPC was in flight, ignore this cells cache
+        if (
+            currentStart < rowStart ||
+            currentEnd > rowEnd ||
+            viewportColumnStart < colStart ||
+            viewportColumnEnd > colEnd
+        ) {
+            return;
+        }
+
+        const rows = buildViewportRows(rowStart, rowEnd, colStart, colEnd);
+        decodeCellsInto(
+            rows,
+            rowStart,
+            new Uint8Array(cellsBuf),
+            new DataView(cellsBuf),
+        );
+        cachedRows = rows;
+        cachedRowStart = rowStart;
+        cachedRowEnd = rowEnd;
+        cachedColumnStart = colStart;
+        cachedColumnEnd = colEnd;
+        viewportRows = cachedRows.slice(
+            currentStart - cachedRowStart,
+            currentEnd - cachedRowStart + 1,
+        );
     }
 
     // --- scroll handling & overlays ---
+
+    let scrollVisualTimer: ReturnType<typeof setTimeout> | null = null;
 
     let sos: SheetObjectsState = $state(null as any);
     let overlayRefs = $state({
@@ -430,24 +485,60 @@
         }
     }
 
+    function handleRequestData(ev: { row: { start: number; end: number } }) {
+        viewportRowStart = ev.row.start;
+        viewportRowEnd = ev.row.end;
+
+        if (
+            cachedRows.length > 0 &&
+            viewportRowStart >= cachedRowStart &&
+            viewportRowEnd <= cachedRowEnd &&
+            viewportColumnStart >= cachedColumnStart &&
+            viewportColumnEnd <= cachedColumnEnd
+        ) {
+            if (
+                !viewportRows.length ||
+                viewportRows[0].id !== viewportRowStart + 1 ||
+                viewportRows[viewportRows.length - 1].id !== viewportRowEnd + 1
+            ) {
+                // if visible cells are inside cache, just take a slice
+                viewportRows = cachedRows.slice(
+                    viewportRowStart - cachedRowStart,
+                    viewportRowEnd - cachedRowStart + 1,
+                );
+            }
+        } else {
+            fetchCellsCache(viewportRowStart, viewportRowEnd);
+        }
+    }
+
     function handleScroll(ev: Event) {
         if ((ev.target as HTMLElement).closest(".formula-input")) return;
         const scroller = ev.target as HTMLElement;
         syncScroll(sos, scroller.scrollLeft, scroller.scrollTop);
-        if (_scrolling) return;
-        _scrolling = true;
-        setTimeout(() => {
-            _scrolling = false;
+        updateApproximateColumnViewportBounds();
+
+        if (
+            viewportColumnStart < cachedColumnStart ||
+            viewportColumnEnd > cachedColumnEnd
+        ) {
+            handleRequestData({
+                row: { start: viewportRowStart, end: viewportRowEnd + 1 },
+            });
+        }
+
+        if (scrollVisualTimer) return;
+        scrollVisualTimer = setTimeout(() => {
+            scrollVisualTimer = null;
             showAddRows =
                 scroller.scrollTop + scroller.clientHeight >=
                 scroller.scrollHeight;
             showAddCols =
                 scroller.scrollLeft + scroller.clientWidth >=
                 scroller.scrollWidth;
-            updateApproximateColumnViewportBounds();
             applyHeaderHighlights();
             moveFocusBackToSpreadsheet();
-        }, 16);
+        }, SCROLL_VISUAL_THROTTLE_MS);
     }
 
     $effect(() => {
@@ -465,18 +556,17 @@
         repositionOverlays();
     });
 
-    function handleRequestData(
-        ev: { row: { start: number; end: number } } & { [key: string]: any },
-    ): void {
-        viewportRowStart = ev.row.start;
-        viewportRowEnd = ev.row.end;
-    }
+    $effect(() => {
+        shared.focusedCell;
+        updateFocusedCellInfo();
+    });
 
     // --- public API ---
 
     export function getCell(id: CellId | null): CellData | null {
         if (!id) return null;
-        const row = viewportRows[id.row - viewportRowStart];
+        if (!viewportRows.length) return null;
+        const row = viewportRows[id.row - ((viewportRows[0].id as number) - 1)];
         if (!row) return null;
         const cell = row[columnIndexToLetter(id.col)];
         if (isCellData(cell)) return cell;
@@ -536,6 +626,13 @@
 
         const el = getScrollContainer();
         if (el) el.scrollTop = 0;
+        cachedRows = [];
+        viewportRowStart = 0;
+        viewportRowEnd = -1;
+        cachedRowStart = 0;
+        cachedRowEnd = -1;
+        cachedColumnStart = 0;
+        cachedColumnEnd = -1;
 
         if (decorationsJson) {
             const dec = JSON.parse(decorationsJson);
@@ -563,7 +660,7 @@
         }
 
         updateApproximateColumnViewportBounds();
-        startRenderLoop();
+        fetchCellsCache(0, Math.min(INITIAL_FETCH_ROW_END, rowCount - 1));
     }
 
     function init(api: IApi) {
@@ -591,9 +688,27 @@
     }
 
     onMount(() => {
+        const unlistenInvalidation = listen<InvalidateFrotnendPayload>(
+            "invalidate-frontend",
+            (ev) => {
+                if (!ev.payload.viewport) return;
+                // backend changed display cells, so cells cache is stale
+                cachedRows = [];
+                updateFocusedCellInfo();
+                fetchCellsCache(
+                    viewportRowEnd >= viewportRowStart ? viewportRowStart : 0,
+                    viewportRowEnd >= viewportRowStart
+                        ? viewportRowEnd
+                        : Math.min(INITIAL_FETCH_ROW_END, rowCount - 1),
+                );
+            },
+        );
         initOverlays();
         updateApproximateColumnViewportBounds();
-        startRenderLoop();
+        fetchCellsCache(0, Math.min(INITIAL_FETCH_ROW_END, rowCount - 1));
+        return () => {
+            unlistenInvalidation.then((fn) => fn());
+        };
     });
 </script>
 
