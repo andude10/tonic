@@ -5,7 +5,7 @@
     "identifier": "com.andude.tonic",
     "build": {
         "beforeDevCommand": "pnpm --dir ../webview-frontend dev",
-        "devUrl": "http://localhost:1420",
+        "devUrl": "http://127.0.0.1:1420",
         "beforeBuildCommand": "pnpm --dir ../webview-frontend build",
         "frontendDist": "../webview-frontend/build"
     },
@@ -16,6 +16,7 @@
                 "width": 1200,
                 "height": 800,
                 "decorations": false,
+                "transparent": true,
                 "backgroundColor": "#2a2b2d",
                 "visible": false
             }
