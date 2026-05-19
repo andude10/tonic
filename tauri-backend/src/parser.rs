@@ -17,7 +17,10 @@ use rust_decimal::Decimal;
 use crate::storage::{
     grid::GridCellId,
     name_resolution::SpreadsheetNames,
-    types::{AbsoluteCellId, Coordinate, Expr, ExprAtom, ExprId, Reference, SheetId},
+    types::{
+        AbsoluteCellId, CellRange, Coordinate, Expr, ExprAtom, ExprId, Formula, FormulaTemplateRef,
+        Reference, TableId,
+    },
 };
 
 // --- Tokens ---
@@ -40,6 +43,7 @@ pub enum Token<'src> {
     Star,
     Slash,
     Dot,
+    At,
     Colon,
     Comma,
     LParen,
@@ -78,6 +82,7 @@ impl fmt::Display for Token<'_> {
             Token::Star => write!(f, "*"),
             Token::Slash => write!(f, "/"),
             Token::Dot => write!(f, "."),
+            Token::At => write!(f, "@"),
             Token::Colon => write!(f, ":"),
             Token::Comma => write!(f, ","),
             Token::LParen => write!(f, "("),
@@ -160,7 +165,7 @@ type LexerExtra<'src> = extra::Err<Rich<'src, char>>;
 pub fn create_lexer<'src>(
 ) -> impl Parser<'src, LexerInput<'src>, LexerOutput<'src>, LexerExtra<'src>> {
     choice((
-        chumsky::regex::regex("\\$?[a-zA-Z]+\\$?[0-9]+").map(lex_cell_ref),
+        chumsky::regex::regex("\\$?[a-zA-Z]{1,2}\\$?[0-9]+").map(lex_cell_ref),
         text::ident().map(|s| match s {
             "true" => Token::True,
             "false" => Token::False,
@@ -176,6 +181,7 @@ pub fn create_lexer<'src>(
         just('*').to(Token::Star),
         just('/').to(Token::Slash),
         just('.').to(Token::Dot),
+        just('@').to(Token::At),
         just(':').to(Token::Colon),
         just(',').to(Token::Comma),
         just('(').to(Token::LParen),
@@ -310,6 +316,7 @@ type FormulaOutput = ExprId;
 pub struct FormulaState<'a> {
     pub names: &'a mut SpreadsheetNames,
     pub cell_id: GridCellId,
+    pub current_table_id: Option<TableId>,
     pub expr_arena: Vec<Expr>,
     pub span_arena: Vec<(u32, u32)>,
 }
@@ -341,23 +348,6 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
     recursive(|expr| {
         let ident = select_ref! { Token::Name(s) => *s };
 
-        // qualified_name == Parses sheetName.name or just name, produces (SheetId, &str)
-        let qualified_name = ident
-            .then(just(Token::Dot).ignore_then(ident).or_not())
-            .try_map_with(|(first, second), extra| {
-                let span = extra.span();
-                let st: &mut FormulaState = extra.state();
-                match second {
-                    Some(name) => {
-                        let &sheet_id = st.names.sheet_names.get(first).ok_or_else(|| {
-                            Rich::custom(span, format!("unknown sheet '{first}'"))
-                        })?;
-                        Ok((sheet_id, name))
-                    }
-                    None => Ok((0 as SheetId, first)),
-                }
-            });
-
         let cell_ref = select_ref! {
             Token::Cell { col, row, abs_col, abs_row } => (*col, *row, *abs_col, *abs_row)
         };
@@ -369,90 +359,198 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
             .collect::<Vec<ExprId>>()
             .delimited_by(just(Token::LParen), just(Token::RParen));
 
-        // cell_name_or_function_call == qualified_name followed by optional (...) for function call, otherwise cell ref
-        let cell_name_or_function_call = qualified_name.then(call_args.or_not()).try_map_with(
-            |((_sheet_id, name), args), extra| {
+        // Table.Column == table column body range
+        let table_column_ref = ident
+            .clone()
+            .then_ignore(just(Token::Dot))
+            .then(ident.clone())
+            .try_map_with(|(table_name, column_name), extra| {
                 let span = extra.span();
                 let st: &mut FormulaState = extra.state();
-                let expr = if let Some(args) = args {
-                    // function call: name(...)
-                    // todo: abstract the function defenition
-                    match name {
-                        "sum" => {
-                            if args.len() != 1 {
-                                return Err(Rich::custom(span, "sum expects exactly 1 argument"));
-                            }
-                            Expr::Sum(args[0])
-                        }
-                        "avg" => {
-                            if args.len() != 1 {
-                                return Err(Rich::custom(span, "avg expects exactly 1 argument"));
-                            }
-                            Expr::Avg(args[0])
-                        }
-                        "min" => {
-                            if args.len() != 1 {
-                                return Err(Rich::custom(span, "min expects exactly 1 argument"));
-                            }
-                            Expr::Min(args[0])
-                        }
-                        "max" => {
-                            if args.len() != 1 {
-                                return Err(Rich::custom(span, "max expects exactly 1 argument"));
-                            }
-                            Expr::Max(args[0])
-                        }
-                        "count" => {
-                            if args.len() != 2 {
-                                return Err(Rich::custom(
-                                    span,
-                                    "count expects exactly 2 arguments",
-                                ));
-                            }
-                            Expr::Count(args[0], args[1])
-                        }
-                        "if" => {
-                            if args.len() != 3 {
-                                return Err(Rich::custom(span, "if expects exactly 3 arguments"));
-                            }
-                            Expr::If(args[0], args[1], args[2])
-                        }
-                        _ => {
-                            // look up user-registered JS function
-                            let func_id =
-                                st.names.user_function_names.get(name).ok_or_else(|| {
-                                    Rich::custom(span, format!("unresolved function '{name}'"))
-                                })?;
-                            Expr::ExternalFunctionCall {
-                                func_id: *func_id,
-                                args,
-                            }
-                        }
-                    }
-                } else {
-                    // todo: remove hardcode fix below.
-                    // bare name: check if it's a known function missing parens
-                    const BUILTINS: &[&str] = &["sum", "avg", "min", "max", "count", "if"];
-                    if BUILTINS.contains(&name) || st.names.user_function_names.contains_key(name) {
+                let table_id = st.names.table_names.get(table_name).ok_or_else(|| {
+                    Rich::custom(
+                        span,
+                        format!("Unresolved name '{table_name}.{column_name}'"),
+                    )
+                })?;
+                let reference = st
+                    .names
+                    .table_columns
+                    .get(&(*table_id, column_name.to_string()))
+                    .ok_or_else(|| {
+                        Rich::custom(
+                            span,
+                            format!("Unresolved name '{table_name}.{column_name}'"),
+                        )
+                    })?
+                    .clone();
+                Ok(push_expr(
+                    extra.state(),
+                    Expr::Atom(ExprAtom::Reference(reference)),
+                    span,
+                ))
+            });
+
+        // @Column == current row in table column
+        let current_row_column_ref =
+            just(Token::At)
+                .ignore_then(ident.clone())
+                .try_map_with(|column_name, extra| {
+                    let span = extra.span();
+                    let st: &mut FormulaState = extra.state();
+                    // @Column only makes sense from inside the table
+                    let Some(table_id) = st.current_table_id else {
                         return Err(Rich::custom(
                             span,
-                            format!("'{name}' is a function, expected function arguments"),
+                            format!("Column reference '@{column_name}' is invalid outside tables"),
                         ));
-                    }
-                    let named_cell =
-                        st.names.cell_names.get(name).ok_or_else(|| {
-                            Rich::custom(span, format!("unresolved cell '{name}'"))
+                    };
+                    let reference = st
+                        .names
+                        .table_columns
+                        .get(&(table_id, column_name.to_string()))
+                        .ok_or_else(|| {
+                            Rich::custom(span, format!("Unresolved name '@{column_name}'"))
                         })?;
-                    Expr::Atom(ExprAtom::Reference(Reference::Single {
-                        sheet_id: named_cell.sheet_id,
-                        row: Coordinate::Absolute(named_cell.row),
-                        col: Coordinate::Absolute(named_cell.col),
-                    }))
-                };
-                let span = extra.span();
-                Ok(push_expr(extra.state(), expr, span))
-            },
-        );
+                    let Reference::Range {
+                        sheet_id,
+                        start_col,
+                        ..
+                    } = reference
+                    else {
+                        return Err(Rich::custom(
+                            span,
+                            format!("Unresolved name '@{column_name}'"),
+                        ));
+                    };
+                    let sheet_id = *sheet_id;
+                    let col = Coordinate::Absolute(start_col.to_index(st.cell_id.col));
+                    // row stays relative so shared formulas keep current-row behavior
+                    Ok(push_expr(
+                        extra.state(),
+                        Expr::Atom(ExprAtom::Reference(Reference::Single {
+                            sheet_id,
+                            row: Coordinate::Relative(0),
+                            col,
+                        })),
+                        span,
+                    ))
+                });
+
+        // cell_name_or_function_call == name followed by optional (...) for function call, otherwise named reference
+        let cell_name_or_function_call =
+            ident
+                .clone()
+                .then(call_args.or_not())
+                .try_map_with(|(name, args), extra| {
+                    let span = extra.span();
+                    let st: &mut FormulaState = extra.state();
+                    let expr = if let Some(args) = args {
+                        // function call: name(...)
+                        // todo: abstract the function defenition
+                        match name {
+                            "sum" => {
+                                if args.len() != 1 {
+                                    return Err(Rich::custom(
+                                        span,
+                                        "sum expects exactly 1 argument",
+                                    ));
+                                }
+                                Expr::Sum(args[0])
+                            }
+                            "avg" => {
+                                if args.len() != 1 {
+                                    return Err(Rich::custom(
+                                        span,
+                                        "avg expects exactly 1 argument",
+                                    ));
+                                }
+                                Expr::Avg(args[0])
+                            }
+                            "min" => {
+                                if args.len() != 1 {
+                                    return Err(Rich::custom(
+                                        span,
+                                        "min expects exactly 1 argument",
+                                    ));
+                                }
+                                Expr::Min(args[0])
+                            }
+                            "max" => {
+                                if args.len() != 1 {
+                                    return Err(Rich::custom(
+                                        span,
+                                        "max expects exactly 1 argument",
+                                    ));
+                                }
+                                Expr::Max(args[0])
+                            }
+                            "count" => {
+                                if args.len() != 2 {
+                                    return Err(Rich::custom(
+                                        span,
+                                        "count expects exactly 2 arguments",
+                                    ));
+                                }
+                                Expr::Count(args[0], args[1])
+                            }
+                            "if" => {
+                                if args.len() != 3 {
+                                    return Err(Rich::custom(
+                                        span,
+                                        "if expects exactly 3 arguments",
+                                    ));
+                                }
+                                Expr::If(args[0], args[1], args[2])
+                            }
+                            _ => {
+                                // look up user-registered JS function
+                                let func_id =
+                                    st.names.user_function_names.get(name).ok_or_else(|| {
+                                        Rich::custom(span, format!("unresolved function '{name}'"))
+                                    })?;
+                                Expr::ExternalFunctionCall {
+                                    func_id: *func_id,
+                                    args,
+                                }
+                            }
+                        }
+                    } else {
+                        // todo: remove hardcode fix below.
+                        // bare name: check if it's a known function missing parens
+                        const BUILTINS: &[&str] = &["sum", "avg", "min", "max", "count", "if"];
+                        if BUILTINS.contains(&name)
+                            || st.names.user_function_names.contains_key(name)
+                        {
+                            return Err(Rich::custom(
+                                span,
+                                format!("'{name}' is a function, expected function arguments"),
+                            ));
+                        }
+                        if let Some(table_id) = st.current_table_id {
+                            if let Some(reference) =
+                                st.names.table_columns.get(&(table_id, name.to_string()))
+                            {
+                                let reference = reference.clone();
+                                return Ok(push_expr(
+                                    extra.state(),
+                                    Expr::Atom(ExprAtom::Reference(reference)),
+                                    span,
+                                ));
+                            }
+                        }
+                        let named_cell = st.names.cell_names.get(name).ok_or_else(|| {
+                            Rich::custom(span, format!("Unresolved name '{name}'"))
+                        })?;
+                        Expr::Atom(ExprAtom::Reference(Reference::Single {
+                            sheet_id: named_cell.sheet_id,
+                            row: Coordinate::Absolute(named_cell.row),
+                            col: Coordinate::Absolute(named_cell.col),
+                        }))
+                    };
+                    let span = extra.span();
+                    Ok(push_expr(extra.state(), expr, span))
+                });
 
         // A1 or A1:B2 == produces Reference with offsets
         let cell_or_range = cell_ref
@@ -500,7 +598,13 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
             .clone()
             .delimited_by(just(Token::LParen), just(Token::RParen));
 
-        let atom = choice((cell_name_or_function_call, paren_expr, atom_value));
+        let atom = choice((
+            table_column_ref,
+            current_row_column_ref,
+            cell_name_or_function_call,
+            paren_expr,
+            atom_value,
+        ));
 
         atom.pratt((
             prefix(3, just(Token::Dash), |_, r, e| {
@@ -564,177 +668,152 @@ pub fn parse_formula<'tokens, 'src: 'tokens>(
     (output, errs)
 }
 
-/// Parse a cell reference at position `pos` in `s` (letters then digits).
-/// Returns (col 0-indexed, row 0-indexed, end position) or None.
-fn parse_cell_at(s: &[u8], pos: usize) -> Option<(u32, u32, bool, bool, usize)> {
-    let mut i = pos;
-    let abs_col = if i < s.len() && s[i] == b'$' {
-        i += 1;
-        true
-    } else {
-        false
-    };
-    if i >= s.len() || !s[i].is_ascii_alphabetic() {
-        return None;
-    }
-    let mut col: u32 = 0;
-    while i < s.len() && s[i].is_ascii_alphabetic() {
-        col = col
-            .checked_mul(26)?
-            .checked_add((s[i].to_ascii_uppercase() - b'A') as u32 + 1)?;
-        i += 1;
-    }
-    col -= 1;
-    let abs_row = if i < s.len() && s[i] == b'$' {
-        i += 1;
-        true
-    } else {
-        false
-    };
-    if i >= s.len() || !s[i].is_ascii_digit() {
-        return None;
-    }
-    let mut row: u32 = 0;
-    while i < s.len() && s[i].is_ascii_digit() {
-        row = row.checked_mul(10)?.checked_add((s[i] - b'0') as u32)?;
-        i += 1;
-    }
-    row = row.checked_sub(1)?; // 1-indexed in text -> 0-indexed
-    Some((col, row, abs_col, abs_row, i))
-}
-
-/// Shift all cell references in a formula string using AST references.
-/// References in the string and AST appear in the same left-to-right order.
-/// `cell_id` is the cell where the formula will be displayed.
-/// `ast` contains the parsed expressions with R1C1 offsets.
-/// `names` is used to convert absolute cell IDs to names.
-pub fn shift_formula_refs(
-    formula: &str,
-    cell_id: &GridCellId,
+/// Build formula template slots from parser spans.
+pub fn create_formula_template_refs(
     ast: &[Expr],
-    _names: &SpreadsheetNames,
-) -> String {
-    use crate::storage::types::{ExprAtom, Reference};
-
-    enum AstRef<'a> {
-        Reference(&'a Reference),
-        InvalidReference(&'a str),
-    }
-
-    // collect references (and invalid-reference markers) from AST in order
-    let mut refs: Vec<AstRef<'_>> = Vec::new();
-    for expr in ast {
-        let Expr::Atom(atom) = expr else {
+    spans: &[(u32, u32)],
+    span_offset: u32,
+) -> Vec<FormulaTemplateRef> {
+    let mut refs = Vec::new();
+    for (expr_id, expr) in ast.iter().enumerate() {
+        // only reference text is dynamic in the displayed formula
+        let Expr::Atom(ExprAtom::Reference(_) | ExprAtom::InvalidReferenceError(_)) = expr else {
             continue;
         };
-        match atom {
-            ExprAtom::Reference(r) => refs.push(AstRef::Reference(r)),
-            ExprAtom::InvalidReferenceError(msg) => refs.push(AstRef::InvalidReference(msg)),
-            _ => {}
-        }
+        let Some((start, end)) = spans.get(expr_id).copied() else {
+            continue;
+        };
+        // spans come from formula text without '='
+        refs.push(FormulaTemplateRef {
+            expr_id: expr_id as ExprId,
+            start: start + span_offset,
+            end: end + span_offset,
+        });
+    }
+    refs.sort_unstable_by_key(|r| r.start);
+    refs
+}
+
+/// Create editor text from formula template.
+///
+/// Constant spans stay as typed. Reference spans are created from AST.
+pub fn create_formula_string(
+    formula: &Formula,
+    cell_id: &GridCellId,
+    names: &SpreadsheetNames,
+) -> String {
+    let source_cell = AbsoluteCellId {
+        sheet_id: 0,
+        row: cell_id.row,
+        col: cell_id.col,
+    };
+    let source_range = CellRange::single(source_cell);
+    let source_table = names
+        .table_columns_lookup
+        .iter()
+        .find_map(|(range, (table_id, _))| {
+            range.contains(&source_range).then_some((*table_id, *range))
+        });
+    let template = &formula.formula_string_template;
+    if formula.template_refs.is_empty() {
+        return template.clone();
     }
 
-    let bytes = formula.as_bytes();
-    let mut result = String::with_capacity(formula.len());
-    let mut pos = 0;
-    let mut ref_idx = 0;
+    let create_reference_string = |reference: &Reference| -> String {
+        let range = reference.to_cell_range(&source_cell);
 
-    while pos < bytes.len() {
-        // skip quoted strings
-        if bytes[pos] == b'"' {
-            result.push('"');
-            pos += 1;
-            while pos < bytes.len() && bytes[pos] != b'"' {
-                result.push(bytes[pos] as char);
-                pos += 1;
+        // same-row table references are displayed as @Column
+        if range.is_single() && range.start_row == source_cell.row {
+            if let Some((table_id, table_range)) = source_table {
+                let column_range = CellRange::new(
+                    table_range.sheet_id,
+                    table_range.start_row,
+                    range.start_col,
+                    table_range.end_row,
+                    range.start_col,
+                );
+                if let Some((column_table_id, name)) = names.table_columns_lookup.get(&column_range)
+                {
+                    if *column_table_id == table_id {
+                        return format!("@{name}");
+                    }
+                }
             }
-            if pos < bytes.len() {
-                result.push('"');
-                pos += 1;
+        }
+
+        // full table-column ranges are displayed with column names
+        if let Some((table_id, column_name)) = names.table_columns_lookup.get(&range) {
+            if source_table.is_some_and(|(source_table_id, _)| source_table_id == *table_id) {
+                return column_name.clone();
             }
+            if let Some(table_name) = names.table_names_lookup.get(table_id) {
+                return format!("{table_name}.{column_name}");
+            }
+        }
+
+        // otherwise, create regular A1 references from the resolved coordinates
+        match reference {
+            Reference::Single { row, col, .. } => format_cell_ref(
+                &range.head_cell(),
+                matches!(col, Coordinate::Absolute(_)),
+                matches!(row, Coordinate::Absolute(_)),
+            ),
+            Reference::Range {
+                sheet_id,
+                start_row,
+                start_col,
+                end_row,
+                end_col,
+            } => {
+                let start_id = AbsoluteCellId {
+                    sheet_id: *sheet_id,
+                    row: start_row.to_index(source_cell.row),
+                    col: start_col.to_index(source_cell.col),
+                };
+                let end_id = AbsoluteCellId {
+                    sheet_id: *sheet_id,
+                    row: end_row.to_index(source_cell.row),
+                    col: end_col.to_index(source_cell.col),
+                };
+                let mut text = format_cell_ref(
+                    &start_id,
+                    matches!(start_col, Coordinate::Absolute(_)),
+                    matches!(start_row, Coordinate::Absolute(_)),
+                );
+                text.push(':');
+                text.push_str(&format_cell_ref(
+                    &end_id,
+                    matches!(end_col, Coordinate::Absolute(_)),
+                    matches!(end_row, Coordinate::Absolute(_)),
+                ));
+                text
+            }
+        }
+    };
+
+    let mut result = String::with_capacity(template.len());
+    let mut pos = 0usize;
+    for template_ref in &formula.template_refs {
+        let start = template_ref.start as usize;
+        let end = template_ref.end as usize;
+        if start < pos || end > template.len() {
             continue;
         }
 
-        if bytes[pos].is_ascii_alphabetic() || bytes[pos] == b'$' {
-            if let Some((_col, _row, _abs_col, _abs_row, end)) = parse_cell_at(bytes, pos) {
-                // Check for range: A1:B2
-                let is_range = end < bytes.len() && bytes[end] == b':';
-                let final_end = if is_range {
-                    parse_cell_at(bytes, end + 1)
-                        .map(|(_, _, _, _, e)| e)
-                        .unwrap_or(end)
-                } else {
-                    end
-                };
-
-                // Use AST reference if available
-                if ref_idx < refs.len() {
-                    let r = &refs[ref_idx];
-                    ref_idx += 1;
-                    match r {
-                        AstRef::Reference(Reference::Single { sheet_id, row, col }) => {
-                            let abs_row = row.to_index(cell_id.row);
-                            let abs_col = col.to_index(cell_id.col);
-                            let abs_id = AbsoluteCellId {
-                                sheet_id: *sheet_id,
-                                row: abs_row,
-                                col: abs_col,
-                            };
-                            result.push_str(&format_cell_ref(
-                                &abs_id,
-                                matches!(col, Coordinate::Absolute(_)),
-                                matches!(row, Coordinate::Absolute(_)),
-                            ));
-                        }
-                        AstRef::Reference(Reference::Range {
-                            sheet_id,
-                            start_row,
-                            start_col,
-                            end_row,
-                            end_col,
-                        }) => {
-                            let start_row_abs = start_row.to_index(cell_id.row);
-                            let start_col_abs = start_col.to_index(cell_id.col);
-                            let end_row_abs = end_row.to_index(cell_id.row);
-                            let end_col_abs = end_col.to_index(cell_id.col);
-                            let start_id = AbsoluteCellId {
-                                sheet_id: *sheet_id,
-                                row: start_row_abs,
-                                col: start_col_abs,
-                            };
-                            let end_id = AbsoluteCellId {
-                                sheet_id: *sheet_id,
-                                row: end_row_abs,
-                                col: end_col_abs,
-                            };
-                            result.push_str(&format_cell_ref(
-                                &start_id,
-                                matches!(start_col, Coordinate::Absolute(_)),
-                                matches!(start_row, Coordinate::Absolute(_)),
-                            ));
-                            result.push(':');
-                            result.push_str(&format_cell_ref(
-                                &end_id,
-                                matches!(end_col, Coordinate::Absolute(_)),
-                                matches!(end_row, Coordinate::Absolute(_)),
-                            ));
-                        }
-                        AstRef::InvalidReference(msg) => result.push_str(msg),
-                    }
-                    pos = final_end;
-                    continue;
-                }
-                // Fallback: copy original reference
-                while pos < final_end {
-                    result.push(bytes[pos] as char);
-                    pos += 1;
-                }
-                continue;
+        // copy constant text, then create the reference slot from AST
+        result.push_str(&template[pos..start]);
+        match formula.ast.get(template_ref.expr_id as usize) {
+            Some(Expr::Atom(ExprAtom::Reference(reference))) => {
+                result.push_str(&create_reference_string(reference));
             }
+            Some(Expr::Atom(ExprAtom::InvalidReferenceError(msg))) => {
+                result.push_str(msg);
+            }
+            _ => result.push_str(&template[start..end]),
         }
-        result.push(bytes[pos] as char);
-        pos += 1;
+        pos = end;
     }
+    result.push_str(&template[pos..]);
     result
 }
 
@@ -748,10 +827,11 @@ pub fn string_is_regular_cell_name(s: &str) -> bool {
     if bytes[i] == b'$' {
         i += 1;
     }
-    while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+    let col_start = i;
+    while i < bytes.len() && bytes[i].is_ascii_alphabetic() && i - col_start < 2 {
         i += 1;
     }
-    if i == 0 || i == bytes.len() {
+    if i == col_start || i == bytes.len() || (i < bytes.len() && bytes[i].is_ascii_alphabetic()) {
         return false;
     }
     if i < bytes.len() && bytes[i] == b'$' {
@@ -781,12 +861,17 @@ mod tests {
         };
     }
 
+    const TABLE_ID: TableId = 1;
+    const TABLE_NAME: &str = "Table1";
+
     /// Lex + parse a formula string, return (arena, root_id) or panic with errors.
     fn parse(src: &str, names: &mut SpreadsheetNames) -> (Vec<Expr>, ExprId) {
         let tokens = lex_formula(src).into_output().expect("lexer failed");
+        let current_table_id = names.table_names.get(TABLE_NAME).copied();
         let mut state = FormulaState {
             names,
             cell_id: GridCellId { col: 0, row: 0 },
+            current_table_id,
             expr_arena: Vec::new(),
             span_arena: Vec::new(),
         };
@@ -827,28 +912,28 @@ mod tests {
         }
     }
 
+    fn table_column() -> Reference {
+        Reference::Range {
+            sheet_id: 0,
+            start_row: Coordinate::Absolute(1),
+            start_col: Coordinate::Absolute(2),
+            end_row: Coordinate::Absolute(3),
+            end_col: Coordinate::Absolute(2),
+        }
+    }
+
     #[test]
-    fn test_number_literal() {
+    fn test_literals() {
         assert_parses(&[
             ("42", vec![Expr::Atom(ExprAtom::Number(dec!(42)))]),
             ("3.14", vec![Expr::Atom(ExprAtom::Number(dec!(3.14)))]),
-        ]);
-    }
-
-    #[test]
-    fn test_boolean_literal() {
-        assert_parses(&[
             ("true", vec![Expr::Atom(ExprAtom::Bool(true))]),
             ("false", vec![Expr::Atom(ExprAtom::Bool(false))]),
+            (
+                r#""hello""#,
+                vec![Expr::Atom(ExprAtom::Text("hello".into()))],
+            ),
         ]);
-    }
-
-    #[test]
-    fn test_text_literal() {
-        assert_parses(&[(
-            r#""hello""#,
-            vec![Expr::Atom(ExprAtom::Text("hello".into()))],
-        )]);
     }
 
     #[test]
@@ -893,39 +978,37 @@ mod tests {
     }
 
     #[test]
-    fn test_addition() {
-        assert_parses(&[(
-            "1 + 2",
-            vec![
-                Expr::Atom(ExprAtom::Number(dec!(1))),
-                Expr::Atom(ExprAtom::Number(dec!(2))),
-                Expr::Add(0, 1),
-            ],
-        )]);
-    }
-
-    #[test]
-    fn test_subtraction() {
-        assert_parses(&[(
-            "5 - 3",
-            vec![
-                Expr::Atom(ExprAtom::Number(dec!(5))),
-                Expr::Atom(ExprAtom::Number(dec!(3))),
-                Expr::Subtract(0, 1),
-            ],
-        )]);
-    }
-
-    #[test]
-    fn test_multiplication() {
-        assert_parses(&[(
-            "2 * 3",
-            vec![
-                Expr::Atom(ExprAtom::Number(dec!(2))),
-                Expr::Atom(ExprAtom::Number(dec!(3))),
-                Expr::Multiply(0, 1),
-            ],
-        )]);
+    fn test_arithmetic() {
+        assert_parses(&[
+            (
+                "1 + 2",
+                vec![
+                    Expr::Atom(ExprAtom::Number(dec!(1))),
+                    Expr::Atom(ExprAtom::Number(dec!(2))),
+                    Expr::Add(0, 1),
+                ],
+            ),
+            (
+                "5 - 3",
+                vec![
+                    Expr::Atom(ExprAtom::Number(dec!(5))),
+                    Expr::Atom(ExprAtom::Number(dec!(3))),
+                    Expr::Subtract(0, 1),
+                ],
+            ),
+            (
+                "2 * 3",
+                vec![
+                    Expr::Atom(ExprAtom::Number(dec!(2))),
+                    Expr::Atom(ExprAtom::Number(dec!(3))),
+                    Expr::Multiply(0, 1),
+                ],
+            ),
+            (
+                "-1",
+                vec![Expr::Atom(ExprAtom::Number(dec!(1))), Expr::Negate(0)],
+            ),
+        ]);
     }
 
     #[test]
@@ -959,51 +1042,18 @@ mod tests {
     }
 
     #[test]
-    fn test_negation() {
-        assert_parses(&[(
-            "-1",
-            vec![Expr::Atom(ExprAtom::Number(dec!(1))), Expr::Negate(0)],
-        )]);
-    }
-
-    #[test]
-    fn test_builtin_sum() {
-        let mut names = SpreadsheetNames::new();
-        let (arena, root) = parse("sum(A1:B2)", &mut names);
-        assert_eq!(
-            arena,
-            vec![
-                Expr::Atom(ExprAtom::Reference(Reference::Range {
-                    sheet_id: 0,
-                    start_row: Coordinate::Relative(0),
-                    start_col: Coordinate::Relative(0),
-                    end_row: Coordinate::Relative(1),
-                    end_col: Coordinate::Relative(1),
-                })),
-                Expr::Sum(0)
-            ]
-        );
-        assert_eq!(root, 1);
-    }
-
-    #[test]
-    fn test_builtin_avg() {
-        let mut names = SpreadsheetNames::new();
-        let (arena, root) = parse("avg(A1:B2)", &mut names);
-        assert_eq!(
-            arena,
-            vec![
-                Expr::Atom(ExprAtom::Reference(Reference::Range {
-                    sheet_id: 0,
-                    start_row: Coordinate::Relative(0),
-                    start_col: Coordinate::Relative(0),
-                    end_row: Coordinate::Relative(1),
-                    end_col: Coordinate::Relative(1),
-                })),
-                Expr::Avg(0)
-            ]
-        );
-        assert_eq!(root, 1);
+    fn test_builtin_functions() {
+        let range = Expr::Atom(ExprAtom::Reference(Reference::Range {
+            sheet_id: 0,
+            start_row: Coordinate::Relative(0),
+            start_col: Coordinate::Relative(0),
+            end_row: Coordinate::Relative(1),
+            end_col: Coordinate::Relative(1),
+        }));
+        assert_parses(&[
+            ("sum(A1:B2)", vec![range.clone(), Expr::Sum(0)]),
+            ("avg(A1:B2)", vec![range, Expr::Avg(0)]),
+        ]);
     }
 
     #[test]
@@ -1042,15 +1092,61 @@ mod tests {
     }
 
     #[test]
-    fn shift_formula_refs_replaces_invalid_reference_with_error_marker() {
+    fn test_table_column_refs() {
+        let mut names = SpreadsheetNames::new();
+        let reference = table_column();
+        names.table_names.insert(TABLE_NAME.into(), TABLE_ID);
+        names
+            .table_columns
+            .insert((TABLE_ID, "Column_Name".into()), reference.clone());
+
+        let (arena, _) = parse("Table1.Column_Name", &mut names);
+        assert_eq!(
+            arena,
+            vec![Expr::Atom(ExprAtom::Reference(reference.clone()))]
+        );
+
+        let (arena, _) = parse("Column_Name", &mut names);
+        assert_eq!(arena, vec![Expr::Atom(ExprAtom::Reference(reference))]);
+    }
+
+    #[test]
+    fn test_current_row_table_column_ref() {
+        let mut names = SpreadsheetNames::new();
+        names.table_names.insert(TABLE_NAME.into(), TABLE_ID);
+        names
+            .table_columns
+            .insert((TABLE_ID, "Column_Name".into()), table_column());
+
+        let (arena, _) = parse("@Column_Name", &mut names);
+        assert_eq!(
+            arena,
+            vec![Expr::Atom(ExprAtom::Reference(Reference::Single {
+                sheet_id: 0,
+                row: Coordinate::Relative(0),
+                col: Coordinate::Absolute(2),
+            }))]
+        );
+    }
+
+    #[test]
+    fn create_formula_string_replaces_invalid_reference_with_error_marker() {
         let names = SpreadsheetNames::new();
         let ast = vec![
             Expr::Atom(ExprAtom::InvalidReferenceError("#REF!".into())),
             Expr::Atom(ExprAtom::Number(dec!(5))),
             Expr::Add(0, 1),
         ];
+        let spans = vec![(0, 2), (3, 4), (0, 4)];
+        let template_refs = create_formula_template_refs(&ast, &spans, 1);
+        let formula = Formula {
+            ast,
+            formula_string_template: "=A1+5".into(),
+            template_refs,
+            spans,
+        };
 
-        let shifted = shift_formula_refs("A1+5", &GridCellId { row: 0, col: 0 }, &ast, &names);
-        assert_eq!(shifted, "#REF!+5");
+        let text = create_formula_string(&formula, &GridCellId { row: 0, col: 0 }, &names);
+        assert_eq!(text, "=#REF!+5");
     }
 }

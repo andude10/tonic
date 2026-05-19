@@ -163,8 +163,6 @@
     let cachedRowEnd = -1;
     let cachedColumnStart = 0;
     let cachedColumnEnd = -1;
-    let cellsFetchInterval: ReturnType<typeof setInterval> | null = null;
-    let pendingCellsFetch: { start: number; end: number } | null = null;
 
     function updateApproximateColumnViewportBounds() {
         const el = getScrollContainer();

@@ -21,7 +21,7 @@ use tauri_plugin_log::log::{debug, error};
 use std::collections::BTreeMap;
 
 use crate::engine::{ChangeBounds, Engine};
-use crate::parser::shift_formula_refs;
+use crate::parser::create_formula_string;
 use crate::storage::grid::{CellValue, GridCellId};
 use crate::storage::types::{
     AbsoluteCellId, AtomType, ExternalFunction, Projection, ProjectionFilterOption, ScriptFile,
@@ -200,19 +200,17 @@ fn get_editor_value(state: &TonicState, cell_id: CellId) -> String {
         return String::new();
     };
 
-    // If defined by formula, shift references (formula_string already includes '=')
+    // if defined by formula, create a formula string
+    //
+    // formula string is created by transforming user input
+    // for example, relative reference (offsets) become concrete, like "A1", "A$5", etc
     if let Some(formula_id) = cell.defined_by_formula {
         if let Some(formula) = state.engine.spreadsheet.formulas.get(formula_id) {
             let gid = GridCellId {
                 row: cell_id.row,
                 col: cell_id.col,
             };
-            return shift_formula_refs(
-                &formula.formula_string,
-                &gid,
-                &formula.ast,
-                &state.engine.spreadsheet.names,
-            );
+            return create_formula_string(formula, &gid, &state.engine.spreadsheet.names);
         }
     }
 
@@ -996,8 +994,11 @@ fn get_script_content(state: tauri::State<'_, RwLock<TonicState>>, name: String)
         .map(|s| s.content.clone())
 }
 
+// todo: add table creation and deletion to undo
+
 #[tauri::command]
-async fn create_table(
+async fn create_table<R: tauri::Runtime>(
+    app: AppHandle<R>,
     state: tauri::State<'_, RwLock<TonicState>>,
     table_name: String,
     first_header: GridCellId,
@@ -1087,8 +1088,21 @@ async fn create_table(
         projection_id: proj_id,
     });
 
-    sp.names.table_names.insert(table_name.clone(), id);
-    sp.names.table_names_lookup.insert(id, table_name);
+    // register table names and fill any empty headers
+    {
+        let mut sheets = sp.sheets.write();
+        sp.names.create_table_name_and_columns(
+            &mut sheets,
+            id,
+            &table_name,
+            0,
+            first_header,
+            body_start,
+            body_end,
+        );
+    }
+    // default headers must be visible right away
+    emit_invalidate_frontend_event(&app, InvalidateFrotnendPayload::new().viewport());
     Ok(id)
 }
 

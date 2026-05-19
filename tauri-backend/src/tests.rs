@@ -469,6 +469,64 @@ fn table_projection_commands_filter_sort_and_apply_projection() {
 }
 
 #[test]
+fn table_column_formula_refs_parse_and_rename() {
+    let app = TestHarness::new();
+    app.paste(&[
+        (0, 0, "Name"),
+        (0, 1, "Qty"),
+        (0, 2, "Double"),
+        (1, 0, "Ada"),
+        (1, 1, "2"),
+        (2, 0, "Bob"),
+        (2, 1, "4"),
+    ]);
+
+    let _: u32 = app.invoke_ok(
+        "create_table",
+        json!({
+            "tableName": "Table1",
+            "firstHeader": grid_cell(0, 0),
+            "lastHeader": grid_cell(0, 2),
+            "bodyStart": grid_cell(1, 0),
+            "bodyEnd": grid_cell(2, 2),
+        }),
+    );
+
+    app.invoke_unit(
+        "enter_input",
+        json!({ "cellId": cell(1, 2), "userInput": "=B2*2" }),
+    );
+    app.invoke_unit(
+        "enter_input",
+        json!({ "cellId": cell(2, 2), "userInput": "=sum(Qty)" }),
+    );
+    app.invoke_unit(
+        "enter_input",
+        json!({ "cellId": cell(3, 0), "userInput": "=sum(Table1.Qty)" }),
+    );
+    app.invoke_unit(
+        "enter_input",
+        json!({ "cellId": cell(3, 1), "userInput": "=sum(B2:B3)" }),
+    );
+
+    let before = app.viewport_map(1, 3, 0, 2);
+    assert_eq!(before[&(1, 2)].display, "4");
+    assert_eq!(before[&(2, 2)].display, "6");
+    assert_eq!(before[&(3, 0)].display, "6");
+    assert_eq!(before[&(3, 1)].display, "6");
+
+    app.invoke_unit(
+        "enter_input",
+        json!({ "cellId": cell(0, 1), "userInput": "Amount" }),
+    );
+
+    assert_eq!(app.editor_value(1, 2), "=@Amount*2");
+    assert_eq!(app.editor_value(2, 2), "=sum(Amount)");
+    assert_eq!(app.editor_value(3, 0), "=sum(Table1.Amount)");
+    assert_eq!(app.editor_value(3, 1), "=sum(Table1.Amount)");
+}
+
+#[test]
 fn dependants_recalculate_through_shared_formula_fill_delete_and_paste() {
     let app = TestHarness::new();
     app.paste(&[

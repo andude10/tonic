@@ -13,8 +13,8 @@ use tauri_plugin_log::log::{debug, info};
 use std::io;
 
 use crate::parser::{
-    format_eval_error, format_lex_error, format_parse_error, lex_formula, parse_formula,
-    FormulaState,
+    create_formula_template_refs, format_eval_error, format_lex_error, format_parse_error,
+    lex_formula, parse_formula, FormulaState,
 };
 use crate::storage::grid::{Cell, CellValue, GridCellId};
 use crate::storage::types::{
@@ -354,9 +354,14 @@ impl Engine {
             row: id.row,
             col: id.col,
         };
+        let current_table_id = self
+            .spreadsheet
+            .find_table_containing_cell(&id)
+            .map(|(table_id, _)| table_id);
         let mut state = FormulaState {
             names: &mut self.spreadsheet_mut().names,
             cell_id: parser_cell_id,
+            current_table_id,
             expr_arena: Vec::new(),
             span_arena: Vec::new(),
         };
@@ -371,11 +376,14 @@ impl Engine {
             return;
         };
 
+        let template_refs = create_formula_template_refs(&ast, &spans, 1);
+
         // create and store formula
         let formula = Formula {
             ast,
             spans,
-            formula_string: input.to_string(),
+            formula_string_template: input.to_string(),
+            template_refs,
         };
         let formula_id = self.spreadsheet_mut().formulas.insert(formula);
 
@@ -487,7 +495,15 @@ impl Engine {
         let table_time = Instant::now();
         let mut affected_tables: HashSet<u32> = HashSet::new();
         for CellUpdate(id, _, _) in &changes {
+            // table is affected if the cell it contains or its header was changed
             if let Some((table_id, _)) = self.spreadsheet.find_table_containing_cell(id) {
+                affected_tables.insert(table_id);
+            }
+            let header_id = GridCellId {
+                row: id.row,
+                col: id.col,
+            };
+            if let Some((table_id, _)) = self.spreadsheet.find_table_by_header(&header_id) {
                 affected_tables.insert(table_id);
             }
         }
@@ -586,7 +602,7 @@ impl Engine {
 
     fn post_table_cells_change_hook(&mut self, table_id: u32) {
         let table = match self.spreadsheet.tables.get(table_id) {
-            Some(t) => t,
+            Some(t) => t.clone(),
             None => return,
         };
         let sheet = table.sheet_id as usize;
@@ -597,8 +613,29 @@ impl Engine {
         let proj_id = table.projection_id;
 
         let sp = self.spreadsheet_mut();
-        let proj = sp.projections.get_mut(proj_id).unwrap();
         let num_cols = (col_end - col_start + 1) as usize;
+
+        // sync table column names from headers before rebuilding filter options
+        {
+            let mut sheets = sp.sheets.write();
+            for col_idx in 0..num_cols {
+                let header = GridCellId {
+                    row: table.first_header.row,
+                    col: col_start + col_idx as u32,
+                };
+                sp.names.sync_table_column(
+                    &mut sheets,
+                    table_id,
+                    table.sheet_id,
+                    header,
+                    table.body_start,
+                    table.body_end,
+                    col_idx,
+                );
+            }
+        }
+
+        let proj = sp.projections.get_mut(proj_id).unwrap();
         let sheets = sp.sheets.read();
 
         for col_idx in 0..num_cols {
@@ -1785,12 +1822,13 @@ fn eval_cell<'scope, 'env: 'scope>(
                             span,
                         }) => {
                             let msg = format!("type error: expected {expected}, got {got}");
-                            let formatted = format_eval_error(&formula.formula_string, &msg, span);
+                            let formatted =
+                                format_eval_error(&formula.formula_string_template, &msg, span);
                             CellValue::err(formatted)
                         }
                         Err(EvalError::DivisionByZero { span }) => {
                             let formatted = format_eval_error(
-                                &formula.formula_string,
+                                &formula.formula_string_template,
                                 "division by zero",
                                 span,
                             );

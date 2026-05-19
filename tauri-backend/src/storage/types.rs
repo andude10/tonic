@@ -301,7 +301,7 @@ impl Coordinate {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Reference {
     Single {
         sheet_id: SheetId,
@@ -349,7 +349,10 @@ pub enum ExprAtom {
     Bool(bool),
     Number(Decimal),
     Text(String),
+
+    // todo: rename to Error?
     InvalidReferenceError(String),
+
     Function(UserFuncId),
     Reference(Reference),
 }
@@ -426,24 +429,34 @@ pub enum Expr {
     },
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FormulaTemplateRef {
+    pub expr_id: ExprId,
+    pub start: u32,
+    pub end: u32,
+}
+
 /// Repressentation of formula. If multiple cells contain the same FormulaId, then they share single formula
 ///
-/// When new formula is entered by user, it is parsed and preserved. During parsing, all references
-/// are converted into R1C1 format (meaning AST stores relative offsets, instead of exact IDs of cells) .
+/// When new formula is entered by user, it is parsed and preserved as template. During parsing,
+/// all references are converted into R1C1 format (meaning AST stores relative offsets, instead
+/// of exact IDs of cells).
 /// If the formula is cloned, then it becomes shared formula (multiple cells will contain same FormulaId)
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Formula {
-    /// Abstract syntax tree (result of parsing `formula_string`)
+    /// Abstract syntax tree (result of parsing `formula_string_template`)
     pub ast: Vec<Expr>,
 
-    /// Original text, entered by user to create this formula (preserves spaces)
+    /// Template text, entered by user to create this formula (preserves spaces)
     ///
-    /// References should be adjusted relative to offsets if the formula is shared.
-    pub formula_string: String,
+    /// Constant parts are copied as is. Reference spans are created from AST.
+    pub formula_string_template: String,
 
-    /// Byte spans (start, end) for each ExprId in `ast`, relative to `formula_string[1..]`.
-    /// Used for error highlighting. May be empty for formulas loaded from old files.
-    #[serde(default)]
+    /// Byte spans of reference text in `formula_string_template`.
+    pub template_refs: Vec<FormulaTemplateRef>,
+
+    /// Byte spans (start, end) for each ExprId in `ast`, relative to `formula_string_template[1..]`.
+    /// Used for error highlighting.
     pub spans: Vec<(u32, u32)>,
 }
 
