@@ -6,7 +6,7 @@ use serde_json::json;
 use tauri::{
     http::HeaderMap,
     ipc::{InvokeBody, InvokeResponseBody},
-    test::{get_ipc_response, mock_builder, MockRuntime, INVOKE_KEY},
+    test::{get_ipc_response, mock_builder, mock_context, noop_assets, MockRuntime, INVOKE_KEY},
     WebviewWindow, WebviewWindowBuilder,
 };
 
@@ -36,8 +36,8 @@ struct TestHarness {
 impl TestHarness {
     fn new() -> Self {
         // build the same backend wiring the app uses, then drive it through ipc.
-        let app = build_test_app(mock_builder())
-            .build(tauri::generate_context!())
+        let app = build_app(mock_builder())
+            .build(mock_context(noop_assets()))
             .expect("test app to build");
         let mut app = app;
         setup(&mut app).expect("test setup");
@@ -61,7 +61,7 @@ impl TestHarness {
                 cmd: cmd.into(),
                 callback: tauri::ipc::CallbackFn(0),
                 error: tauri::ipc::CallbackFn(1),
-                url: "http://tauri.localhost".parse().expect("invoke url"),
+                url: "tauri://localhost".parse().expect("invoke url"),
                 body: InvokeBody::Json(body),
                 headers,
                 invoke_key: INVOKE_KEY.to_string(),

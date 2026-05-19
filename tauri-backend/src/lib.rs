@@ -1438,24 +1438,19 @@ async fn get_filter_options_for_table_column(
     Ok(result)
 }
 
-fn build_app_inner<R: tauri::Runtime>(
-    builder: tauri::Builder<R>,
-    enable_log_plugin: bool,
-) -> tauri::Builder<R> {
-    let builder = if enable_log_plugin {
-        builder.plugin(
+fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    #[cfg(not(test))]
+    let builder = builder
+        .plugin(
             tauri_plugin_log::Builder::new()
                 .target(tauri_plugin_log::Target::new(
                     tauri_plugin_log::TargetKind::Webview,
                 ))
                 .build(),
         )
-    } else {
-        builder
-    };
+        .plugin(tauri_plugin_dialog::init());
 
     builder
-        .plugin(tauri_plugin_dialog::init())
         .setup(setup)
         .invoke_handler(tauri::generate_handler![
             enter_input,
@@ -1498,18 +1493,10 @@ fn build_app_inner<R: tauri::Runtime>(
         ])
 }
 
-fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
-    build_app_inner(builder, true)
-}
-
-#[cfg(test)]
-fn build_test_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
-    build_app_inner(builder, false)
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[cfg(not(test))]
 pub fn run() {
-    build_app(tauri::Builder::default())
+    build_app(tauri::Builder::<tauri::Cef>::default())
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
