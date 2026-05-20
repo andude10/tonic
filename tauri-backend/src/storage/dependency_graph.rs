@@ -23,8 +23,8 @@ use petgraph::{
 use rstar::{RTree, RTreeObject, AABB};
 
 use crate::storage::{
-    grid::{CellValue, Grid, GridCellId},
-    types::{AbsoluteCellId, CellRange, Expr, ExprAtom},
+    grid::{CellValue, GridCellId},
+    types::{AbsoluteCellId, CellRange, Expr, ExprAtom, Sheets},
 };
 
 // --- types ---
@@ -274,7 +274,7 @@ impl DependencyGraph {
     // counter == 0 means ready (no unprocessed predecessors).
     pub fn init_pending_counter_for_new_recalculation(
         &self,
-        sheets: &[Grid],
+        sheets: &Sheets,
         changed_ranges: &[CellRange],
     ) {
         let mut queue = VecDeque::new();
@@ -334,7 +334,7 @@ impl DependencyGraph {
     // those cells were never evaluated because their predecessors in the cycle were
     // never evaluated either. sets them to a circular reference error and resets
     // their counter so the next recalculation starts clean.
-    pub fn detect_cycles(&self, sheets: &[Grid], changed_ranges: &[CellRange]) {
+    pub fn detect_cycles(&self, sheets: &Sheets, changed_ranges: &[CellRange]) {
         let mut queue = VecDeque::new();
         let mut visited: RTree<VisitedRange> = RTree::new();
         let mut ranges_buf = Vec::new();
@@ -389,7 +389,7 @@ impl DependencyGraph {
     // thread-safe: allocates its own scratch buffer.
     pub fn decrease_pending_counter(
         &self,
-        sheets: &[Grid],
+        sheets: &Sheets,
         evaluated_range: CellRange,
     ) -> Vec<AbsoluteCellId> {
         let mut ready_cells = Vec::new();
@@ -1282,25 +1282,31 @@ fn vertex_envelope(range: CellRange) -> AABB<[i64; 3]> {
 // --- free functions: pending counter helpers ---
 
 // atomic: no &mut needed
-fn increase_pending_counter(sheets: &[Grid], cell_id: AbsoluteCellId) {
+fn increase_pending_counter(sheets: &Sheets, cell_id: AbsoluteCellId) {
     let grid_cell_id: GridCellId = (&cell_id).into();
-    sheets[cell_id.sheet_id as usize].increase_pending_dependencies(&grid_cell_id);
+    sheets[cell_id.sheet_id as usize]
+        .grid
+        .increase_pending_dependencies(&grid_cell_id);
 }
 
 // atomic: returns value after decrement
-fn decrease_pending_counter(sheets: &[Grid], cell_id: AbsoluteCellId) -> u32 {
+fn decrease_pending_counter(sheets: &Sheets, cell_id: AbsoluteCellId) -> u32 {
     let grid_cell_id: GridCellId = (&cell_id).into();
-    sheets[cell_id.sheet_id as usize].decrease_pending_dependencies(&grid_cell_id)
+    sheets[cell_id.sheet_id as usize]
+        .grid
+        .decrease_pending_dependencies(&grid_cell_id)
 }
 
-fn get_pending_counter(sheets: &[Grid], cell_id: AbsoluteCellId) -> u32 {
+fn get_pending_counter(sheets: &Sheets, cell_id: AbsoluteCellId) -> u32 {
     let grid_cell_id: GridCellId = (&cell_id).into();
-    sheets[cell_id.sheet_id as usize].get_pending_dependencies(&grid_cell_id)
+    sheets[cell_id.sheet_id as usize]
+        .grid
+        .get_pending_dependencies(&grid_cell_id)
 }
 
-fn set_circular_ref_error(sheets: &[Grid], cell_id: AbsoluteCellId) {
+fn set_circular_ref_error(sheets: &Sheets, cell_id: AbsoluteCellId) {
     let grid_cell_id: GridCellId = (&cell_id).into();
-    let grid = &sheets[cell_id.sheet_id as usize];
+    let grid = &sheets[cell_id.sheet_id as usize].grid;
     grid.set_value(&grid_cell_id, CellValue::err("Cycle"));
     grid.reset_pending_dependencies(&grid_cell_id);
 }
@@ -1345,7 +1351,7 @@ mod tests {
 
     use crate::storage::{
         grid::{Cell, CellValue},
-        types::FormulaId,
+        types::{FormulaId, Sheet},
     };
 
     fn cell(sheet_id: u32, row: u32, col: u32) -> AbsoluteCellId {
@@ -1362,11 +1368,11 @@ mod tests {
         CellRange::new(sheet_id, start_row, start_col, end_row, end_col)
     }
 
-    fn sheets_with_cells(cells: &[AbsoluteCellId]) -> Vec<Grid> {
-        let mut sheets = vec![Grid::default()];
+    fn sheets_with_cells(cells: &[AbsoluteCellId]) -> Sheets {
+        let mut sheets = vec![Sheet::default()];
         for cell_id in cells {
             let grid_cell_id: GridCellId = cell_id.into();
-            sheets[0].insert_cell(
+            sheets[0].grid.insert_cell(
                 &grid_cell_id,
                 Cell {
                     defined_by_formula: None,
@@ -1381,11 +1387,11 @@ mod tests {
     fn sheets_with_formula_cells(
         value_cells: &[AbsoluteCellId],
         formula_cells: &[(AbsoluteCellId, FormulaId)],
-    ) -> Vec<Grid> {
+    ) -> Sheets {
         let mut sheets = sheets_with_cells(value_cells);
         for (cell_id, formula_id) in formula_cells {
             let grid_cell_id: GridCellId = cell_id.into();
-            sheets[0].insert_cell(
+            sheets[0].grid.insert_cell(
                 &grid_cell_id,
                 Cell {
                     defined_by_formula: Some(*formula_id),

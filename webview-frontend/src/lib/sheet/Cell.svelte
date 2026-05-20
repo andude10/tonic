@@ -14,6 +14,7 @@
         getSheetSharedState,
         isCellData,
         type CellData,
+        type CellFormatting,
         type FilterOption,
     } from "$lib/sheet/shared";
     import { showError } from "$lib/notice";
@@ -55,6 +56,21 @@
     const errorMessage = $derived(
         isCellData(cell) && cell.errorMessage ? cell.errorMessage : "",
     );
+    const formatting = $derived(isCellData(cell) ? cell.formatting : {});
+    const formattingStyle = $derived(cellFormattingStyle(formatting));
+
+    function cellFormattingStyle(formatting: CellFormatting): string {
+        let style = "";
+        // default bold should inherit from table/header styles.
+        if (formatting.bold) style += "font-weight: 700;";
+        // default italic should inherit from table/header styles.
+        if (formatting.italic) style += "font-style: italic;";
+        // default decoration should not override formulas/errors.
+        if (formatting.strikethrough) style += "text-decoration: line-through;";
+        // default color should keep theme/table colors.
+        if (formatting.textColor) style += `color: ${formatting.textColor};`;
+        return style;
+    }
 
     const isTableHeader = $derived(
         shared.cellStyles.get(`${row.id},${column.id}`) === "table-header-cell",
@@ -170,9 +186,11 @@
         />
     </div>
 {:else if isPending}
-    <div class="display-cell pending-cell">{displayContent}</div>
+    <div class="display-cell pending-cell" style={formattingStyle}>
+        <span class="pending-spinner" aria-label="Calculating"></span>
+    </div>
 {:else}
-    <div class="display-cell">
+    <div class="display-cell" style={formattingStyle}>
         {displayContent}
         {#if isError}
             <button
@@ -291,22 +309,22 @@
     }
 
     .pending-cell {
-        opacity: 0.4;
-        font-style: italic;
+        justify-content: center;
+        opacity: 0.65;
     }
 
-    .pending-cell::after {
-        content: "...";
-        display: inline-block;
-        overflow: hidden;
-        vertical-align: bottom;
-        width: 0;
-        animation: pending-dots 1.6s steps(4, end) infinite;
+    .pending-spinner {
+        width: 0.85em;
+        height: 0.85em;
+        border: 2px solid currentColor;
+        border-right-color: transparent;
+        border-radius: 50%;
+        animation: pending-spin 0.75s linear infinite;
     }
 
-    @keyframes pending-dots {
+    @keyframes pending-spin {
         to {
-            width: 1em;
+            transform: rotate(360deg);
         }
     }
 

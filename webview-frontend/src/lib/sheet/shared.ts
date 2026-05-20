@@ -12,9 +12,17 @@ export const REF_COLORS = [
 export type UICell = { row: number; column: string };
 /** Internal cell ID: 0-indexed row and col. */
 export type CellId = { row: number; col: number };
+export type CellFormatting = {
+    bold?: boolean;
+    italic?: boolean;
+    strikethrough?: boolean;
+    textColor?: string | null;
+};
+
 export type CellData = {
     computedValue: string;
     isFormula: boolean;
+    formatting: CellFormatting;
     isPending?: boolean;
     isError?: boolean;
     errorMessage?: string;
@@ -70,6 +78,7 @@ export type SheetSharedState = {
     expandModeActive: boolean;
     getCellDisplayValue(row: number, col: number): string;
     getCellIsFormula(row: number, col: number): boolean;
+    getCellFormatting(row: number, col: number): CellFormatting;
     commitEdit(): void;
 };
 

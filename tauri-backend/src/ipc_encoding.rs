@@ -1,4 +1,7 @@
-use crate::storage::grid::{Cell, CellValue};
+use crate::storage::{
+    cell_properties::CellProperties,
+    grid::{Cell, CellValue, GridCellId},
+};
 use rust_decimal::Decimal;
 
 const TAG_EMPTY: u8 = 0;
@@ -8,10 +11,16 @@ const TAG_BOOL: u8 = 3;
 const TAG_ERROR: u8 = 4;
 const TAG_RANGE: u8 = 5;
 
+// todo: review the whole file
+
+fn write_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
+    buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    buf.extend_from_slice(bytes);
+}
+
 fn write_len_prefixed(buf: &mut Vec<u8>, tag: u8, s: &[u8]) {
     buf.push(tag);
-    buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
-    buf.extend_from_slice(s);
+    write_bytes(buf, s);
 }
 
 // --- CellValue encode/decode ---
@@ -53,43 +62,66 @@ pub fn decode_cell_value(bytes: &[u8], offset: &mut usize) -> CellValue {
 
 /// Format: [row: u32 LE][col: u32 LE][flags: u8][display_len: u32 LE][display_bytes]
 ///   if error flag set: [error_msg_len: u32 LE][error_msg_bytes]
+///   [format_flags: u8]
+///   if text color flag set: [text_color_len: u32 LE][text_color_bytes]
 /// Flags: bit 0 = formula, bit 1 = pending, bit 2 = error
-pub fn encode_viewport_cell(buf: &mut Vec<u8>, row: u32, col: u32, cell: Option<&Cell>) {
+/// Format flags: bit 0 = bold, bit 1 = italic, bit 2 = strikethrough, bit 3 = text color
+pub fn encode_viewport_cell(
+    buf: &mut Vec<u8>,
+    row: u32,
+    col: u32,
+    cell: Option<&Cell>,
+    properties: &CellProperties,
+    properties_id: GridCellId,
+    pending: bool,
+) {
+    let cell = cell.filter(|cell| {
+        // empty error is only a formula placeholder during recalculation.
+        pending || !matches!(&cell.val, CellValue::Error(s, _) if s.is_empty())
+    });
+    let visible_cell = if pending { None } else { cell };
+    let mut flags = u8::from(cell.is_some_and(|cell| cell.defined_by_formula.is_some()));
+    // pending cells keep formula metadata but hide stale display/error text.
+    if pending {
+        flags |= 2;
+    }
+    let error_msg = if let Some(CellValue::Error(msg, _)) = visible_cell.map(|cell| &cell.val) {
+        flags |= 4;
+        Some(msg.as_str())
+    } else {
+        None
+    };
+    let display = visible_cell
+        .map(|cell| cell.val.to_string())
+        .unwrap_or_default();
+
     buf.extend_from_slice(&row.to_le_bytes());
     buf.extend_from_slice(&col.to_le_bytes());
-    match cell {
-        Some(cell) => {
-            let mut flags = 0u8;
-            if cell.defined_by_formula.is_some() {
-                flags |= 1;
-            }
-            let error_msg = if let CellValue::Error(msg, _) = &cell.val {
-                flags |= 4;
-                Some(msg.as_str())
-            } else {
-                None
-            };
-            buf.push(flags);
-            let display = cell.val.to_string();
-            let display_bytes = display.as_bytes();
-            buf.extend_from_slice(&(display_bytes.len() as u32).to_le_bytes());
-            buf.extend_from_slice(display_bytes);
-            if let Some(msg) = error_msg {
-                let msg_bytes = msg.as_bytes();
-                buf.extend_from_slice(&(msg_bytes.len() as u32).to_le_bytes());
-                buf.extend_from_slice(msg_bytes);
-            }
-        }
-        None => {
-            buf.push(0);
-            buf.extend_from_slice(&0u32.to_le_bytes());
-        }
+    buf.push(flags);
+    write_bytes(buf, display.as_bytes());
+    // error bytes are present only when the error flag is set.
+    if let Some(msg) = error_msg {
+        write_bytes(buf, msg.as_bytes());
+    }
+    encode_cell_properties(buf, properties, properties_id);
+}
+
+fn encode_cell_properties(buf: &mut Vec<u8>, properties: &CellProperties, cell: GridCellId) {
+    let color = properties.get_cell_color(cell);
+    let flags = u8::from(properties.cell_bold(cell))
+        | (u8::from(properties.cell_italic(cell)) << 1)
+        | (u8::from(properties.cell_strikethrough(cell)) << 2)
+        | (u8::from(color.is_some()) << 3);
+    buf.push(flags);
+    // color bytes are present only when the color flag is set.
+    if let Some(color) = color {
+        write_bytes(buf, color.as_bytes());
     }
 }
 
 // --- ext_fn_poll encoding ---
 
-/// Argument to an external JS function — either a single CellValue or a 2D range.
+/// Argument to an external JS function: either a single CellValue or a 2D range.
 pub enum ExtFnArg {
     Value(CellValue),
     Empty,

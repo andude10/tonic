@@ -139,6 +139,7 @@
                 row[colId] = {
                     computedValue: "",
                     isFormula: false,
+                    formatting: {},
                 };
             }
             rows[i] = row;
@@ -202,17 +203,22 @@
             const cell = targetRow[columnIndexToLetter(col)];
             if (!cell || typeof cell !== "object") continue;
 
+            // empty display means backend wants the default blank value.
             if (displayLen) {
                 cell.computedValue = textDecoder.decode(
                     bytes.subarray(displayStart, displayStart + displayLen),
                 );
             }
+            // formula marker is a decoration, not part of computed text.
             if (isFormula) cell.isFormula = true;
+            // loading cells should keep their place in cache while backend recalculates.
             if (isPending) cell.isPending = true;
+            // error details are only decoded when backend sets the error flag.
             if (isError) {
                 cell.isError = true;
                 const msgLen = view.getUint32(offset, true);
                 offset += 4;
+                // empty message is valid for placeholder errors.
                 if (msgLen) {
                     cell.errorMessage = textDecoder.decode(
                         bytes.subarray(offset, offset + msgLen),
@@ -220,6 +226,25 @@
                     offset += msgLen;
                 }
             }
+
+            const formatFlags = bytes[offset];
+            offset += 1;
+            let textColor: string | null = null;
+            // color bytes are only present when backend sets the color flag.
+            if (formatFlags & 8) {
+                const colorLen = view.getUint32(offset, true);
+                offset += 4;
+                textColor = textDecoder.decode(
+                    bytes.subarray(offset, offset + colorLen),
+                );
+                offset += colorLen;
+            }
+            cell.formatting = {
+                bold: (formatFlags & 1) !== 0,
+                italic: (formatFlags & 2) !== 0,
+                strikethrough: (formatFlags & 4) !== 0,
+                textColor,
+            };
         }
     }
 

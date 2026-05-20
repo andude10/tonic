@@ -8,12 +8,14 @@
         REF_COLORS,
         setSheetSharedState,
         type CellData,
+        type CellFormatting,
         type CellId,
         type ChangeBounds,
         type TableData,
         type UICell,
     } from "$lib/sheet/shared";
     import { invoke } from "@tauri-apps/api/core";
+    import SheetActionBar from "./SheetActionBar.svelte";
     import SheetFormulaPanel from "./SheetFormulaPanel.svelte";
     import { onMount, tick, untrack } from "svelte";
     import {
@@ -505,7 +507,7 @@
         return html;
     });
 
-    // parse references from formula — only depends on editorInput
+    // parse references from formula; only depends on editorInput
     let parsedFormulaReferencesHighlights = $derived.by(() => {
         if (!editorInputIsFormula || !isEditing || !editorInput) return null;
 
@@ -635,6 +637,10 @@
         getCellIsFormula(row: number, col: number): boolean {
             const cell = render?.getCell({ row, col });
             return cell?.isFormula ?? false;
+        },
+        getCellFormatting(row: number, col: number): CellFormatting {
+            const cell = render?.getCell({ row, col });
+            return cell?.formatting ?? {};
         },
         commitEdit,
     });
@@ -1721,6 +1727,7 @@
     });
 </script>
 
+<SheetActionBar />
 <SheetFormulaPanel />
 
 <div class="grid-row">

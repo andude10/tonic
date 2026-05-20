@@ -485,7 +485,7 @@
         color-scheme: light;
     }
 
-    /* MenuBar — override SVAR default background */
+    /* MenuBar: override SVAR default background */
     :global(.wx-menubar) {
         background: transparent !important;
     }
@@ -751,7 +751,7 @@
         --wx-color-danger: #f87171;
         --wx-color-info: #67b4e0;
 
-        /* Backgrounds — neutral grey with subtle cool tint */
+        /* Backgrounds: neutral grey with subtle cool tint */
         --wx-background: #2a2c32;
         --wx-background-alt: #32343a;
         --wx-background-hover: #232529;
@@ -799,7 +799,7 @@
         --wx-notice-border-radius: 2px;
         --wx-notice-type-icon-color: #a0a0a0;
 
-        /* tonic tokens — dark */
+        /* tonic tokens: dark */
         --tonic-scrollbar: #3c3e44;
         --tonic-scrollbar-hover: #52545a;
         --tonic-popup-bg: #1e2024;
@@ -827,14 +827,14 @@
         color-scheme: light;
         font-weight: 500;
 
-        /* svar overrides — Zed One Light palette */
+        /* svar overrides: Zed One Light palette */
         --wx-font-weight: 500;
         --wx-color-font: #242529;
         --wx-color-font-alt: #58585a;
         --wx-color-font-disabled: #9a9ba0;
-        /* #ebebec = Zed panel/sidebar — app chrome bg */
+        /* #ebebec = Zed panel/sidebar, app chrome bg */
         --wx-background: #ebebec;
-        /* #fafafa = Zed editor/content — near-white, but not pure white */
+        /* #fafafa = Zed editor/content, near-white, but not pure white */
         --wx-background-alt: #fafafa;
         --wx-background-hover: #dfdfe0;
         --wx-border: 1px solid #c9c9ca;
@@ -844,7 +844,7 @@
         --wx-table-header-background: #dddfe2;
         --wx-table-select-background: #d0d8e8;
         --wx-table-cell-border: 1px solid #c4c5c8;
-        /* Direct values — avoids variable chain resolution issues on WebKitGTK */
+        /* Direct values: avoids variable chain resolution issues on WebKitGTK */
         --wx-table-header-border: 1px solid #c9c9ca;
         --wx-table-header-cell-border: 1px solid #c9c9ca;
         --wx-button-background: #e5e6e8;
@@ -861,7 +861,7 @@
         --wx-notice-border: 1px solid #c9c9ca;
         --wx-notice-type-icon-color: #6e6f74;
 
-        /* tonic tokens — light */
+        /* tonic tokens: light */
         --tonic-content-bg: #fafafa;
         --tonic-scrollbar: #b8b9bc;
         --tonic-scrollbar-hover: #9a9b9e;

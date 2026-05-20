@@ -1,6 +1,43 @@
 use std::collections::HashMap;
+use std::hash::Hash;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+mod hashmap_as_entries {
+    use super::*;
+
+    #[derive(Serialize, Deserialize)]
+    struct Entry<K, V> {
+        key: K,
+        value: V,
+    }
+
+    pub fn serialize<S, K, V>(map: &HashMap<K, V>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        K: Serialize + Eq + Hash,
+        V: Serialize,
+    {
+        map.iter()
+            .map(|(key, value)| Entry { key, value })
+            .collect::<Vec<_>>()
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D, K, V>(deserializer: D) -> Result<HashMap<K, V>, D::Error>
+    where
+        D: Deserializer<'de>,
+        K: Deserialize<'de> + Eq + Hash,
+        V: Deserialize<'de>,
+    {
+        Vec::<Entry<K, V>>::deserialize(deserializer).map(|entries| {
+            entries
+                .into_iter()
+                .map(|entry| (entry.key, entry.value))
+                .collect()
+        })
+    }
+}
 
 use crate::{
     parser::string_is_regular_cell_name,
@@ -18,6 +55,7 @@ pub struct SpreadsheetNames {
     pub sheet_names_lookup: HashMap<SheetId, String>,
 
     pub cell_names: HashMap<String, AbsoluteCellId>,
+    #[serde(with = "hashmap_as_entries")]
     pub cell_names_lookup: HashMap<AbsoluteCellId, String>,
 
     #[serde(default)]
@@ -25,9 +63,9 @@ pub struct SpreadsheetNames {
     #[serde(default)]
     pub table_names_lookup: HashMap<TableId, String>,
 
-    #[serde(default)]
+    #[serde(default, with = "hashmap_as_entries")]
     pub table_columns: HashMap<(TableId, String), Reference>,
-    #[serde(default)]
+    #[serde(default, with = "hashmap_as_entries")]
     pub table_columns_lookup: HashMap<CellRange, (TableId, String)>,
 
     #[serde(default)]
@@ -153,7 +191,7 @@ impl SpreadsheetNames {
         col_idx: usize,
     ) {
         // column name is header text, but with spaces replaced with underscore _
-        let header_value = sheets[sheet_id as usize].get_value(&header);
+        let header_value = sheets[sheet_id as usize].grid.get_value(&header);
         let raw_name = header_value.map(|v| v.to_string()).unwrap_or_default();
         let empty_header = raw_name.is_empty();
         // spaces are written as underscores in formulas
@@ -165,7 +203,9 @@ impl SpreadsheetNames {
 
         // if any header is empty, replace it with default column name
         if empty_header {
-            sheets[sheet_id as usize].insert_cell(&header, Cell::text(column_name.clone()));
+            sheets[sheet_id as usize]
+                .grid
+                .insert_cell(&header, Cell::text(column_name.clone()));
         }
 
         // table columns resolve to body ranges

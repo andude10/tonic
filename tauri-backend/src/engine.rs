@@ -8,6 +8,7 @@ use std::time::Instant;
 use parking_lot::RwLock;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use tauri::AppHandle;
 use tauri_plugin_log::log::{debug, info};
 
 use std::io;
@@ -28,6 +29,13 @@ use crate::{call_extern_functions, file_api};
 pub struct CellUpdate(pub AbsoluteCellId, pub Option<Cell>, pub Option<Cell>);
 
 use crate::ipc_encoding::ExtFnArg;
+
+#[cfg(feature = "cef")]
+pub type DefaultRuntime = tauri::Cef;
+#[cfg(all(not(feature = "cef"), feature = "wry"))]
+pub type DefaultRuntime = tauri::Wry;
+#[cfg(all(not(feature = "cef"), not(feature = "wry"), test))]
+pub type DefaultRuntime = tauri::test::MockRuntime;
 
 /// Dedicated thread pool for parallel formula evaluation (heartbeat scheduling).
 static EVAL_POOL: forte::ThreadPool = forte::ThreadPool::new();
@@ -159,9 +167,10 @@ impl DebugInfo {
     }
 }
 
-pub struct Engine {
+pub struct Engine<R: tauri::Runtime = DefaultRuntime> {
     // todo: move spreadsheet out of the Engine?
     pub spreadsheet: Arc<Spreadsheet>,
+    app: Option<AppHandle<R>>,
     history: History,
     batch: Vec<CellUpdate>,
     debug: DebugInfo,
@@ -222,16 +231,38 @@ impl ColumnOrRowChangeSpec {
 
 // todo: add more comments (explain what happens with dependencies, dependants and the grid)
 
-impl Engine {
+impl Engine<DefaultRuntime> {
     pub fn new() -> Self {
+        Self::new_without_app()
+    }
+}
+
+impl<R: tauri::Runtime> Engine<R> {
+    fn new_without_app() -> Self {
         EVAL_POOL.resize_to_available();
         call_extern_functions::init();
 
         Self {
             spreadsheet: Arc::new(Spreadsheet::new()),
+            app: None,
             history: History::new(),
             batch: Vec::new(),
             debug: DebugInfo::new(),
+        }
+    }
+
+    pub fn with_app_handle(app: AppHandle<R>) -> Self {
+        let mut engine = Self::new_without_app();
+        engine.app = Some(app);
+        engine
+    }
+
+    fn emit_invalidate_frontend(&self) {
+        if let Some(app) = &self.app {
+            crate::emit_invalidate_frontend_event(
+                app,
+                crate::InvalidateFrotnendPayload::new().viewport(),
+            );
         }
     }
 
@@ -252,7 +283,7 @@ impl Engine {
 
         match (old_formula_id, new_formula_id) {
             (Some(old_fid), Some(new_fid)) => {
-                // both old and new are formulas — use update which skips if deps unchanged
+                // both old and new are formulas, so use update which skips if deps unchanged
                 let old_ast = self
                     .spreadsheet
                     .formulas
@@ -445,6 +476,8 @@ impl Engine {
             self.spreadsheet
                 .dependency_graph
                 .init_pending_counter_for_new_recalculation(&sheets, &changed_ranges);
+            // frontend must refetch now, before fast formulas clear the loading counters.
+            self.emit_invalidate_frontend();
         }
         let init_duration = init_time.elapsed();
 
@@ -454,7 +487,11 @@ impl Engine {
             let sheets = self.spreadsheet.sheets.read();
             for &id in &unique_cells {
                 let grid_id: GridCellId = (&id).into();
-                if sheets[id.sheet_id as usize].get_pending_dependencies(&grid_id) == 0 {
+                if sheets[id.sheet_id as usize]
+                    .grid
+                    .get_pending_dependencies(&grid_id)
+                    == 0
+                {
                     wave.push(id);
                 }
             }
@@ -647,7 +684,7 @@ impl Engine {
                 opt.count = 0;
             }
             for row in row_start..=row_end {
-                if let Some(val) = sheets[sheet].get_value(&GridCellId { row, col }) {
+                if let Some(val) = sheets[sheet].grid.get_value(&GridCellId { row, col }) {
                     old_opts
                         .entry(val.clone())
                         .and_modify(|o| o.count += 1)
@@ -894,9 +931,9 @@ impl Engine {
         changes: &mut Vec<CellUpdate>,
     ) {
         let sheets = self.spreadsheet.sheets.read();
-        let max_row = sheets[spec.sheet_id as usize].find_biggest_row();
-        let max_col = sheets[spec.sheet_id as usize].find_biggest_column();
-        let sheet = &sheets[spec.sheet_id as usize];
+        let max_row = sheets[spec.sheet_id as usize].grid.find_biggest_row();
+        let max_col = sheets[spec.sheet_id as usize].grid.find_biggest_column();
+        let sheet = &sheets[spec.sheet_id as usize].grid;
         let mut moved = Vec::new();
         let mut deleted = Vec::new();
 
@@ -993,7 +1030,9 @@ impl Engine {
             changes.push(CellUpdate(source_id, old_source, None));
         }
         if spec.change == ColumnOrRowChange::Remove {
-            self.spreadsheet.sheets.write()[spec.sheet_id as usize].refresh_bounds();
+            self.spreadsheet.sheets.write()[spec.sheet_id as usize]
+                .grid
+                .refresh_bounds();
         }
     }
 
@@ -1162,11 +1201,11 @@ impl Engine {
         let sheets = sp.sheets.read();
         let proj = sp.projections.get_mut(proj_id).unwrap();
         proj.projected_rows.sort_by(|&a, &b| {
-            let va = sheets[sheet].get_value(&GridCellId {
+            let va = sheets[sheet].grid.get_value(&GridCellId {
                 row: a,
                 col: sort_col,
             });
-            let vb = sheets[sheet].get_value(&GridCellId {
+            let vb = sheets[sheet].grid.get_value(&GridCellId {
                 row: b,
                 col: sort_col,
             });
@@ -1298,7 +1337,7 @@ impl Engine {
             }
             let col = col_start + i as u32;
             rows.retain(
-                |&row| match sheets[sheet].get_value(&GridCellId { row, col }) {
+                |&row| match sheets[sheet].grid.get_value(&GridCellId { row, col }) {
                     Some(v) => filter_opts.get(&v).map_or(false, |o| o.selected),
                     None => col_blanks,
                 },
@@ -1329,7 +1368,7 @@ impl Engine {
         let (spreadsheet, decorations) = file_api::load(path)?;
         self.spreadsheet = Arc::new(spreadsheet);
         for sheet in self.spreadsheet.sheets.write().iter_mut() {
-            sheet.refresh_bounds();
+            sheet.grid.refresh_bounds();
         }
         let dependency_graph_time = Instant::now();
         self.spreadsheet_mut().rebuild_dependency_graph();
@@ -1374,7 +1413,7 @@ fn resolve_number(
                 let row = row.to_index(source_cell.row);
                 let col = col.to_index(source_cell.col);
                 let gid = GridCellId { row, col };
-                match sheets.read()[*sheet_id as usize].get_value(&gid) {
+                match sheets.read()[*sheet_id as usize].grid.get_value(&gid) {
                     Some(CellValue::Number(n)) => Ok(n),
                     Some(CellValue::Text(_)) => Err(EvalError::TypeError {
                         expected: AtomType::Number,
@@ -1423,7 +1462,7 @@ fn resolve_bool(
                 let row = row.to_index(source_cell.row);
                 let col = col.to_index(source_cell.col);
                 let gid = GridCellId { row, col };
-                match sheets.read()[*sheet_id as usize].get_value(&gid) {
+                match sheets.read()[*sheet_id as usize].grid.get_value(&gid) {
                     Some(CellValue::Bool(b)) => Ok(b),
                     Some(CellValue::Number(_)) => Err(EvalError::TypeError {
                         expected: AtomType::Bool,
@@ -1474,6 +1513,7 @@ fn resolve_to_cell_value(
             let col = col.to_index(source_cell.col);
             let gid = GridCellId { row, col };
             sheets.read()[sheet_id as usize]
+                .grid
                 .get_value(&gid)
                 .unwrap_or(CellValue::Number(Decimal::ZERO))
         }
@@ -1519,7 +1559,7 @@ fn resolve_range(
 
 /// Parallel sum+count over a cell range. Uses forte::join to binary-split rows
 /// across the thread pool. The heartbeat scheduler decides when to actually
-/// parallelize — small ranges run sequentially with no overhead.
+/// parallelize; small ranges run sequentially with no overhead.
 const PARALLEL_RANGE_THRESHOLD: u64 = 1_000_000;
 
 fn parallel_sum_count(
@@ -1533,7 +1573,7 @@ fn parallel_sum_count(
     let total_cells = (er - sr + 1) as u64 * (ec - sc + 1) as u64;
     if total_cells <= PARALLEL_RANGE_THRESHOLD {
         let sheets = sp.sheets.read();
-        let sheet = &sheets[sheet_id as usize];
+        let sheet = &sheets[sheet_id as usize].grid;
         let mut sum = Decimal::ZERO;
         let mut count = 0u64;
         sheet.for_each_value_in_range(sr, sc, er, ec, |val| {
@@ -1558,7 +1598,7 @@ fn parallel_sum_count(
         let cols = (ec - sc + 1) as u64;
         if rows * cols <= 64_000 {
             let sheets = sp.sheets.read();
-            let sheet = &sheets[sheet_id as usize];
+            let sheet = &sheets[sheet_id as usize].grid;
             let mut sum = Decimal::ZERO;
             let mut count = 0u64;
             sheet.for_each_value_in_range(sr, sc, er, ec, |val| {
@@ -1587,7 +1627,7 @@ fn resolve_extern_arg(atom: &ExprAtom, source_cell: &AbsoluteCellId, sheets: &Sh
         }
         ExprAtom::Reference(r) => {
             let range = r.to_cell_range(source_cell);
-            let sheet = &sheets[range.sheet_id as usize];
+            let sheet = &sheets[range.sheet_id as usize].grid;
             if range.is_single() {
                 match sheet.get_value(&GridCellId {
                     row: range.start_row,
@@ -1708,7 +1748,7 @@ async fn eval_formula(
                 let (sheet_id, sr, sc, er, ec) =
                     resolve_range(source_cell, &eval_store[*range_id as usize])?;
                 let sheets = sp.sheets.read();
-                let sheet = &sheets[sheet_id as usize];
+                let sheet = &sheets[sheet_id as usize].grid;
                 let mut min: Option<Decimal> = None;
                 sheet.for_each_value_in_range(sr, sc, er, ec, |val| {
                     if let CellValue::Number(n) = val {
@@ -1721,7 +1761,7 @@ async fn eval_formula(
                 let (sheet_id, sr, sc, er, ec) =
                     resolve_range(source_cell, &eval_store[*range_id as usize])?;
                 let sheets = sp.sheets.read();
-                let sheet = &sheets[sheet_id as usize];
+                let sheet = &sheets[sheet_id as usize].grid;
                 let mut max: Option<Decimal> = None;
                 sheet.for_each_value_in_range(sr, sc, er, ec, |val| {
                     if let CellValue::Number(n) = val {
@@ -1736,7 +1776,7 @@ async fn eval_formula(
                 let target = resolve_number(source_cell, &eval_store[*value_id as usize], sheets)
                     .map_err(|e| e.with_span(sp_id(value_id)))?;
                 let sheets_guard = sp.sheets.read();
-                let sheet = &sheets_guard[sheet_id as usize];
+                let sheet = &sheets_guard[sheet_id as usize].grid;
                 let mut count = 0u64;
                 sheet.for_each_value_in_range(sr, sc, er, ec, |val| {
                     if let CellValue::Number(n) = val {
@@ -1798,7 +1838,7 @@ async fn eval_formula(
 // pending cells. cells without extern calls complete synchronously on first poll.
 //
 // explicit `-> impl Future + Send` (not `async fn`) so Send inference propagates through
-// the call chain reliably — bare `async fn`'s opaque future sometimes fails to infer Send
+// the call chain reliably; bare `async fn`'s opaque future sometimes fails to infer Send
 // when called from generic contexts like forte's `scope.spawn`.
 fn eval_cell<'scope, 'env: 'scope>(
     cell_id: AbsoluteCellId,
@@ -1872,8 +1912,8 @@ fn compute_bounds(changes: &[CellUpdate]) -> ChangeBounds {
 // 1. sort row-major, merge consecutive same-row cells into row ranges
 // 2. merge consecutive row ranges with the same column span into 2D rectangles
 //
-// e.g. a 10x10 paste → 10 row ranges → 1 rectangle.
-// two disjoint 5x5 blocks → 10 row ranges → 2 rectangles.
+// e.g. a 10x10 paste -> 10 row ranges -> 1 rectangle.
+// two disjoint 5x5 blocks -> 10 row ranges -> 2 rectangles.
 fn merge_cells_into_ranges(cells: &[AbsoluteCellId]) -> Vec<CellRange> {
     if cells.len() <= 1 {
         return cells.iter().map(|&c| CellRange::single(c)).collect();
@@ -2235,7 +2275,7 @@ mod tests {
 
     #[test]
     fn remove_column_no_false_cycles_in_formula_grid() {
-        // Reproduce: 21 rows × 12 cols. Col A = numbers, cols B-L = "=prev_col + 5".
+        // Reproduce: 21 rows x 12 cols. Col A = numbers, cols B-L = "=prev_col + 5".
         // Removing col H should NOT produce Cycle errors.
         let mut engine = Engine::new();
         let guard = engine.start_batch();

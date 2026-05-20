@@ -9,7 +9,7 @@
         ontoggle: (id: string) => void;
     } = $props();
 
-    // throttle fps display to 2/s — devPanel.fps updates every rAF (60/s) which
+    // throttle fps display to 2/s; devPanel.fps updates every rAF (60/s), which
     // would re-render this component every frame unnecessarily
     let displayFps = $state(0);
     let displayGetDisplayCellsCalls = $state(0);

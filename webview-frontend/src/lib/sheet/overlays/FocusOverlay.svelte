@@ -56,7 +56,7 @@
     let showResizeHandles = $derived(shared.expandModeActive && showBorder);
 
     // hide corner handle when it would visually overlap with right or bottom handle
-    // (happens when the cell is too small — less than ~30px in either dimension)
+    // (happens when the cell is too small, less than ~30px in either dimension)
     let totalWidth = $derived(
         rect ? (rect as PixelRect).width + extraWidth : 0,
     );
@@ -66,7 +66,7 @@
     let showCornerHandle = $derived(totalWidth > 30 && totalHeight > 30);
 
     // multi-cell drag: include selected cells in the same column/row as the focused cell.
-    // all drag state is local to this closure — no shared state needed.
+    // all drag state is local to this closure, no shared state needed.
     function startDrag(edge: "right" | "bottom" | "both", ev: MouseEvent) {
         ev.stopPropagation();
         ev.preventDefault();

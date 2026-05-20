@@ -78,6 +78,8 @@ impl Cell {
     }
 }
 
+// todo: split value and type: date will be just decimal, bool will be decimal of 0 or 1, etc.
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CellValue {
     Text(ColdString),
@@ -105,7 +107,7 @@ impl fmt::Display for CellValue {
 }
 
 // per-cell RwLock: parallel eval tasks can read/write individual cells without
-// locking the entire block. the lock satisfies rust's aliasing rules —
+// locking the entire block. the lock satisfies rust's aliasing rules -
 // the TACO topological ordering guarantees no actual read/write races.
 type CellSlot = RwLock<Option<Cell>>;
 
@@ -280,7 +282,7 @@ impl Grid {
         self.max_col = self.max_col.max(id.col);
     }
 
-    // returns cloned cell through read lock — safe for concurrent access
+    // returns cloned cell through read lock, safe for concurrent access
     pub fn get_cell(&self, id: &GridCellId) -> Option<Cell> {
         let idx = id.block_idx(self.stride);
         let block = self.blocks.get(idx)?.as_ref()?;

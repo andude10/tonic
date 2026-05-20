@@ -4,10 +4,16 @@ use std::fmt;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Serde helper: serialize `Vec<BTreeMap<K, V>>` as `Vec<Vec<(K, V)>>`.
+/// Serde helper: serialize `Vec<BTreeMap<K, V>>` as entry lists.
 /// Avoids the JSON requirement that map keys must be strings.
 mod vec_btreemap_as_vec {
     use super::*;
+
+    #[derive(Serialize, Deserialize)]
+    struct Entry<K, V> {
+        key: K,
+        value: V,
+    }
 
     pub fn serialize<S, K, V>(maps: &Vec<BTreeMap<K, V>>, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -15,7 +21,10 @@ mod vec_btreemap_as_vec {
         K: Serialize + Ord,
         V: Serialize,
     {
-        let vecs: Vec<Vec<(&K, &V)>> = maps.iter().map(|m| m.iter().collect()).collect();
+        let vecs: Vec<Vec<Entry<&K, &V>>> = maps
+            .iter()
+            .map(|m| m.iter().map(|(key, value)| Entry { key, value }).collect())
+            .collect();
         vecs.serialize(serializer)
     }
 
@@ -25,8 +34,24 @@ mod vec_btreemap_as_vec {
         K: Deserialize<'de> + Ord,
         V: Deserialize<'de>,
     {
-        let vecs: Vec<Vec<(K, V)>> = Vec::deserialize(deserializer)?;
-        Ok(vecs.into_iter().map(|v| v.into_iter().collect()).collect())
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Maps<K, V> {
+            Entries(Vec<Vec<Entry<K, V>>>),
+            Tuples(Vec<Vec<(K, V)>>),
+        }
+
+        match Maps::deserialize(deserializer)? {
+            Maps::Entries(vecs) => Ok(vecs
+                .into_iter()
+                .map(|v| {
+                    v.into_iter()
+                        .map(|entry| (entry.key, entry.value))
+                        .collect()
+                })
+                .collect()),
+            Maps::Tuples(vecs) => Ok(vecs.into_iter().map(|v| v.into_iter().collect()).collect()),
+        }
     }
 }
 
@@ -35,6 +60,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::storage::{
+    cell_properties::CellProperties,
     dependency_graph::DependencyGraph,
     grid::{Cell, CellValue, Grid, GridCellId},
     name_resolution::SpreadsheetNames,
@@ -481,6 +507,8 @@ pub struct ProjectionFilterOption {
     pub count: u32,
 }
 
+// todo: remove projection, move fields into Table
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Projection {
     pub sheet_id: SheetId,
@@ -511,7 +539,14 @@ pub struct ScriptFile {
     pub content: String,
 }
 
-pub type Sheets = Vec<Grid>;
+#[derive(Serialize, Deserialize, Default)]
+pub struct Sheet {
+    pub grid: Grid,
+    #[serde(default)]
+    pub cell_properties: CellProperties,
+}
+
+pub type Sheets = Vec<Sheet>;
 
 #[derive(Serialize, Deserialize)]
 pub struct Spreadsheet {
@@ -530,7 +565,7 @@ pub struct Spreadsheet {
 impl Spreadsheet {
     pub fn new() -> Self {
         Self {
-            sheets: Arc::new(RwLock::new(vec![Grid::default()])),
+            sheets: Arc::new(RwLock::new(vec![Sheet::default()])),
             formulas: StableVec::new(),
             names: SpreadsheetNames::new(),
             tables: StableVec::new(),
@@ -570,51 +605,66 @@ impl Spreadsheet {
     }
 
     // todo: put all logic for getting viewport in one place
-    pub fn get_projected_cell(&self, id: &AbsoluteCellId) -> Option<Cell> {
+    pub fn get_projected_cell_id(&self, id: &AbsoluteCellId) -> AbsoluteCellId {
+        // projected tables display a different stored row than the visible row.
         if let Some((_, table)) = self.find_table_containing_cell(id) {
-            let projection = self.projections.get(table.projection_id)?;
-            if projection.active {
-                let visual_idx = (id.row - projection.projection_start.row) as usize;
-                if visual_idx < projection.projected_rows.len() {
-                    return self.get_cell(&AbsoluteCellId {
-                        sheet_id: id.sheet_id,
-                        row: projection.projected_rows[visual_idx],
-                        col: id.col,
-                    });
+            // missing projection should not break normal cell display.
+            if let Some(projection) = self.projections.get(table.projection_id) {
+                // inactive projection means visual row is already the stored row.
+                if projection.active {
+                    let visual_idx = (id.row - projection.projection_start.row) as usize;
+                    // table bounds can be stale during edits, so stay inside projected rows.
+                    if visual_idx < projection.projected_rows.len() {
+                        return AbsoluteCellId {
+                            sheet_id: id.sheet_id,
+                            row: projection.projected_rows[visual_idx],
+                            col: id.col,
+                        };
+                    }
                 }
             }
         }
-        self.get_cell(id)
+        *id
     }
 
     // todo: remove this mess.
 
     pub fn get_cell(&self, id: &AbsoluteCellId) -> Option<Cell> {
-        self.sheets.read()[id.sheet_id as usize].get_cell(&id.into())
+        self.sheets.read()[id.sheet_id as usize]
+            .grid
+            .get_cell(&id.into())
     }
 
     pub fn set_value_and_create_block(&self, id: &AbsoluteCellId, val: CellValue) {
-        self.sheets.write()[id.sheet_id as usize].set_value_and_create_block(&id.into(), val);
+        self.sheets.write()[id.sheet_id as usize]
+            .grid
+            .set_value_and_create_block(&id.into(), val);
     }
 
     // shared access: per-cell write lock, no block creation. for parallel eval.
     pub fn set_value(&self, id: &AbsoluteCellId, val: CellValue) {
-        self.sheets.read()[id.sheet_id as usize].set_value(&id.into(), val);
+        self.sheets.read()[id.sheet_id as usize]
+            .grid
+            .set_value(&id.into(), val);
     }
 
     pub fn insert_cell(&self, id: &AbsoluteCellId, cell: Cell) {
-        self.sheets.write()[id.sheet_id as usize].insert_cell(&id.into(), cell);
+        self.sheets.write()[id.sheet_id as usize]
+            .grid
+            .insert_cell(&id.into(), cell);
     }
 
     pub fn remove_cell(&self, id: &AbsoluteCellId) {
-        self.sheets.write()[id.sheet_id as usize].remove_cell(&id.into());
+        self.sheets.write()[id.sheet_id as usize]
+            .grid
+            .remove_cell(&id.into());
     }
 
     // todo: fix
     pub fn rebuild_dependency_graph(&mut self) {
         let mut formula_cells = Vec::new();
         for (sheet_id, sheet) in self.sheets.read().iter().enumerate() {
-            sheet.for_each_cell(|grid_id, cell| {
+            sheet.grid.for_each_cell(|grid_id, cell| {
                 if let Some(formula_id) = cell.defined_by_formula {
                     formula_cells.push((
                         AbsoluteCellId {

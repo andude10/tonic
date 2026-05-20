@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::atomic::AtomicU32;
 
 use rust_decimal::Decimal;
 use serde::Deserialize;
@@ -17,8 +18,13 @@ struct ViewCell {
     row: u32,
     col: u32,
     is_formula: bool,
+    is_pending: bool,
     display: String,
     error: Option<String>,
+    bold: bool,
+    italic: bool,
+    strikethrough: bool,
+    text_color: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -233,17 +239,111 @@ fn decode_viewport(bytes: Vec<u8>) -> Vec<ViewCell> {
         } else {
             None
         };
+        let format_flags = bytes[cursor];
+        cursor += 1;
+        let text_color = if format_flags & 8 != 0 {
+            Some(read_string(&bytes, &mut cursor))
+        } else {
+            None
+        };
 
         cells.push(ViewCell {
             row,
             col,
             is_formula: flags & 1 != 0,
+            is_pending: flags & 2 != 0,
             display,
             error,
+            bold: format_flags & 1 != 0,
+            italic: format_flags & 2 != 0,
+            strikethrough: format_flags & 4 != 0,
+            text_color,
         });
     }
 
     cells
+}
+
+#[test]
+fn get_display_cells_returns_pending_flag_during_recalc() {
+    let app = TestHarness::new();
+    {
+        let state = app._app.state::<RwLock<TonicState<MockRuntime>>>();
+        let sheets = state.read().engine.spreadsheet.sheets.clone();
+        sheets.write()[0].grid.insert_cell(
+            &grid_cell(0, 0),
+            storage::grid::Cell {
+                defined_by_formula: Some(0),
+                val: CellValue::err(""),
+                pending_dependencies: AtomicU32::new(1),
+            },
+        );
+    }
+
+    let state = app._app.state::<RwLock<TonicState<MockRuntime>>>();
+    let _state_write_guard = state.write();
+    let cells = app.viewport_map(0, 0, 0, 0);
+
+    assert!(cells[&(0, 0)].is_pending);
+    assert!(cells[&(0, 0)].is_formula);
+    assert_eq!(cells[&(0, 0)].display, "");
+}
+
+#[test]
+fn cell_formatting_roundtrips_through_viewport() {
+    let app = TestHarness::new();
+    app.invoke_unit(
+        "set_cells_bold",
+        json!({ "cells": [cell(0, 0), cell(1, 0)], "value": true }),
+    );
+    app.invoke_unit(
+        "set_cells_italic",
+        json!({ "cells": [cell(0, 0), cell(1, 0)], "value": true }),
+    );
+    app.invoke_unit(
+        "set_cells_strikethrough",
+        json!({ "cells": [cell(0, 0), cell(1, 0)], "value": true }),
+    );
+    app.invoke_unit(
+        "set_cells_text_color",
+        json!({ "cells": [cell(0, 0), cell(1, 0)], "value": "#ff0000" }),
+    );
+
+    let cells = app.viewport_map(0, 1, 0, 0);
+    assert!(cells[&(0, 0)].bold);
+    assert!(cells[&(1, 0)].bold);
+    assert!(cells[&(0, 0)].italic);
+    assert!(cells[&(0, 0)].strikethrough);
+    assert_eq!(cells[&(0, 0)].text_color.as_deref(), Some("#ff0000"));
+}
+
+#[test]
+fn save_serializes_formatting() {
+    let app = TestHarness::new();
+    app.paste(&[(0, 0, "Name"), (1, 0, "Alice")]);
+    let _: u32 = app.invoke_ok(
+        "create_table",
+        json!({
+            "tableName": "people",
+            "firstHeader": grid_cell(0, 0),
+            "lastHeader": grid_cell(0, 0),
+            "bodyStart": grid_cell(1, 0),
+            "bodyEnd": grid_cell(1, 0),
+        }),
+    );
+    app.invoke_unit(
+        "set_cells_bold",
+        json!({ "cells": [cell(0, 0), cell(1, 0)], "value": true }),
+    );
+
+    let path = std::env::temp_dir().join("tonic-formatting-save-test.tcs");
+    let path = path.to_string_lossy().to_string();
+    let _ = std::fs::remove_file(&path);
+    app.invoke_unit(
+        "save_file",
+        json!({ "path": path, "uiDecorationsJson": "" }),
+    );
+    let _ = std::fs::remove_file(&path);
 }
 
 fn extrapolate_for_test(

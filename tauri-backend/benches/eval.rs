@@ -41,7 +41,7 @@ fn setup_chain(n: u32) -> Engine {
     engine
 }
 
-/// B0..B(n-1) all depend on A0 — maximally parallel, tests worker dispatch
+/// B0..B(n-1) all depend on A0 - maximally parallel, tests worker dispatch
 fn setup_independent(n: u32) -> Engine {
     let mut engine = Engine::new();
     let g = engine.start_batch();
