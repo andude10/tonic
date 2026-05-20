@@ -1496,7 +1496,16 @@ fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 #[cfg(not(test))]
 pub fn run() {
-    build_app(tauri::Builder::<tauri::Cef>::default())
+    #[cfg(target_os = "linux")]
+    std::env::set_var("GTK_USE_PORTAL", "0");
+
+    let builder = tauri::Builder::<tauri::Cef>::default();
+
+    // use xwayland on linux
+    #[cfg(target_os = "linux")]
+    let builder = builder.command_line_args([("--ozone-platform", Some("x11"))]);
+
+    build_app(builder)
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
