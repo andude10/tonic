@@ -416,9 +416,10 @@
     }
 
     function getScrollContainer(): HTMLElement | null {
-        if (scrollContainerEl) return scrollContainerEl;
+        if (scrollContainerEl?.isConnected) return scrollContainerEl;
         if (!gridWrapperEl) return null;
         scrollContainerEl =
+            gridWrapperEl.querySelector<HTMLElement>(".wx-scroll") ??
             gridWrapperEl.querySelector<HTMLElement>("[style*='overflow']") ??
             gridWrapperEl;
         return scrollContainerEl;
@@ -509,8 +510,14 @@
     }
 
     function handleRequestData(ev: { row: { start: number; end: number } }) {
+        // SVAR uses slice semantics: start is inclusive, end is exclusive.
         viewportRowStart = ev.row.start;
-        viewportRowEnd = ev.row.end;
+        viewportRowEnd = ev.row.end - 1;
+
+        if (viewportRowEnd < viewportRowStart) {
+            viewportRows = [];
+            return;
+        }
 
         if (
             cachedRows.length > 0 &&
@@ -553,12 +560,13 @@
         if (scrollVisualTimer) return;
         scrollVisualTimer = setTimeout(() => {
             scrollVisualTimer = null;
+            // tolerate sub-pixel scroll positions at the edge of the virtual body.
             showAddRows =
                 scroller.scrollTop + scroller.clientHeight >=
-                scroller.scrollHeight;
+                scroller.scrollHeight - 1;
             showAddCols =
                 scroller.scrollLeft + scroller.clientWidth >=
-                scroller.scrollWidth;
+                scroller.scrollWidth - 1;
             applyHeaderHighlights();
             moveFocusBackToSpreadsheet();
         }, SCROLL_VISUAL_THROTTLE_MS);
