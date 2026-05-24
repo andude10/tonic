@@ -111,6 +111,35 @@
         }
     }
 
+    async function commitOpen() {
+        dialogOpen = true;
+        let path: string | null = null;
+        try {
+            const selected = await open({
+                multiple: false,
+                directory: false,
+                filters: [DIALOG_FILTER],
+            });
+            if (typeof selected === "string") path = selected;
+        } catch (e) {
+            showError("Open dialog failed: " + e);
+        } finally {
+            dialogOpen = false;
+        }
+        if (!path) return;
+
+        isLoading = true;
+        try {
+            const decorationsJson = await invoke<string>("open_file", { path });
+            sheet.onFileLoad(decorationsJson);
+            await loadAllExtensions();
+        } catch (e) {
+            showError(`Failed to open file '${path}`);
+        } finally {
+            isLoading = false;
+        }
+    }
+
     // add check icon to active theme item
     const active_menu = $derived(
         menu_options.map((item) =>
@@ -164,24 +193,9 @@
                 await invoke("new_file");
                 sheet.onFileLoad();
                 break;
-            case "file-open": {
-                dialogOpen = true;
-                const path = await open({
-                    multiple: false,
-                    directory: false,
-                    filters: [DIALOG_FILTER],
-                });
-                dialogOpen = false;
-                if (!path) return;
-                isLoading = true;
-                const decorationsJson = await invoke<string>("open_file", {
-                    path,
-                });
-                isLoading = false;
-                sheet.onFileLoad(decorationsJson);
-                await loadAllExtensions();
+            case "file-open":
+                await commitOpen();
                 break;
-            }
             case "file-save":
                 await commitSave();
                 break;
