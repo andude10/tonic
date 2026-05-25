@@ -7,7 +7,7 @@
 // key operations:
 // - insert/remove formula cell: updates the compressed graph, merging edges when possible
 // - init_pending_counter: BFS from changed range to discover affected dependants (paper Algorithm 3)
-// - decrease_pending_counter: decrements dependants after evaluation, returns newly-ready cells
+// - decrease_pending_counter: decrements dependants after evaluation, returns zero-counter cells
 //
 // see: "Efficient and Compact Spreadsheet Formula Graphs" (2023)
 
@@ -384,16 +384,25 @@ impl DependencyGraph {
         }
     }
 
-    // decrement pending counters of direct dependants after evaluating a cell.
-    // returns cells that became ready (counter dropped to 0).
-    // thread-safe: allocates its own scratch buffer.
+    // decrement pending counters of direct dependants after evaluating a range.
+    // thread-safe: allocates its own output buffer.
     pub fn decrease_pending_counter(
         &self,
         sheets: &Sheets,
         evaluated_range: CellRange,
     ) -> Vec<AbsoluteCellId> {
-        let mut ready_cells = Vec::new();
-        let mut ranges_buf = Vec::new();
+        let mut out = Vec::new();
+        self.decrease_pending_counter_into(sheets, evaluated_range, &mut out);
+        out
+    }
+
+    // decrement pending counters into a caller-owned output buffer.
+    pub fn decrease_pending_counter_into(
+        &self,
+        sheets: &Sheets,
+        evaluated_range: CellRange,
+        out: &mut Vec<AbsoluteCellId>,
+    ) {
         let envelope = vertex_envelope(evaluated_range);
 
         for iv in self.vertex_index.locate_in_envelope_intersecting(&envelope) {
@@ -408,21 +417,20 @@ impl DependencyGraph {
                 .graph
                 .edges_directed(iv.vertex_index, Direction::Outgoing)
             {
-                if let Some(dep_range) = find_dependant_range(&self.graph, edge.id(), overlap) {
-                    ranges_buf.push(dep_range);
-                }
+                // counters are per dependency cell, so range updates must preserve multiplicity.
+                overlap.for_each_cell(|cell| {
+                    if let Some(dep_range) =
+                        find_dependant_range(&self.graph, edge.id(), CellRange::single(cell))
+                    {
+                        dep_range.for_each_cell(|dep_cell| {
+                            if decrease_pending_counter(sheets, dep_cell) == 0 {
+                                out.push(dep_cell);
+                            }
+                        });
+                    }
+                });
             }
         }
-
-        for range in &ranges_buf {
-            range.for_each_cell(|cell| {
-                if decrease_pending_counter(sheets, cell) == 0 {
-                    ready_cells.push(cell);
-                }
-            });
-        }
-
-        ready_cells
     }
 
     // --- querying ---

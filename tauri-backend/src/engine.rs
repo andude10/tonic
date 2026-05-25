@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::marker::PhantomData;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -39,6 +39,37 @@ pub type DefaultRuntime = tauri::test::MockRuntime;
 
 /// Dedicated thread pool for parallel formula evaluation (heartbeat scheduling).
 static EVAL_POOL: forte::ThreadPool = forte::ThreadPool::new();
+
+/// Number of cells evaluated by one Forte task before splitting dependants.
+const EVAL_BATCH_SIZE: usize = 1_000;
+
+const EVAL_TRACE_WORKERS: usize = 64;
+
+struct EvalTrace {
+    worker_time_ns: [AtomicU64; EVAL_TRACE_WORKERS],
+}
+
+/// Batch-local scratch buffers reused while a task walks dependant waves.
+struct EvalStore {
+    cells: Vec<AbsoluteCellId>,
+    next: Vec<AbsoluteCellId>,
+    cell_ranges: Vec<CellRange>,
+    formula_ids: Vec<Option<FormulaId>>,
+    expr_atoms: Vec<ExprAtom>,
+}
+
+impl EvalStore {
+    fn new(cells: Vec<AbsoluteCellId>) -> Self {
+        let batch_len = cells.len();
+        Self {
+            cells,
+            next: Vec::new(),
+            cell_ranges: Vec::with_capacity(batch_len),
+            formula_ids: Vec::with_capacity(batch_len),
+            expr_atoms: Vec::new(),
+        }
+    }
+}
 
 /// Bounding rectangle of affected cells. Returned by undo/redo.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -464,13 +495,10 @@ impl<R: tauri::Runtime> Engine<R> {
 
         // step 1: discover all affected dependants and set their pending counters (sync)
         let init_time = Instant::now();
-        let unique_cells: Vec<AbsoluteCellId> = changes
-            .iter()
-            .map(|CellUpdate(id, _, _)| *id)
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
-        let changed_ranges = merge_cells_into_ranges(&unique_cells);
+        let mut unique_cells: Vec<AbsoluteCellId> =
+            changes.iter().map(|CellUpdate(id, _, _)| *id).collect();
+        let mut changed_ranges = Vec::new();
+        merge_cells_into_ranges_into(&mut unique_cells, &mut changed_ranges);
         {
             let sheets = self.spreadsheet.sheets.read();
             self.spreadsheet
@@ -497,20 +525,27 @@ impl<R: tauri::Runtime> Engine<R> {
             }
         }
 
-        // step 3: evaluate formulas in topological order using forte's scoped parallelism.
-        //
-        // each cell is spawned as an async future on the scope. cells without external
-        // calls complete synchronously on first poll. cells that hit an extern call yield
-        // at the .await, freeing the worker. when the JS response arrives, the future is
-        // re-queued. this lets many cells be in flight per worker (vs 1-per-worker when
-        // blocking), so independent cells coalesce into one JS batch instead of N waves.
+        // step 3: evaluate formulas in topological order using batched Forte tasks.
+        // sorted batches let dependency updates query the graph by range, not by cell.
+        // each task evaluates up to EVAL_BATCH_SIZE cells locally. small dependant waves
+        // stay in the same task to avoid per-cell scheduling overhead; large waves are
+        // split into new tasks so idle workers can help.
         let eval_time = Instant::now();
+        let eval_trace = EvalTrace {
+            worker_time_ns: std::array::from_fn(|_| AtomicU64::new(0)),
+        };
         if !wave.is_empty() {
             let sp = &self.spreadsheet;
             EVAL_POOL.with_worker(|worker| {
                 worker.scope(|scope| {
-                    for cell in &wave {
-                        scope.spawn_on(worker, eval_cell(*cell, sp, scope));
+                    while !wave.is_empty() {
+                        // move batches out of the initial wave without cloning cell ids.
+                        let start = wave.len().saturating_sub(EVAL_BATCH_SIZE);
+                        let batch = wave.split_off(start);
+                        scope.spawn_on(
+                            worker,
+                            eval_cells_batch(EvalStore::new(batch), sp, scope, &eval_trace),
+                        );
                     }
                 });
             });
@@ -550,6 +585,31 @@ impl<R: tauri::Runtime> Engine<R> {
 
         info!("Eval (init pending counters) took: {:?}", init_duration);
         info!("Eval (running expressions) took: {:?}", eval_duration);
+        let mut active_workers = 0u64;
+        let mut total_ns = 0u64;
+        let mut max_ns = 0u64;
+        for worker_time in &eval_trace.worker_time_ns {
+            let ns = worker_time.load(Ordering::Relaxed);
+            if ns == 0 {
+                continue;
+            }
+            active_workers += 1;
+            total_ns += ns;
+            max_ns = max_ns.max(ns);
+        }
+        let avg_ns = if active_workers == 0 {
+            0
+        } else {
+            total_ns / active_workers
+        };
+        let imbalance_ns = max_ns.saturating_sub(avg_ns);
+        info!(
+            "Eval (execution time imbalance) took: {:?} (max={:?}, avg={:?}, workers={})",
+            std::time::Duration::from_nanos(imbalance_ns),
+            std::time::Duration::from_nanos(max_ns),
+            std::time::Duration::from_nanos(avg_ns),
+            active_workers,
+        );
         info!("Eval (detecting cycles) took: {:?}", cycle_duration);
         info!("Eval (updating tables) took: {:?}", table_time.elapsed());
     }
@@ -1664,6 +1724,7 @@ async fn eval_formula(
     eval_store: &mut Vec<ExprAtom>,
 ) -> Result<CellValue, EvalError> {
     eval_store.clear();
+    eval_store.reserve(ast.len());
     let sheets = &sp.sheets;
     let external_functions = &sp.external_functions;
     let sp_id = |id: &ExprId| spans.get(*id as usize).copied();
@@ -1833,56 +1894,125 @@ async fn eval_formula(
     Ok(value)
 }
 
-// evaluate a single cell, write result to grid, and spawn ready dependants onto the scope.
-// async because extern calls yield at await points, freeing the worker to poll other
-// pending cells. cells without extern calls complete synchronously on first poll.
+fn eval_cell<'a>(
+    cell_id: AbsoluteCellId,
+    formula_id: Option<FormulaId>,
+    sp: &'a Arc<Spreadsheet>,
+    eval_store: &'a mut Vec<ExprAtom>,
+) -> impl Future<Output = ()> + Send + 'a {
+    async move {
+        let Some(formula_id) = formula_id else {
+            return;
+        };
+        let Some(formula) = sp.formulas.get(formula_id) else {
+            return;
+        };
+        let val = match eval_formula(&formula.ast, &formula.spans, &cell_id, sp, eval_store).await {
+            Ok(v) => v,
+            Err(EvalError::Error(msg)) => CellValue::err(msg),
+            Err(EvalError::TypeError {
+                expected,
+                got,
+                span,
+            }) => {
+                let msg = format!("type error: expected {expected}, got {got}");
+                let formatted = format_eval_error(&formula.formula_string_template, &msg, span);
+                CellValue::err(formatted)
+            }
+            Err(EvalError::DivisionByZero { span }) => {
+                let formatted =
+                    format_eval_error(&formula.formula_string_template, "division by zero", span);
+                CellValue::err(formatted)
+            }
+        };
+        sp.set_value(&cell_id, val);
+    }
+}
+
+// evaluate one batch, then either continue with a small dependant wave or split a large one.
+// async because extern calls yield at await points, freeing the worker to poll other tasks.
 //
 // explicit `-> impl Future + Send` (not `async fn`) so Send inference propagates through
 // the call chain reliably; bare `async fn`'s opaque future sometimes fails to infer Send
 // when called from generic contexts like forte's `scope.spawn`.
-fn eval_cell<'scope, 'env: 'scope>(
-    cell_id: AbsoluteCellId,
+fn eval_cells_batch<'scope, 'env: 'scope>(
+    store: EvalStore,
     sp: &'scope Arc<Spreadsheet>,
     scope: &'scope forte::Scope<'scope, 'env>,
+    eval_trace: &'scope EvalTrace,
 ) -> impl Future<Output = ()> + Send + use<'scope, 'env> {
     async move {
-        let mut eval_store = Vec::new();
-        let formula_id = sp.get_cell(&cell_id).and_then(|c| c.defined_by_formula);
-        if let Some(formula_id) = formula_id {
-            if let Some(formula) = sp.formulas.get(formula_id) {
-                let val =
-                    match eval_formula(&formula.ast, &formula.spans, &cell_id, sp, &mut eval_store)
-                        .await
-                    {
-                        Ok(v) => v,
-                        Err(EvalError::Error(msg)) => CellValue::err(msg),
-                        Err(EvalError::TypeError {
-                            expected,
-                            got,
-                            span,
-                        }) => {
-                            let msg = format!("type error: expected {expected}, got {got}");
-                            let formatted =
-                                format_eval_error(&formula.formula_string_template, &msg, span);
-                            CellValue::err(formatted)
-                        }
-                        Err(EvalError::DivisionByZero { span }) => {
-                            let formatted = format_eval_error(
-                                &formula.formula_string_template,
-                                "division by zero",
-                                span,
-                            );
-                            CellValue::err(formatted)
-                        }
-                    };
-                sp.set_value(&cell_id, val);
+        let worker_index =
+            forte::Worker::map_current(|worker| worker.index()).unwrap_or(usize::MAX);
+        let worker_time = Instant::now();
+        let mut store = store;
+
+        loop {
+            if store.cells.is_empty() {
+                break;
+            }
+
+            merge_cells_into_ranges_into(&mut store.cells, &mut store.cell_ranges);
+
+            store.formula_ids.clear();
+            store.formula_ids.reserve(store.cells.len());
+            {
+                let sheets = sp.sheets.read();
+                for &cell in &store.cells {
+                    // collect formula ids under one sheet lock for the whole batch.
+                    let grid_id: GridCellId = (&cell).into();
+                    store
+                        .formula_ids
+                        .push(sheets[cell.sheet_id as usize].grid.get_formula_id(&grid_id));
+                }
+            }
+
+            for (i, &cell) in store.cells.iter().enumerate() {
+                // eval_formula may await external calls, so the sheet guard must be dropped first.
+                eval_cell(cell, store.formula_ids[i], sp, &mut store.expr_atoms).await;
+            }
+
+            store.cells.clear();
+            {
+                let sheets = sp.sheets.read();
+                for &range in &store.cell_ranges {
+                    // one graph query per evaluated range avoids per-cell R-tree traversal.
+                    sp.dependency_graph.decrease_pending_counter_into(
+                        &sheets,
+                        range,
+                        &mut store.next,
+                    );
+                }
+            }
+            store.cell_ranges.clear();
+
+            if store.next.is_empty() {
+                break;
+            }
+            if store.next.len() <= EVAL_BATCH_SIZE {
+                // keep one dependant batch local to reuse this task's scratch buffers.
+                std::mem::swap(&mut store.cells, &mut store.next);
+                store.next.clear();
+            } else {
+                while store.next.len() > EVAL_BATCH_SIZE {
+                    // move full batches into new tasks without cloning cell ids.
+                    let batch = store.next.split_off(store.next.len() - EVAL_BATCH_SIZE);
+                    scope.spawn(eval_cells_batch(
+                        EvalStore::new(batch),
+                        sp,
+                        scope,
+                        eval_trace,
+                    ));
+                }
+                // keep the remaining batch local instead of allocating one more task store.
+                std::mem::swap(&mut store.cells, &mut store.next);
+                store.next.clear();
             }
         }
-        let ready = sp
-            .dependency_graph
-            .decrease_pending_counter(&sp.sheets.read(), CellRange::single(cell_id));
-        for r in ready {
-            scope.spawn(eval_cell(r, sp, scope));
+
+        if worker_index < EVAL_TRACE_WORKERS {
+            eval_trace.worker_time_ns[worker_index]
+                .fetch_add(worker_time.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
     }
 }
@@ -1914,22 +2044,29 @@ fn compute_bounds(changes: &[CellUpdate]) -> ChangeBounds {
 //
 // e.g. a 10x10 paste -> 10 row ranges -> 1 rectangle.
 // two disjoint 5x5 blocks -> 10 row ranges -> 2 rectangles.
+#[cfg(test)]
 fn merge_cells_into_ranges(cells: &[AbsoluteCellId]) -> Vec<CellRange> {
-    if cells.len() <= 1 {
-        return cells.iter().map(|&c| CellRange::single(c)).collect();
+    let mut sorted = cells.to_vec();
+    let mut merged = Vec::new();
+    merge_cells_into_ranges_into(&mut sorted, &mut merged);
+    merged
+}
+
+fn merge_cells_into_ranges_into(cells: &mut Vec<AbsoluteCellId>, out: &mut Vec<CellRange>) {
+    out.clear();
+    if cells.is_empty() {
+        return;
     }
 
-    // pass 1: sort and merge consecutive same-row cells into row ranges
-    let mut sorted = cells.to_vec();
-    sorted.sort_unstable_by_key(|c| (c.sheet_id, c.row, c.col));
-
-    let mut row_ranges: Vec<CellRange> = Vec::new();
-    let (mut start, mut end) = (sorted[0], sorted[0]);
-    for &cell in &sorted[1..] {
+    // pass 1: sort, dedup, and merge consecutive same-row cells into row ranges.
+    cells.sort_unstable_by_key(|c| (c.sheet_id, c.row, c.col));
+    cells.dedup();
+    let (mut start, mut end) = (cells[0], cells[0]);
+    for &cell in &cells[1..] {
         if cell.sheet_id == end.sheet_id && cell.row == end.row && cell.col == end.col + 1 {
             end = cell;
         } else {
-            row_ranges.push(CellRange::new(
+            out.push(CellRange::new(
                 start.sheet_id,
                 start.row,
                 start.col,
@@ -1940,7 +2077,7 @@ fn merge_cells_into_ranges(cells: &[AbsoluteCellId]) -> Vec<CellRange> {
             end = cell;
         }
     }
-    row_ranges.push(CellRange::new(
+    out.push(CellRange::new(
         start.sheet_id,
         start.row,
         start.col,
@@ -1949,9 +2086,10 @@ fn merge_cells_into_ranges(cells: &[AbsoluteCellId]) -> Vec<CellRange> {
     ));
 
     // pass 2: stack consecutive row ranges with the same column span into rectangles
-    let mut merged: Vec<CellRange> = Vec::new();
-    let mut current = row_ranges[0];
-    for &range in &row_ranges[1..] {
+    let mut write = 0usize;
+    let mut current = out[0];
+    for i in 1..out.len() {
+        let range = out[i];
         if range.sheet_id == current.sheet_id
             && range.start_row == current.end_row + 1
             && range.start_col == current.start_col
@@ -1959,12 +2097,13 @@ fn merge_cells_into_ranges(cells: &[AbsoluteCellId]) -> Vec<CellRange> {
         {
             current.end_row = range.end_row;
         } else {
-            merged.push(current);
+            out[write] = current;
+            write += 1;
             current = range;
         }
     }
-    merged.push(current);
-    merged
+    out[write] = current;
+    out.truncate(write + 1);
 }
 
 #[cfg(test)]
@@ -1995,6 +2134,15 @@ mod tests {
             .get_cell(&id)
             .map(|cell| cell.val.clone());
         assert_eq!(value, Some(CellValue::Number(Decimal::from(expected))));
+    }
+
+    #[test]
+    fn ordered_cell_ranges_do_not_cover_gaps() {
+        let cells = [cell(0, 0), cell(0, 1), cell(1, 0), cell(1, 1), cell(3, 0)];
+        assert_eq!(
+            merge_cells_into_ranges(&cells),
+            vec![CellRange::new(0, 0, 0, 1, 1), CellRange::new(0, 3, 0, 3, 0)]
+        );
     }
 
     #[test]

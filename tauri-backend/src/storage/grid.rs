@@ -302,7 +302,23 @@ impl Grid {
     }
 
     pub fn get_value(&self, id: &GridCellId) -> Option<CellValue> {
-        self.get_cell(id).map(|cell| cell.val)
+        let idx = id.block_idx(self.stride);
+        let block = self.blocks.get(idx)?.as_ref()?;
+        let (r, c) = id.local();
+        block.cells[r][c]
+            .read()
+            .as_ref()
+            .map(|cell| cell.val.clone())
+    }
+
+    pub fn get_formula_id(&self, id: &GridCellId) -> Option<FormulaId> {
+        let idx = id.block_idx(self.stride);
+        let block = self.blocks.get(idx)?.as_ref()?;
+        let (r, c) = id.local();
+        block.cells[r][c]
+            .read()
+            .as_ref()
+            .and_then(|cell| cell.defined_by_formula)
     }
 
     // exclusive access: can create blocks. used during normal mutation path.
