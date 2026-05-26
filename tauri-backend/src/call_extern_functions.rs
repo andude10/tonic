@@ -60,7 +60,6 @@ pub fn ext_fn_poll(request: tauri::ipc::Request<'_>) -> tauri::ipc::Response {
     }
 }
 
-#[allow(dead_code)]
 pub async fn call(func_name: &str, args: Vec<ExtFnArg>) -> Result<CellValue, EvalError> {
     let (tx, rx) = futures::channel::oneshot::channel();
     CALL_TX
