@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use parking_lot::RwLock;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
@@ -41,7 +40,8 @@ pub type DefaultRuntime = tauri::test::MockRuntime;
 static EVAL_POOL: forte::ThreadPool = forte::ThreadPool::new();
 
 /// Number of cells evaluated by one Forte task before splitting dependants.
-const EVAL_BATCH_SIZE: usize = 1_000;
+/// Should be aligned to the block size (like 1024, 2048, etc)
+const EVAL_BATCH_SIZE: usize = 1024;
 
 const EVAL_TRACE_WORKERS: usize = 64;
 
@@ -536,6 +536,7 @@ impl<R: tauri::Runtime> Engine<R> {
         };
         if !wave.is_empty() {
             let sp = &self.spreadsheet;
+            let sheets = sp.sheets.read();
             EVAL_POOL.with_worker(|worker| {
                 worker.scope(|scope| {
                     while !wave.is_empty() {
@@ -544,7 +545,13 @@ impl<R: tauri::Runtime> Engine<R> {
                         let batch = wave.split_off(start);
                         scope.spawn_on(
                             worker,
-                            eval_cells_batch(EvalStore::new(batch), sp, scope, &eval_trace),
+                            eval_cells_batch(
+                                EvalStore::new(batch),
+                                sp,
+                                &sheets,
+                                scope,
+                                &eval_trace,
+                            ),
                         );
                     }
                 });
@@ -1463,7 +1470,7 @@ impl<R: tauri::Runtime> Engine<R> {
 fn resolve_number(
     source_cell: &AbsoluteCellId,
     expr: &ExprAtom,
-    sheets: &Arc<RwLock<Sheets>>,
+    sheets: &Sheets,
 ) -> Result<Decimal, EvalError> {
     match expr {
         ExprAtom::Number(n) => Ok(*n),
@@ -1473,7 +1480,7 @@ fn resolve_number(
                 let row = row.to_index(source_cell.row);
                 let col = col.to_index(source_cell.col);
                 let gid = GridCellId { row, col };
-                match sheets.read()[*sheet_id as usize].grid.get_value(&gid) {
+                match sheets[*sheet_id as usize].grid.get_value(&gid) {
                     Some(CellValue::Number(n)) => Ok(n),
                     Some(CellValue::Text(_)) => Err(EvalError::TypeError {
                         expected: AtomType::Number,
@@ -1512,7 +1519,7 @@ fn resolve_number(
 fn resolve_bool(
     source_cell: &AbsoluteCellId,
     expr: &ExprAtom,
-    sheets: &Arc<RwLock<Sheets>>,
+    sheets: &Sheets,
 ) -> Result<bool, EvalError> {
     match expr {
         ExprAtom::Bool(b) => Ok(*b),
@@ -1522,7 +1529,7 @@ fn resolve_bool(
                 let row = row.to_index(source_cell.row);
                 let col = col.to_index(source_cell.col);
                 let gid = GridCellId { row, col };
-                match sheets.read()[*sheet_id as usize].grid.get_value(&gid) {
+                match sheets[*sheet_id as usize].grid.get_value(&gid) {
                     Some(CellValue::Bool(b)) => Ok(b),
                     Some(CellValue::Number(_)) => Err(EvalError::TypeError {
                         expected: AtomType::Bool,
@@ -1561,7 +1568,7 @@ fn resolve_bool(
 fn resolve_to_cell_value(
     source_cell: &AbsoluteCellId,
     expr: ExprAtom,
-    sheets: &Arc<RwLock<Sheets>>,
+    sheets: &Sheets,
 ) -> CellValue {
     match expr {
         ExprAtom::Number(n) => CellValue::Number(n),
@@ -1572,7 +1579,7 @@ fn resolve_to_cell_value(
             let row = row.to_index(source_cell.row);
             let col = col.to_index(source_cell.col);
             let gid = GridCellId { row, col };
-            sheets.read()[sheet_id as usize]
+            sheets[sheet_id as usize]
                 .grid
                 .get_value(&gid)
                 .unwrap_or(CellValue::Number(Decimal::ZERO))
@@ -1623,7 +1630,7 @@ fn resolve_range(
 const PARALLEL_RANGE_THRESHOLD: u64 = 1_000_000;
 
 fn parallel_sum_count(
-    sp: &Arc<Spreadsheet>,
+    sheets: &Sheets,
     sheet_id: u32,
     sr: u32,
     sc: u32,
@@ -1632,7 +1639,6 @@ fn parallel_sum_count(
 ) -> (Decimal, u64) {
     let total_cells = (er - sr + 1) as u64 * (ec - sc + 1) as u64;
     if total_cells <= PARALLEL_RANGE_THRESHOLD {
-        let sheets = sp.sheets.read();
         let sheet = &sheets[sheet_id as usize].grid;
         let mut sum = Decimal::ZERO;
         let mut count = 0u64;
@@ -1646,7 +1652,7 @@ fn parallel_sum_count(
     }
 
     fn split(
-        sp: &Arc<Spreadsheet>,
+        sheets: &Sheets,
         sheet_id: u32,
         sr: u32,
         sc: u32,
@@ -1657,7 +1663,6 @@ fn parallel_sum_count(
         let rows = (er - sr + 1) as u64;
         let cols = (ec - sc + 1) as u64;
         if rows * cols <= 64_000 {
-            let sheets = sp.sheets.read();
             let sheet = &sheets[sheet_id as usize].grid;
             let mut sum = Decimal::ZERO;
             let mut count = 0u64;
@@ -1671,13 +1676,13 @@ fn parallel_sum_count(
         }
         let mid = (sr + er) / 2;
         let ((ls, lc), (rs, rc)) = worker.join(
-            |w| split(sp, sheet_id, sr, sc, mid, ec, w),
-            |w| split(sp, sheet_id, mid + 1, sc, er, ec, w),
+            |w| split(sheets, sheet_id, sr, sc, mid, ec, w),
+            |w| split(sheets, sheet_id, mid + 1, sc, er, ec, w),
         );
         (ls + rs, lc + rc)
     }
 
-    forte::Worker::with_current(|w| split(sp, sheet_id, sr, sc, er, ec, w.unwrap()))
+    forte::Worker::with_current(|w| split(sheets, sheet_id, sr, sc, er, ec, w.unwrap()))
 }
 
 fn resolve_extern_arg(atom: &ExprAtom, source_cell: &AbsoluteCellId, sheets: &Sheets) -> ExtFnArg {
@@ -1721,11 +1726,11 @@ async fn eval_formula(
     spans: &[(u32, u32)],
     source_cell: &AbsoluteCellId,
     sp: &Arc<Spreadsheet>,
+    sheets: &Sheets,
     eval_store: &mut Vec<ExprAtom>,
 ) -> Result<CellValue, EvalError> {
     eval_store.clear();
     eval_store.reserve(ast.len());
-    let sheets = &sp.sheets;
     let external_functions = &sp.external_functions;
     let sp_id = |id: &ExprId| spans.get(*id as usize).copied();
 
@@ -1792,13 +1797,13 @@ async fn eval_formula(
             Expr::Sum(range_id) => {
                 let (sheet_id, sr, sc, er, ec) =
                     resolve_range(source_cell, &eval_store[*range_id as usize])?;
-                let (sum, _) = parallel_sum_count(sp, sheet_id, sr, sc, er, ec);
+                let (sum, _) = parallel_sum_count(sheets, sheet_id, sr, sc, er, ec);
                 ExprAtom::Number(sum)
             }
             Expr::Avg(range_id) => {
                 let (sheet_id, sr, sc, er, ec) =
                     resolve_range(source_cell, &eval_store[*range_id as usize])?;
-                let (sum, count) = parallel_sum_count(sp, sheet_id, sr, sc, er, ec);
+                let (sum, count) = parallel_sum_count(sheets, sheet_id, sr, sc, er, ec);
                 if count == 0 {
                     ExprAtom::Number(Decimal::ZERO)
                 } else {
@@ -1808,7 +1813,6 @@ async fn eval_formula(
             Expr::Min(range_id) => {
                 let (sheet_id, sr, sc, er, ec) =
                     resolve_range(source_cell, &eval_store[*range_id as usize])?;
-                let sheets = sp.sheets.read();
                 let sheet = &sheets[sheet_id as usize].grid;
                 let mut min: Option<Decimal> = None;
                 sheet.for_each_value_in_range(sr, sc, er, ec, |val| {
@@ -1821,7 +1825,6 @@ async fn eval_formula(
             Expr::Max(range_id) => {
                 let (sheet_id, sr, sc, er, ec) =
                     resolve_range(source_cell, &eval_store[*range_id as usize])?;
-                let sheets = sp.sheets.read();
                 let sheet = &sheets[sheet_id as usize].grid;
                 let mut max: Option<Decimal> = None;
                 sheet.for_each_value_in_range(sr, sc, er, ec, |val| {
@@ -1836,8 +1839,7 @@ async fn eval_formula(
                     resolve_range(source_cell, &eval_store[*range_id as usize])?;
                 let target = resolve_number(source_cell, &eval_store[*value_id as usize], sheets)
                     .map_err(|e| e.with_span(sp_id(value_id)))?;
-                let sheets_guard = sp.sheets.read();
-                let sheet = &sheets_guard[sheet_id as usize].grid;
+                let sheet = &sheets[sheet_id as usize].grid;
                 let mut count = 0u64;
                 sheet.for_each_value_in_range(sr, sc, er, ec, |val| {
                     if let CellValue::Number(n) = val {
@@ -1870,14 +1872,12 @@ async fn eval_formula(
                     )));
                 }
 
-                let js_args: Vec<ExtFnArg> = {
-                    let sheets = sp.sheets.read();
-                    args.iter()
-                        .map(|expr_id| {
-                            resolve_extern_arg(&eval_store[*expr_id as usize], source_cell, &sheets)
-                        })
-                        .collect()
-                };
+                let js_args: Vec<ExtFnArg> = args
+                    .iter()
+                    .map(|expr_id| {
+                        resolve_extern_arg(&eval_store[*expr_id as usize], source_cell, sheets)
+                    })
+                    .collect();
 
                 let cell_value = call_extern_functions::call(&func.name, js_args).await?;
                 if let CellValue::Error(s, _) = &cell_value {
@@ -1889,7 +1889,7 @@ async fn eval_formula(
         eval_store.push(res);
     }
 
-    let value = resolve_to_cell_value(source_cell, eval_store.pop().unwrap(), &sp.sheets);
+    let value = resolve_to_cell_value(source_cell, eval_store.pop().unwrap(), sheets);
 
     Ok(value)
 }
@@ -1898,6 +1898,7 @@ fn eval_cell<'a>(
     cell_id: AbsoluteCellId,
     formula_id: Option<FormulaId>,
     sp: &'a Arc<Spreadsheet>,
+    sheets: &'a Sheets,
     eval_store: &'a mut Vec<ExprAtom>,
 ) -> impl Future<Output = ()> + Send + 'a {
     async move {
@@ -1907,7 +1908,16 @@ fn eval_cell<'a>(
         let Some(formula) = sp.formulas.get(formula_id) else {
             return;
         };
-        let val = match eval_formula(&formula.ast, &formula.spans, &cell_id, sp, eval_store).await {
+        let val = match eval_formula(
+            &formula.ast,
+            &formula.spans,
+            &cell_id,
+            sp,
+            sheets,
+            eval_store,
+        )
+        .await
+        {
             Ok(v) => v,
             Err(EvalError::Error(msg)) => CellValue::err(msg),
             Err(EvalError::TypeError {
@@ -1925,7 +1935,10 @@ fn eval_cell<'a>(
                 CellValue::err(formatted)
             }
         };
-        sp.set_value(&cell_id, val);
+        let grid_id: GridCellId = (&cell_id).into();
+        sheets[cell_id.sheet_id as usize]
+            .grid
+            .set_value(&grid_id, val);
     }
 }
 
@@ -1938,6 +1951,7 @@ fn eval_cell<'a>(
 fn eval_cells_batch<'scope, 'env: 'scope>(
     store: EvalStore,
     sp: &'scope Arc<Spreadsheet>,
+    sheets: &'scope Sheets,
     scope: &'scope forte::Scope<'scope, 'env>,
     eval_trace: &'scope EvalTrace,
 ) -> impl Future<Output = ()> + Send + use<'scope, 'env> {
@@ -1956,33 +1970,31 @@ fn eval_cells_batch<'scope, 'env: 'scope>(
 
             store.formula_ids.clear();
             store.formula_ids.reserve(store.cells.len());
-            {
-                let sheets = sp.sheets.read();
-                for &cell in &store.cells {
-                    // collect formula ids under one sheet lock for the whole batch.
-                    let grid_id: GridCellId = (&cell).into();
-                    store
-                        .formula_ids
-                        .push(sheets[cell.sheet_id as usize].grid.get_formula_id(&grid_id));
-                }
+            for &cell in &store.cells {
+                // collect formula ids through the scope-level sheet guard.
+                let grid_id: GridCellId = (&cell).into();
+                store
+                    .formula_ids
+                    .push(sheets[cell.sheet_id as usize].grid.get_formula_id(&grid_id));
             }
 
             for (i, &cell) in store.cells.iter().enumerate() {
-                // eval_formula may await external calls, so the sheet guard must be dropped first.
-                eval_cell(cell, store.formula_ids[i], sp, &mut store.expr_atoms).await;
+                // eval_formula may await external calls, but sheet structure stays read-locked by the scope.
+                eval_cell(
+                    cell,
+                    store.formula_ids[i],
+                    sp,
+                    sheets,
+                    &mut store.expr_atoms,
+                )
+                .await;
             }
 
             store.cells.clear();
-            {
-                let sheets = sp.sheets.read();
-                for &range in &store.cell_ranges {
-                    // one graph query per evaluated range avoids per-cell R-tree traversal.
-                    sp.dependency_graph.decrease_pending_counter_into(
-                        &sheets,
-                        range,
-                        &mut store.next,
-                    );
-                }
+            for &range in &store.cell_ranges {
+                // one graph query per evaluated range avoids per-cell R-tree traversal.
+                sp.dependency_graph
+                    .decrease_pending_counter_into(sheets, range, &mut store.next);
             }
             store.cell_ranges.clear();
 
@@ -2000,6 +2012,7 @@ fn eval_cells_batch<'scope, 'env: 'scope>(
                     scope.spawn(eval_cells_batch(
                         EvalStore::new(batch),
                         sp,
+                        sheets,
                         scope,
                         eval_trace,
                     ));
