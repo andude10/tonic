@@ -38,13 +38,17 @@ pub type DefaultRuntime = tauri::Wry;
 pub type DefaultRuntime = tauri::test::MockRuntime;
 
 /// Dedicated thread pool for parallel formula evaluation (heartbeat scheduling).
+#[allow(dead_code)]
 static EVAL_POOL: forte::ThreadPool = forte::ThreadPool::new();
 
 /// Number of cells evaluated by one Forte task before splitting dependants.
+#[allow(dead_code)]
 const EVAL_BATCH_SIZE: usize = 1_000;
 
+#[allow(dead_code)]
 const EVAL_TRACE_WORKERS: usize = 64;
 
+#[allow(dead_code)]
 struct EvalTrace {
     worker_time_ns: [AtomicU64; EVAL_TRACE_WORKERS],
 }
@@ -270,7 +274,8 @@ impl Engine<DefaultRuntime> {
 
 impl<R: tauri::Runtime> Engine<R> {
     fn new_without_app() -> Self {
-        EVAL_POOL.resize_to_available();
+        // sync eval baseline: leave the Forte pool unstarted.
+        // EVAL_POOL.resize_to_available();
         call_extern_functions::init();
 
         Self {
@@ -525,30 +530,11 @@ impl<R: tauri::Runtime> Engine<R> {
             }
         }
 
-        // step 3: evaluate formulas in topological order using batched Forte tasks.
-        // sorted batches let dependency updates query the graph by range, not by cell.
-        // each task evaluates up to EVAL_BATCH_SIZE cells locally. small dependant waves
-        // stay in the same task to avoid per-cell scheduling overhead; large waves are
-        // split into new tasks so idle workers can help.
+        // step 3: evaluate formulas in topological order on this thread.
+        // sync baseline for comparing against the batched Forte evaluator.
         let eval_time = Instant::now();
-        let eval_trace = EvalTrace {
-            worker_time_ns: std::array::from_fn(|_| AtomicU64::new(0)),
-        };
         if !wave.is_empty() {
-            let sp = &self.spreadsheet;
-            EVAL_POOL.with_worker(|worker| {
-                worker.scope(|scope| {
-                    while !wave.is_empty() {
-                        // move batches out of the initial wave without cloning cell ids.
-                        let start = wave.len().saturating_sub(EVAL_BATCH_SIZE);
-                        let batch = wave.split_off(start);
-                        scope.spawn_on(
-                            worker,
-                            eval_cells_batch(EvalStore::new(batch), sp, scope, &eval_trace),
-                        );
-                    }
-                });
-            });
+            eval_cells_sync(EvalStore::new(wave), &self.spreadsheet);
         }
         let eval_duration = eval_time.elapsed();
 
@@ -585,31 +571,6 @@ impl<R: tauri::Runtime> Engine<R> {
 
         info!("Eval (init pending counters) took: {:?}", init_duration);
         info!("Eval (running expressions) took: {:?}", eval_duration);
-        let mut active_workers = 0u64;
-        let mut total_ns = 0u64;
-        let mut max_ns = 0u64;
-        for worker_time in &eval_trace.worker_time_ns {
-            let ns = worker_time.load(Ordering::Relaxed);
-            if ns == 0 {
-                continue;
-            }
-            active_workers += 1;
-            total_ns += ns;
-            max_ns = max_ns.max(ns);
-        }
-        let avg_ns = if active_workers == 0 {
-            0
-        } else {
-            total_ns / active_workers
-        };
-        let imbalance_ns = max_ns.saturating_sub(avg_ns);
-        info!(
-            "Eval (execution time imbalance) took: {:?} (max={:?}, avg={:?}, workers={})",
-            std::time::Duration::from_nanos(imbalance_ns),
-            std::time::Duration::from_nanos(max_ns),
-            std::time::Duration::from_nanos(avg_ns),
-            active_workers,
-        );
         info!("Eval (detecting cycles) took: {:?}", cycle_duration);
         info!("Eval (updating tables) took: {:?}", table_time.elapsed());
     }
@@ -1617,12 +1578,8 @@ fn resolve_range(
     }
 }
 
-/// Parallel sum+count over a cell range. Uses forte::join to binary-split rows
-/// across the thread pool. The heartbeat scheduler decides when to actually
-/// parallelize; small ranges run sequentially with no overhead.
-const PARALLEL_RANGE_THRESHOLD: u64 = 1_000_000;
-
-fn parallel_sum_count(
+/// Sequential sum+count over a cell range for the sync eval baseline.
+fn sum_count(
     sp: &Arc<Spreadsheet>,
     sheet_id: u32,
     sr: u32,
@@ -1630,56 +1587,20 @@ fn parallel_sum_count(
     er: u32,
     ec: u32,
 ) -> (Decimal, u64) {
-    let total_cells = (er - sr + 1) as u64 * (ec - sc + 1) as u64;
-    if total_cells <= PARALLEL_RANGE_THRESHOLD {
-        let sheets = sp.sheets.read();
-        let sheet = &sheets[sheet_id as usize].grid;
-        let mut sum = Decimal::ZERO;
-        let mut count = 0u64;
-        sheet.for_each_value_in_range(sr, sc, er, ec, |val| {
-            if let CellValue::Number(n) = val {
-                sum += *n;
-                count += 1;
-            }
-        });
-        return (sum, count);
-    }
-
-    fn split(
-        sp: &Arc<Spreadsheet>,
-        sheet_id: u32,
-        sr: u32,
-        sc: u32,
-        er: u32,
-        ec: u32,
-        worker: &forte::Worker,
-    ) -> (Decimal, u64) {
-        let rows = (er - sr + 1) as u64;
-        let cols = (ec - sc + 1) as u64;
-        if rows * cols <= 64_000 {
-            let sheets = sp.sheets.read();
-            let sheet = &sheets[sheet_id as usize].grid;
-            let mut sum = Decimal::ZERO;
-            let mut count = 0u64;
-            sheet.for_each_value_in_range(sr, sc, er, ec, |val| {
-                if let CellValue::Number(n) = val {
-                    sum += *n;
-                    count += 1;
-                }
-            });
-            return (sum, count);
+    let sheets = sp.sheets.read();
+    let sheet = &sheets[sheet_id as usize].grid;
+    let mut sum = Decimal::ZERO;
+    let mut count = 0u64;
+    sheet.for_each_value_in_range(sr, sc, er, ec, |val| {
+        if let CellValue::Number(n) = val {
+            sum += *n;
+            count += 1;
         }
-        let mid = (sr + er) / 2;
-        let ((ls, lc), (rs, rc)) = worker.join(
-            |w| split(sp, sheet_id, sr, sc, mid, ec, w),
-            |w| split(sp, sheet_id, mid + 1, sc, er, ec, w),
-        );
-        (ls + rs, lc + rc)
-    }
-
-    forte::Worker::with_current(|w| split(sp, sheet_id, sr, sc, er, ec, w.unwrap()))
+    });
+    (sum, count)
 }
 
+#[allow(dead_code)]
 fn resolve_extern_arg(atom: &ExprAtom, source_cell: &AbsoluteCellId, sheets: &Sheets) -> ExtFnArg {
     match atom {
         ExprAtom::Number(_) | ExprAtom::Text(_) | ExprAtom::Bool(_) => {
@@ -1716,7 +1637,7 @@ fn resolve_extern_arg(atom: &ExprAtom, source_cell: &AbsoluteCellId, sheets: &Sh
 }
 
 /// Evaluate a single formula's AST, returning the computed CellValue.
-async fn eval_formula(
+fn eval_formula(
     ast: &[Expr],
     spans: &[(u32, u32)],
     source_cell: &AbsoluteCellId,
@@ -1726,7 +1647,6 @@ async fn eval_formula(
     eval_store.clear();
     eval_store.reserve(ast.len());
     let sheets = &sp.sheets;
-    let external_functions = &sp.external_functions;
     let sp_id = |id: &ExprId| spans.get(*id as usize).copied();
 
     for expr in ast {
@@ -1792,13 +1712,13 @@ async fn eval_formula(
             Expr::Sum(range_id) => {
                 let (sheet_id, sr, sc, er, ec) =
                     resolve_range(source_cell, &eval_store[*range_id as usize])?;
-                let (sum, _) = parallel_sum_count(sp, sheet_id, sr, sc, er, ec);
+                let (sum, _) = sum_count(sp, sheet_id, sr, sc, er, ec);
                 ExprAtom::Number(sum)
             }
             Expr::Avg(range_id) => {
                 let (sheet_id, sr, sc, er, ec) =
                     resolve_range(source_cell, &eval_store[*range_id as usize])?;
-                let (sum, count) = parallel_sum_count(sp, sheet_id, sr, sc, er, ec);
+                let (sum, count) = sum_count(sp, sheet_id, sr, sc, er, ec);
                 if count == 0 {
                     ExprAtom::Number(Decimal::ZERO)
                 } else {
@@ -1857,33 +1777,11 @@ async fn eval_formula(
                     eval_store[*else_id as usize].clone()
                 }
             }
-            Expr::ExternalFunctionCall { func_id, args } => {
-                let Some(func) = external_functions.get(*func_id) else {
-                    return Err(EvalError::Error(format!("unknown function id {}", func_id)));
-                };
-                if args.len() != func.args.len() {
-                    return Err(EvalError::Error(format!(
-                        "{}(): expected {} args, got {}",
-                        func.name,
-                        func.args.len(),
-                        args.len()
-                    )));
-                }
-
-                let js_args: Vec<ExtFnArg> = {
-                    let sheets = sp.sheets.read();
-                    args.iter()
-                        .map(|expr_id| {
-                            resolve_extern_arg(&eval_store[*expr_id as usize], source_cell, &sheets)
-                        })
-                        .collect()
-                };
-
-                let cell_value = call_extern_functions::call(&func.name, js_args).await?;
-                if let CellValue::Error(s, _) = &cell_value {
-                    return Err(EvalError::Error(s.to_string()));
-                }
-                ExprAtom::from(cell_value)
+            Expr::ExternalFunctionCall { .. } => {
+                // sync baseline ignores JS calls instead of yielding to the async IPC path.
+                return Err(EvalError::Error(
+                    "external calls are disabled in sync eval".to_string(),
+                ));
             }
         };
         eval_store.push(res);
@@ -1894,44 +1792,89 @@ async fn eval_formula(
     Ok(value)
 }
 
-fn eval_cell<'a>(
+fn eval_cell(
     cell_id: AbsoluteCellId,
     formula_id: Option<FormulaId>,
-    sp: &'a Arc<Spreadsheet>,
-    eval_store: &'a mut Vec<ExprAtom>,
-) -> impl Future<Output = ()> + Send + 'a {
-    async move {
-        let Some(formula_id) = formula_id else {
-            return;
-        };
-        let Some(formula) = sp.formulas.get(formula_id) else {
-            return;
-        };
-        let val = match eval_formula(&formula.ast, &formula.spans, &cell_id, sp, eval_store).await {
-            Ok(v) => v,
-            Err(EvalError::Error(msg)) => CellValue::err(msg),
-            Err(EvalError::TypeError {
-                expected,
-                got,
-                span,
-            }) => {
-                let msg = format!("type error: expected {expected}, got {got}");
-                let formatted = format_eval_error(&formula.formula_string_template, &msg, span);
-                CellValue::err(formatted)
+    sp: &Arc<Spreadsheet>,
+    eval_store: &mut Vec<ExprAtom>,
+) {
+    let Some(formula_id) = formula_id else {
+        return;
+    };
+    let Some(formula) = sp.formulas.get(formula_id) else {
+        return;
+    };
+    let val = match eval_formula(&formula.ast, &formula.spans, &cell_id, sp, eval_store) {
+        Ok(v) => v,
+        Err(EvalError::Error(msg)) => CellValue::err(msg),
+        Err(EvalError::TypeError {
+            expected,
+            got,
+            span,
+        }) => {
+            let msg = format!("type error: expected {expected}, got {got}");
+            let formatted = format_eval_error(&formula.formula_string_template, &msg, span);
+            CellValue::err(formatted)
+        }
+        Err(EvalError::DivisionByZero { span }) => {
+            let formatted =
+                format_eval_error(&formula.formula_string_template, "division by zero", span);
+            CellValue::err(formatted)
+        }
+    };
+    sp.set_value(&cell_id, val);
+}
+
+fn eval_cells_sync(mut store: EvalStore, sp: &Arc<Spreadsheet>) {
+    loop {
+        if store.cells.is_empty() {
+            break;
+        }
+
+        // sort and merge the current ready wave for cheaper graph updates.
+        merge_cells_into_ranges_into(&mut store.cells, &mut store.cell_ranges);
+
+        store.formula_ids.clear();
+        store.formula_ids.reserve(store.cells.len());
+        {
+            let sheets = sp.sheets.read();
+            for &cell in &store.cells {
+                // collect formula ids under one sheet lock for the whole wave.
+                let grid_id: GridCellId = (&cell).into();
+                store
+                    .formula_ids
+                    .push(sheets[cell.sheet_id as usize].grid.get_formula_id(&grid_id));
             }
-            Err(EvalError::DivisionByZero { span }) => {
-                let formatted =
-                    format_eval_error(&formula.formula_string_template, "division by zero", span);
-                CellValue::err(formatted)
+        }
+
+        for (i, &cell) in store.cells.iter().enumerate() {
+            // evaluate after dropping the sheet guard so writes can lock the grid.
+            eval_cell(cell, store.formula_ids[i], sp, &mut store.expr_atoms);
+        }
+
+        store.cells.clear();
+        {
+            let sheets = sp.sheets.read();
+            for &range in &store.cell_ranges {
+                // decrement dependants after the whole ready wave has been evaluated.
+                sp.dependency_graph
+                    .decrease_pending_counter_into(&sheets, range, &mut store.next);
             }
-        };
-        sp.set_value(&cell_id, val);
+        }
+        store.cell_ranges.clear();
+
+        if store.next.is_empty() {
+            break;
+        }
+
+        // continue with the next topological wave on the same thread.
+        std::mem::swap(&mut store.cells, &mut store.next);
+        store.next.clear();
     }
 }
 
-// evaluate one batch, then either continue with a small dependant wave or split a large one.
-// async because extern calls yield at await points, freeing the worker to poll other tasks.
-//
+#[allow(dead_code)]
+// parallel batch evaluator kept for restoring the Forte comparison path after sync testing.
 // explicit `-> impl Future + Send` (not `async fn`) so Send inference propagates through
 // the call chain reliably; bare `async fn`'s opaque future sometimes fails to infer Send
 // when called from generic contexts like forte's `scope.spawn`.
@@ -1968,8 +1911,8 @@ fn eval_cells_batch<'scope, 'env: 'scope>(
             }
 
             for (i, &cell) in store.cells.iter().enumerate() {
-                // eval_formula may await external calls, so the sheet guard must be dropped first.
-                eval_cell(cell, store.formula_ids[i], sp, &mut store.expr_atoms).await;
+                // sync baseline ignores external calls, so no formula await happens here.
+                eval_cell(cell, store.formula_ids[i], sp, &mut store.expr_atoms);
             }
 
             store.cells.clear();
