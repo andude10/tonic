@@ -1,12 +1,13 @@
 import { createContext } from "svelte";
 
 export const REF_COLORS = [
-    "#d98c5f",
-    "#6aab7b",
-    "#c4a24d",
-    "#9a7ec8",
-    "#5ba8a8",
+    "#b45f2f",
+    "#3f8a55",
+    "#967510",
+    "#8066b8",
+    "#238386",
 ];
+export const FORMULA_FUNCTION_COLOR = "#397db4";
 
 /** User-facing cell ID: letter column, 1-indexed row. Only at SVAR grid boundary. */
 export type UICell = { row: number; column: string };

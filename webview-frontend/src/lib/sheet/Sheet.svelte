@@ -6,6 +6,7 @@
         columnLetterToIndex,
         parseSvarID,
         REF_COLORS,
+        FORMULA_FUNCTION_COLOR,
         setSheetSharedState,
         type CellData,
         type CellFormatting,
@@ -495,7 +496,8 @@
 
         let html = editorInput.replace(
             function_names_regex,
-            (m) => `<span class="formula-fn-name">${m}</span>`,
+            (m) =>
+                `<span class="formula-fn-name" style="--formula-fn-color:${FORMULA_FUNCTION_COLOR}">${m}</span>`,
         );
         let refIndex = 0;
         html = html.replace(

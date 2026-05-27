@@ -99,6 +99,9 @@ impl fmt::Display for Token<'_> {
 
 type Spanned<T> = chumsky::span::Spanned<T, SimpleSpan>;
 
+// todo: refactor?
+const BUILTINS: &[&str] = &["sum", "avg", "min", "max", "count", "if"];
+
 // --- Error utilities ---
 
 fn build_report(title: &str, src: &str, span: std::ops::Range<usize>, message: String) -> String {
@@ -130,6 +133,28 @@ fn format_parsing_error(src: &str, span: std::ops::Range<usize>, msg: &str) -> S
     build_report("Parsing error:", src, span, msg.to_string())
 }
 
+fn uppercase_builtin_message(src: &str, paren: usize) -> Option<(std::ops::Range<usize>, String)> {
+    if src.as_bytes().get(paren) != Some(&b'(') {
+        return None;
+    }
+
+    let mut start = paren;
+    while start > 0 && src.as_bytes()[start - 1].is_ascii_alphabetic() {
+        start -= 1;
+    }
+
+    let name = &src[start..paren];
+    let lowercase_name = name.to_ascii_lowercase();
+    if lowercase_name == name || !BUILTINS.contains(&lowercase_name.as_str()) {
+        return None;
+    }
+
+    Some((
+        start + 1..paren + 1,
+        format!("Unknown function, did you mean '{lowercase_name}'? (All functions in Tonic are lowercase)"),
+    ))
+}
+
 pub fn format_lex_error(src: &str, err: &Rich<'_, char>) -> String {
     let s = err.span().into_range();
     format_parsing_error(src, s.start + 1..s.end + 1, &err.to_string())
@@ -137,6 +162,9 @@ pub fn format_lex_error(src: &str, err: &Rich<'_, char>) -> String {
 
 pub fn format_parse_error<'src>(src: &str, err: &Rich<'_, Token<'src>>) -> String {
     let s = err.span().into_range();
+    if let Some((span, message)) = uppercase_builtin_message(src, s.start) {
+        return format_parsing_error(src, span, &message);
+    }
     format_parsing_error(src, s.start + 1..s.end + 1, &err.to_string())
 }
 
@@ -504,6 +532,14 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
                                 Expr::If(args[0], args[1], args[2])
                             }
                             _ => {
+                                let lowercase_name = name.to_ascii_lowercase();
+                                // help users who typed uppercase functions instead of lowercase (SUM, AVG, etc).
+                                if lowercase_name != name && BUILTINS.contains(&lowercase_name.as_str()) {
+                                    return Err(Rich::custom(
+                                        span,
+                                        format!("Unknown function, did you mean '{lowercase_name}'? (All functions in Tonic are lowercase)"),
+                                    ));
+                                }
                                 // look up user-registered JS function
                                 let func_id =
                                     st.names.user_function_names.get(name).ok_or_else(|| {
@@ -518,7 +554,6 @@ fn create_formula_praser<'tokens, 'src: 'tokens>(
                     } else {
                         // todo: remove hardcode fix below.
                         // bare name: check if it's a known function missing parens
-                        const BUILTINS: &[&str] = &["sum", "avg", "min", "max", "count", "if"];
                         if BUILTINS.contains(&name)
                             || st.names.user_function_names.contains_key(name)
                         {
@@ -896,6 +931,21 @@ mod tests {
         }
     }
 
+    fn parse_error(src: &str) -> String {
+        let tokens = lex_formula(src).into_output().expect("lexer failed");
+        let mut names = SpreadsheetNames::new();
+        let mut state = FormulaState {
+            names: &mut names,
+            cell_id: GridCellId { col: 0, row: 0 },
+            current_table_id: None,
+            expr_arena: Vec::new(),
+            span_arena: Vec::new(),
+        };
+        let (_, errs) = parse_formula(&tokens, src.len(), &mut state);
+        assert!(!errs.is_empty(), "expected parse error");
+        format_parse_error(src, &errs[0])
+    }
+
     fn r(col: i32, row: i32) -> Reference {
         Reference::Single {
             sheet_id: 0,
@@ -1054,6 +1104,17 @@ mod tests {
             ("sum(A1:B2)", vec![range.clone(), Expr::Sum(0)]),
             ("avg(A1:B2)", vec![range, Expr::Avg(0)]),
         ]);
+    }
+
+    #[test]
+    fn uppercase_builtin_function_suggests_lowercase() {
+        let error = parse_error("SUM(A1:B2)");
+        assert!(
+            error.contains(
+                "Unknown function, did you mean 'sum'? (All functions in Tonic are lowercase)"
+            ),
+            "{error}"
+        );
     }
 
     #[test]
