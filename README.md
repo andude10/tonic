@@ -27,3 +27,5 @@ or build from source:
 ### Implementation
 
 Tonic is a Tauri desktop program written in Rust. The frontend uses Svelte, and the grid is built on top of [SVAR](https://svar.dev/svelte/datagrid/). The backend implements the spreadsheet engine, including the [TACO dependency graph](https://arxiv.org/pdf/2302.05482), parallel formula recalculation, undo/redo, etc.
+
+The algorithm behind the formula recalculation is described in the [blog post](https://kotow.dev/posts/parallel-formula-calculation-in-the-spreadsheet/). 
